@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   ArrowRight,
+  DoorOpen,
   GraduationCap,
   KeyRound,
   LogIn,
@@ -251,6 +252,7 @@ interface ClassroomAuthGateProps {
     studentId?: string,
   ) => Promise<StudentLoginResult | void>;
   onQuickPreviewRole?: (role: UserRole) => Promise<void>;
+  onOpenQuickLookup?: () => void;
 }
 
 export const ClassroomAuthGate: React.FC<ClassroomAuthGateProps> = ({
@@ -260,6 +262,7 @@ export const ClassroomAuthGate: React.FC<ClassroomAuthGateProps> = ({
   onStudentLogin,
   onSignInGmail,
   onQuickPreviewRole,
+  onOpenQuickLookup,
 }) => {
   const [audience, setAudience] = useState<'STUDENT' | 'TEACHER'>('STUDENT');
   const [studentMethod, setStudentMethod] = useState<'STUDENT_CODE' | 'PARENT_PHONE' | 'GMAIL'>('STUDENT_CODE');
@@ -409,6 +412,30 @@ export const ClassroomAuthGate: React.FC<ClassroomAuthGateProps> = ({
             </button>
           </div>
         </div>
+
+        {onOpenQuickLookup && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-xl bg-amber-50/70 border border-amber-200/80">
+            <div className="flex items-start gap-2.5">
+              <DoorOpen className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="text-xs">
+                <p className="font-bold text-slate-900">
+                  Sắp tới giờ học — Cần biết ngay Phòng học &amp; Giáo viên?
+                </p>
+                <p className="text-slate-600 mt-0.5">
+                  Chỉ cần nhập Mã số học sinh để xem ca học, số phòng và thầy cô phụ trách trong 3 giây (không lộ thông tin cá nhân).
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenQuickLookup}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <DoorOpen className="w-3.5 h-3.5" />
+              <span>Vào lớp nhanh (3 giây)</span>
+            </button>
+          </div>
+        )}
 
         {errorMsg && (
           <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 leading-relaxed">

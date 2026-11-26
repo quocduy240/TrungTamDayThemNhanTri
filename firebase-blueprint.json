@@ -380,11 +380,85 @@
         "createdAt": { "type": "string", "maxLength": 40 },
         "title": { "type": "string", "minLength": 2, "maxLength": 180 },
         "body": { "type": "string", "minLength": 2, "maxLength": 600 },
-        "channel": { "type": "string", "enum": ["APP", "ZALO", "EMAIL"] },
+        "channel": { "type": "string", "enum": ["APP", "ZALO", "EMAIL", "FACEBOOK"] },
         "targetRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT", "ALL"] },
         "read": { "type": "boolean" }
       },
       "required": ["id", "createdAt", "title", "body", "channel", "targetRole", "read"]
+    },
+    "SocialChannel": {
+      "title": "SocialChannel",
+      "description": "Official social media channel configuration (Facebook, YouTube, TikTok, Zalo).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "platform": { "type": "string", "enum": ["FACEBOOK", "YOUTUBE", "TIKTOK", "ZALO"] },
+        "label": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "handle": { "type": "string", "maxLength": 120 },
+        "url": { "type": "string", "minLength": 4, "maxLength": 400 },
+        "youtubeChannelId": { "type": "string", "maxLength": 120 },
+        "active": { "type": "boolean" },
+        "autoSyncEnabled": { "type": "boolean" },
+        "lastSyncedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "platform", "label", "url", "active"]
+    },
+    "SocialPost": {
+      "title": "SocialPost",
+      "description": "Editorial activity library post synced from YouTube/TikTok/Facebook/Zalo.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "platform": { "type": "string", "enum": ["FACEBOOK", "YOUTUBE", "TIKTOK", "ZALO"] },
+        "mediaType": { "type": "string", "enum": ["VIDEO", "PHOTO", "POST"] },
+        "title": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "excerpt": { "type": "string", "maxLength": 600 },
+        "thumbnailUrl": { "type": "string", "maxLength": 500 },
+        "sourceUrl": { "type": "string", "minLength": 4, "maxLength": 500 },
+        "embedUrl": { "type": "string", "maxLength": 500 },
+        "publishedAt": { "type": "string", "maxLength": 40 },
+        "category": { "type": "string", "maxLength": 80 },
+        "viewCount": { "type": "number" },
+        "featured": { "type": "boolean" },
+        "visible": { "type": "boolean" }
+      },
+      "required": ["id", "platform", "mediaType", "title", "sourceUrl", "publishedAt", "viewCount", "featured", "visible"]
+    },
+    "NotificationConfig": {
+      "title": "NotificationConfig",
+      "description": "Admin-managed 10-minute pre-class reminder channels and webhook settings.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "leadMinutes": { "type": "number" },
+        "channelsEnabled": { "type": "object" },
+        "zaloWebhookUrl": { "type": "string", "maxLength": 400 },
+        "zaloOaId": { "type": "string", "maxLength": 120 },
+        "emailWebhookUrl": { "type": "string", "maxLength": 400 },
+        "facebookWebhookUrl": { "type": "string", "maxLength": 400 },
+        "unifiedWebhookUrl": { "type": "string", "maxLength": 400 },
+        "messageTemplate": { "type": "string", "maxLength": 400 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "leadMinutes", "channelsEnabled", "messageTemplate"]
+    },
+    "NotificationPref": {
+      "title": "NotificationPref",
+      "description": "Per-user pre-class reminder preferences across Web, Zalo, Email, and Facebook.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT"] },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "enabled": { "type": "boolean" },
+        "leadMinutes": { "type": "number" },
+        "channels": { "type": "object" },
+        "zaloPhone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "facebookPsid": { "type": "string", "maxLength": 120 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["userId", "role", "enabled", "leadMinutes", "channels"]
     }
   },
   "firestore": {
@@ -454,7 +528,23 @@
     },
     "/notifications/{notifId}": {
       "schema": { "$ref": "#/entities/AppNotification" },
-      "description": "Real-time notifications across App, Zalo, and Email."
+      "description": "Real-time notifications across App, Zalo, Email, and Facebook."
+    },
+    "/social_channels/{channelId}": {
+      "schema": { "$ref": "#/entities/SocialChannel" },
+      "description": "Official center social channels editable by Manager, Admin, and SuperAdmin."
+    },
+    "/social_posts/{postId}": {
+      "schema": { "$ref": "#/entities/SocialPost" },
+      "description": "Publicly readable activity library posts managed by Manager, Admin, and SuperAdmin."
+    },
+    "/notification_config/{configId}": {
+      "schema": { "$ref": "#/entities/NotificationConfig" },
+      "description": "Admin-only 10-minute reminder webhook and channel configuration."
+    },
+    "/notification_prefs/{uid}": {
+      "schema": { "$ref": "#/entities/NotificationPref" },
+      "description": "Per-user reminder opt-in settings isolated to the owning user or Admin."
     }
   }
 }

@@ -10,13 +10,23 @@ import {
 } from 'recharts';
 import { ArrowRight, Calendar, FileCheck2, GraduationCap, Wallet } from 'lucide-react';
 import { formatVnd, type WorkspacePayload } from '../lib/api';
+import { QuickClassBanner } from './QuickClassHub';
 
 interface CmsOverviewProps {
   workspace: WorkspacePayload;
   onNavigate: (tab: string) => void;
+  onJumpToAttendance?: (centerClass: string, shiftLabel: string) => void;
+  onOpenNotificationPrefs?: () => void;
+  onRefresh?: () => Promise<void>;
 }
 
-export const CmsOverview: React.FC<CmsOverviewProps> = ({ workspace, onNavigate }) => {
+export const CmsOverview: React.FC<CmsOverviewProps> = ({
+  workspace,
+  onNavigate,
+  onJumpToAttendance,
+  onOpenNotificationPrefs,
+  onRefresh,
+}) => {
   const stats = useMemo(() => {
     const activeStudents = workspace.students.filter((s) => s.status === 'ACTIVE').length;
     const avgScore =
@@ -90,6 +100,24 @@ export const CmsOverview: React.FC<CmsOverviewProps> = ({ workspace, onNavigate 
           </button>
         </div>
       </div>
+
+      {/* Live Quick Class Entry Banner for Teachers & Students */}
+      {(workspace.user.role === 'TEACHER' || workspace.user.role === 'STUDENT') && (
+        <QuickClassBanner
+          compact
+          user={workspace.user}
+          timetable={workspace.timetable}
+          students={workspace.students}
+          checkins={workspace.classCheckins || []}
+          leadMinutes={workspace.myNotificationPref?.leadMinutes ?? workspace.notificationConfig?.leadMinutes ?? 10}
+          onCheckedIn={() => {
+            onRefresh?.();
+          }}
+          onOpenExamForSubject={() => onNavigate('exams')}
+          onJumpToAttendance={onJumpToAttendance}
+          onOpenNotificationPrefs={onOpenNotificationPrefs}
+        />
+      )}
 
       {/* KPI Strip — Flat 1px hairline containers, tabular numerals */}
       <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">

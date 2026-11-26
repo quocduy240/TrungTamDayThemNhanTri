@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Copy,
@@ -26,6 +26,8 @@ import { compressImageFile } from '../lib/imageOptimizer';
 interface StudentsAttendanceModuleProps {
   workspace: WorkspacePayload;
   onRefresh: () => Promise<void>;
+  initialClassFilter?: string;
+  initialShiftLabel?: string;
 }
 
 interface PreviewRow {
@@ -80,10 +82,13 @@ function parseDelimitedText(text: string): Record<string, string>[] {
 export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> = ({
   workspace,
   onRefresh,
+  initialClassFilter,
+  initialShiftLabel,
 }) => {
   const isStaff =
     workspace.user.role === 'SUPER_ADMIN' ||
     workspace.user.role === 'ADMIN' ||
+    workspace.user.role === 'MANAGER' ||
     workspace.user.role === 'TEACHER';
   const isAdmin =
     workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
@@ -91,11 +96,21 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
     workspace.authPolicy?.minGradeForPersonalGmail ??
     DEFAULT_AUTH_POLICY.minGradeForPersonalGmail;
 
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(initialClassFilter || '');
   const [gradeFilter, setGradeFilter] = useState<'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3'>('ALL');
-  const [shiftLabel, setShiftLabel] = useState('Chiều Ca 2 (15:15–16:45)');
+  const [shiftLabel, setShiftLabel] = useState(initialShiftLabel || 'Chiều Ca 2 (15:15–16:45)');
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  useEffect(() => {
+    if (initialClassFilter) {
+      setSearch(initialClassFilter);
+      setGradeFilter('ALL');
+    }
+    if (initialShiftLabel) {
+      setShiftLabel(initialShiftLabel);
+    }
+  }, [initialClassFilter, initialShiftLabel]);
 
   // Per-Student Identity & Access Binding Modal (Admin / SuperAdmin)
   const [editingAccessStudent, setEditingAccessStudent] = useState<StudentRecord | null>(null);

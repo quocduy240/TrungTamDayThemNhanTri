@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
+  BellRing,
   BookOpen,
   Calendar,
   Check,
@@ -8,6 +9,7 @@ import {
   ChevronRight,
   Copy,
   CreditCard,
+  DoorOpen,
   Download,
   ExternalLink,
   FileBarChart2,
@@ -56,6 +58,9 @@ import {
   ParentAuthGate,
   type StudentLoginResult,
 } from './PortalAuthGates';
+import { QuickClassBanner, QuickClassLookupModal } from './QuickClassHub';
+import { SocialActivityLibrary } from './SocialActivityLibrary';
+import { ShareMenu } from './ShareMenu';
 
 interface FrontendPortalProps {
   bootstrap: BootstrapPayload;
@@ -91,6 +96,8 @@ interface FrontendPortalProps {
   onLogout: () => Promise<void>;
   onOpenRoleModal: () => void;
   onOpenCms: (tab?: string) => void;
+  onOpenNotificationPrefs?: () => void;
+  onJumpToAttendance?: (centerClass: string, shiftLabel: string) => void;
   authBusy: boolean;
 }
 
@@ -181,9 +188,12 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   onLogout,
   onOpenRoleModal,
   onOpenCms,
+  onOpenNotificationPrefs,
+  onJumpToAttendance,
   authBusy,
 }) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [showQuickLookup, setShowQuickLookup] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const canInlineEdit = isAdminOrSuper(currentUser?.role);
@@ -616,96 +626,13 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     siteConfig.facebookUrl ||
     bootstrap.center.facebookUrl ||
     'https://www.facebook.com/people/Trung-t%C3%A2m-d%E1%BA%A1y-th%C3%AAm-Nh%C3%A2n-Tr%C3%AD/61586568261774/';
-  const fanpagePosts = bootstrap.fanpagePosts || [];
+  const socialChannels = workspace?.socialChannels || bootstrap.socialChannels || [];
+  const socialPosts = workspace?.socialPosts || bootstrap.socialPosts || [];
 
-  const fanpageFeedSection = fanpagePosts.length > 0 && (
-    <section id="fanpage-nhantri" className="bg-white border-t border-slate-200 py-14">
-      <div className="max-w-7xl mx-auto px-6 space-y-8">
-        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
-          <div className="space-y-1">
-            <p className="text-xs font-semibold text-blue-900">
-              Cập nhật chính thức từ Fanpage Trung tâm dạy thêm Nhân Trí · 35 Lý Thường Kiệt
-            </p>
-            <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-950">
-              Bảng Tin &amp; Video Hoạt Động Thực Tế Từ Fanpage Nhân Trí
-            </h2>
-          </div>
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            <a
-              href={fanpageUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap"
-            >
-              <span>Mở Fanpage Facebook</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-            <a
-              href={siteConfig.zaloUrl || `https://zalo.me/${hotlineDigits}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors whitespace-nowrap"
-            >
-              <Phone className="w-3.5 h-3.5 text-blue-900" />
-              <span>Zalo / Gọi {siteConfig.hotlineZalo}</span>
-            </a>
-          </div>
-        </div>
-
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {fanpagePosts.map((post, idx) => (
-            <a
-              key={post.id}
-              href={post.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`group flex flex-col justify-between bg-white border border-slate-200 hover:border-blue-400 rounded-xl overflow-hidden transition-colors ${
-                idx === 0 ? 'lg:col-span-2' : ''
-              }`}
-            >
-              <div>
-                <div
-                  className={`relative bg-slate-100 overflow-hidden border-b border-slate-100 ${
-                    idx === 0 ? 'aspect-[21/9]' : 'aspect-[16/9]'
-                  }`}
-                >
-                  <img
-                    src={normalizeAssetUrl(post.thumbnailUrl)}
-                    alt={post.title}
-                    loading="lazy"
-                    decoding="async"
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
-                  />
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/75 via-slate-950/25 to-transparent px-4 py-3 flex items-center justify-between text-[11px] text-white">
-                    <span className="font-semibold flex items-center gap-1.5">
-                      {post.type === 'REEL' && <Play className="w-3 h-3 fill-white" />}
-                      <span>
-                        {post.type === 'REEL' ? 'Facebook Reel' : 'Bài viết Fanpage'} · {post.tagLabel}
-                      </span>
-                    </span>
-                    <span className="font-mono-num text-slate-200">
-                      {post.date}
-                      {post.viewsLabel ? ` · ${post.viewsLabel}` : ''}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="p-5 space-y-2">
-                  <h3 className="text-base font-bold text-slate-950 group-hover:text-blue-900 transition-colors leading-snug">
-                    {post.title}
-                  </h3>
-                  <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">{post.summary}</p>
-                </div>
-              </div>
-
-              <div className="px-5 pb-4 pt-2 flex items-center justify-between text-xs font-semibold text-blue-900">
-                <span>{post.type === 'REEL' ? 'Xem video Reel trên Facebook' : 'Xem chi tiết trên Fanpage'}</span>
-                <ExternalLink className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5" />
-              </div>
-            </a>
-          ))}
-        </div>
+  const fanpageFeedSection = (
+    <section id="hoat-dong-nhantri" className="bg-white border-t border-slate-200 py-14">
+      <div className="max-w-7xl mx-auto px-6">
+        <SocialActivityLibrary channels={socialChannels} posts={socialPosts} />
       </div>
     </section>
   );
@@ -898,6 +825,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               onStudentLogin={onStudentLogin}
               onSignInGmail={onSignInGmail}
               onQuickPreviewRole={onQuickPreviewRole}
+              onOpenQuickLookup={() => setShowQuickLookup(true)}
             />
           ) : (
             <>
@@ -918,16 +846,57 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                         </span>
                       )}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onLogout()}
-                      className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>Đổi tài khoản / Đăng xuất</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-3">
+                      {onOpenNotificationPrefs && (
+                        <button
+                          type="button"
+                          onClick={onOpenNotificationPrefs}
+                          className="inline-flex items-center gap-1 font-semibold text-amber-800 hover:text-amber-950 hover:underline cursor-pointer whitespace-nowrap"
+                        >
+                          <BellRing className="w-3.5 h-3.5" />
+                          <span>Cài đặt nhắc trước 10 phút</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onLogout()}
+                        className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Đổi tài khoản / Đăng xuất</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
+              )}
+
+              {/* Live Quick Class Entry Banner (Auto-surfaced for logged-in Student / Teacher) */}
+              {currentUser && workspace && (
+                <section className="bg-white border-b border-slate-200">
+                  <div className="max-w-7xl mx-auto px-6 py-5">
+                    <QuickClassBanner
+                      user={currentUser}
+                      timetable={liveTimetable}
+                      students={workspace.students}
+                      checkins={workspace.classCheckins || []}
+                      leadMinutes={
+                        workspace.myNotificationPref?.leadMinutes ??
+                        bootstrap.notificationLeadMinutes ??
+                        10
+                      }
+                      onCheckedIn={() => {
+                        onRefreshWorkspace?.();
+                      }}
+                      onOpenExamForSubject={() => {
+                        document
+                          .getElementById('luyen-de-gdpt')
+                          ?.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      onJumpToAttendance={onJumpToAttendance}
+                      onOpenNotificationPrefs={onOpenNotificationPrefs}
+                    />
+                  </div>
+                </section>
               )}
 
               {/* Compact Academic Hero */}
@@ -1388,14 +1357,26 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                         </span>
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onLogout()}
-                      className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>Đăng xuất</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-3">
+                      {onOpenNotificationPrefs && (
+                        <button
+                          type="button"
+                          onClick={onOpenNotificationPrefs}
+                          className="inline-flex items-center gap-1 font-semibold text-amber-800 hover:text-amber-950 hover:underline cursor-pointer whitespace-nowrap"
+                        >
+                          <BellRing className="w-3.5 h-3.5" />
+                          <span>Cài đặt nhắc lịch 10 phút</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => onLogout()}
+                        className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Đăng xuất</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Search, Multi-Child Switcher & Parent Link Code Bar */}
@@ -1959,20 +1940,34 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
       {/* ===================================================================== */}
       {frontendMode === 'NEW_CUSTOMER' && (
         <main>
-          {/* Hero Split */}
-          <section id="top" className="bg-slate-50 border-b border-slate-200">
+          {/* Hero Split — Modern Academic Blue (#1E3A8A) + Warm Amber (#D97706) */}
+          <section
+            id="top"
+            className="bg-gradient-to-b from-amber-50/40 via-slate-50 to-white border-b border-slate-200"
+          >
             <div className="max-w-7xl mx-auto px-6 py-12 lg:py-16">
               <div className="grid lg:grid-cols-12 gap-10 items-stretch">
                 <div className="lg:col-span-6 flex flex-col justify-between space-y-6">
                   <div className="space-y-4">
-                    <div className="flex flex-wrap items-center gap-2.5 text-xs font-medium text-slate-500">
-                      <InlineEditable
-                        value={siteConfig.campus1}
-                        editMode={isEditingActive}
-                        onSave={(val) => onQuickSaveConfig({ campus1: val })}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-medium text-slate-500">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <InlineEditable
+                          value={siteConfig.campus1}
+                          editMode={isEditingActive}
+                          onSave={(val) => onQuickSaveConfig({ campus1: val })}
+                        />
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono-num text-blue-900 font-semibold">
+                          {siteConfig.domain}
+                        </span>
+                      </div>
+                      <ShareMenu
+                        title={siteConfig.centerName}
+                        text={siteConfig.heroSubtitleCustomer}
+                        label="Chia sẻ"
+                        size="sm"
+                        align="right"
                       />
-                      <span aria-hidden="true">·</span>
-                      <span className="font-mono-num text-blue-900 font-semibold">{siteConfig.domain}</span>
                     </div>
 
                     <InlineEditable
@@ -1993,18 +1988,26 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     />
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <div className="flex flex-wrap items-center gap-2.5 pt-2">
                     <a
                       href="#khoa-hoc"
-                      className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-white bg-blue-900 rounded-lg hover:bg-blue-800 transition-colors"
+                      className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-white bg-blue-900 rounded-lg hover:bg-blue-800 transition-colors whitespace-nowrap"
                     >
                       <span>Xem khóa học &amp; học phí</span>
                       <ArrowRight className="w-4 h-4" />
                     </a>
                     <button
                       type="button"
+                      onClick={() => setShowQuickLookup(true)}
+                      className="inline-flex items-center gap-2 px-4 py-3 text-sm font-semibold text-amber-950 bg-amber-100/90 hover:bg-amber-200/80 border border-amber-300 rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <DoorOpen className="w-4 h-4 text-amber-700" />
+                      <span>Vào lớp nhanh (Tra Mã HS)</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => onChangeFrontendMode('PARENT')}
-                      className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold text-slate-900 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-2 px-4 py-3 text-sm font-semibold text-slate-900 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer whitespace-nowrap"
                     >
                       <span>Cổng Phụ huynh</span>
                     </button>
@@ -2061,11 +2064,11 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   <p className="text-xs text-slate-600 mt-1">Thạc sĩ, Cử nhân tận tâm đứng lớp</p>
                 </div>
                 <div>
-                  <p className="font-mono-num text-2xl font-bold text-blue-950">6 Ca / ngày</p>
-                  <p className="text-xs text-slate-600 mt-1">Sáng · Chiều · Tối đồng bộ lịch Thể dục</p>
+                  <p className="font-mono-num text-2xl font-bold text-emerald-700">Nhắc trước 10p</p>
+                  <p className="text-xs text-slate-600 mt-1">Tự báo ca học &amp; phòng qua Web · Zalo · Email</p>
                 </div>
                 <div>
-                  <p className="font-mono-num text-2xl font-bold text-red-700">
+                  <p className="font-mono-num text-2xl font-bold text-amber-700">
                     -{siteConfig.annualDiscountPercent}% Học phí
                   </p>
                   <p className="text-xs text-slate-600 mt-1">Ưu đãi khi đóng trước nguyên năm học</p>
@@ -2549,17 +2552,29 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               {siteConfig.campus1} · {siteConfig.campus2}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-5 text-xs">
+          <div className="flex flex-wrap items-center gap-4 text-xs">
             <span className="font-mono-num font-semibold text-blue-900">{siteConfig.domain}</span>
-            <a
-              href={fanpageUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 font-semibold text-blue-900 hover:underline"
-            >
-              <span>Fanpage Facebook</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
+            {(socialChannels.length > 0
+              ? socialChannels.filter((c) => c.active)
+              : [
+                  {
+                    platform: 'FACEBOOK',
+                    label: 'Fanpage Facebook',
+                    url: fanpageUrl,
+                  },
+                ]
+            ).map((ch) => (
+              <a
+                key={ch.platform}
+                href={ch.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 font-semibold text-blue-900 hover:underline whitespace-nowrap"
+              >
+                <span>{ch.platform === 'FACEBOOK' ? 'Facebook' : ch.platform === 'YOUTUBE' ? 'YouTube' : ch.platform === 'TIKTOK' ? 'TikTok' : 'Zalo OA'}</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            ))}
             <span>
               Zalo:{' '}
               <InlineEditable
@@ -2577,6 +2592,13 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                 onSave={(val) => onQuickSaveConfig({ contactEmail: val })}
               />
             </span>
+            <ShareMenu
+              title={siteConfig.centerName}
+              text={siteConfig.heroSubtitleCustomer}
+              label="Chia sẻ trang"
+              size="sm"
+              align="right"
+            />
           </div>
         </div>
       </footer>
@@ -2771,6 +2793,16 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
           </div>
         </div>
       )}
+
+      {/* 3-Second Student Code Quick Class Lookup Modal */}
+      <QuickClassLookupModal
+        open={showQuickLookup}
+        onClose={() => setShowQuickLookup(false)}
+        onProceedToLogin={() => {
+          setShowQuickLookup(false);
+          onChangeFrontendMode('TEACHER_STUDENT');
+        }}
+      />
     </div>
   );
 };

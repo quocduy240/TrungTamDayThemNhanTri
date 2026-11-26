@@ -27,12 +27,29 @@ import {
   findFamilyForStudent,
   getStudentsInFamily,
 } from '../src/lib/tuitionCalculator.ts';
+import {
+  computeQuickClassSnapshot,
+  getVietnamClock,
+} from '../src/lib/quickClassEngine.ts';
+import {
+  DEFAULT_FALLBACK_THUMBNAIL,
+  fetchSocialUrlMetadata,
+  fetchYouTubeChannelRssPosts,
+  validateSocialUrl,
+} from '../src/lib/socialFetcher.ts';
+import {
+  dispatchUpcomingReminders,
+  getOrBuildUserNotificationPref,
+  resolvePrefKey,
+  validateWebhookUrl,
+} from '../src/lib/reminderDispatcher.ts';
 import type {
   AccessAuditLog,
   AttendanceRecord,
   AuthPolicy,
   AuthUser,
   BillingCycle,
+  ClassCheckInRecord,
   DatabaseState,
   DayOfWeek,
   FamilyProfile,
@@ -41,12 +58,16 @@ import type {
   ScoreRecord,
   SessionPeriod,
   ShiftCode,
+  SocialActivityPost,
+  SocialMediaType,
+  SocialPlatform,
   Student,
   Teacher,
   TeacherGroup,
   TeacherLeave,
   TimetableSlot,
   TuitionRecord,
+  UserNotificationPreference,
   UserRole,
 } from '../src/types.ts';
 
@@ -309,6 +330,24 @@ function normalizeWorkerState(parsed: DatabaseState): DatabaseState {
     availability:
       Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
   }));
+  if (!Array.isArray(parsed.socialChannels) || parsed.socialChannels.length === 0) {
+    parsed.socialChannels = structuredClone(INITIAL_DB.socialChannels);
+  }
+  if (!Array.isArray(parsed.socialPosts)) {
+    parsed.socialPosts = structuredClone(INITIAL_DB.socialPosts);
+  }
+  if (!parsed.notificationConfig) {
+    parsed.notificationConfig = structuredClone(INITIAL_DB.notificationConfig);
+  }
+  if (!Array.isArray(parsed.notificationPrefs)) {
+    parsed.notificationPrefs = structuredClone(INITIAL_DB.notificationPrefs);
+  }
+  if (!Array.isArray(parsed.classCheckins)) {
+    parsed.classCheckins = structuredClone(INITIAL_DB.classCheckins);
+  }
+  if (!Array.isArray(parsed.reminderDispatchLogs)) {
+    parsed.reminderDispatchLogs = structuredClone(INITIAL_DB.reminderDispatchLogs);
+  }
   return parsed;
 }
 
@@ -641,6 +680,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         usingEnvPasscode: hasEnvPass,
       },
       authPolicy: getPolicy(db),
+      socialChannels: (db.socialChannels || []).filter((c) => c.active),
+      socialPosts: (db.socialPosts || []).filter((p) => p.visible),
+      notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
     });
   }
 
@@ -1251,6 +1293,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           isTeacherUser && t.id === user!.linkedTeacherId ? t : { ...t, phone: '', email: undefined },
         );
 
+    const todayVn = getVietnamClock().isoDate;
+    const scopedCheckins = (db.classCheckins || []).filter((c) => {
+      if (c.date !== todayVn) return false;
+      if (isStaff) return true;
+      return c.actorId === user!.id || (user!.linkedStudentId && c.actorId === user!.linkedStudentId);
+    });
+
     return json({
       user,
       rooms: db.rooms,
@@ -1282,6 +1331,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       ),
       authPolicy: getPolicy(db),
       auditLogs: isAdminUser ? (db.auditLogs || []) : [],
+      socialChannels: db.socialChannels || [],
+      socialPosts: isManagerUser ? (db.socialPosts || []) : (db.socialPosts || []).filter((p) => p.visible),
+      notificationConfig: isAdminUser ? db.notificationConfig : undefined,
+      myNotificationPref: getOrBuildUserNotificationPref(db, user!),
+      classCheckins: scopedCheckins,
+      reminderDispatchLogs: isAdminUser ? (db.reminderDispatchLogs || []) : [],
     });
   }
 
@@ -2626,8 +2681,430 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     return json({
       sql: CLOUDFLARE_D1_SCHEMA_SQL,
       workerNotes:
-        'Cloudflare Worker (worker/index.ts) và Pages Functions (functions/api/[[path]].ts) đã sẵn sàng. Hỗ trợ tự động lưu Cloudflare D1 (binding DB), KV (NHANTRI_KV) hoặc chạy tức thì không cần cấu hình thêm.',
+        'Cloudflare Worker (worker/index.ts) và Pages Functions (functions/api/[[path]].ts) đã sẵn sàng. Hỗ trợ tự động lưu Cloudflare D1 (binding DB), KV (NHANTRI_KV) và Cron Trigger nhắc lịch 10 phút.',
     });
+  }
+
+  // 10b. QUICK CLASS JUMP ("VÀO LỚP NHANH")
+  if (method === 'GET' && pathname === '/api/v1/quick-class/lookup') {
+    if (isWorkerRateLimited(request, 'quick-lookup', 30, 60_000)) {
+      return json({ error: 'Bạn tra cứu quá nhanh. Vui lòng thử lại sau ít giây.' }, 429);
+    }
+    const rawCode = String(url.searchParams.get('code') || '').trim().toUpperCase();
+    if (rawCode.length < 3) {
+      return json({ error: 'Vui lòng nhập Mã số học sinh (VD: NT-6A1-01 hoặc NT6A1H).' }, 400);
+    }
+    const db = await loadState(env);
+    const student = db.students.find(
+      (s) =>
+        s.accessStatus !== 'LOCKED' &&
+        (s.code.trim().toUpperCase() === rawCode ||
+          (s.parentLinkCode && s.parentLinkCode.trim().toUpperCase() === rawCode)),
+    );
+    if (!student) {
+      return json({ error: 'Không tìm thấy Mã học sinh phù hợp. Vui lòng kiểm tra lại thẻ học viên hoặc hỏi Giáo viên.' }, 404);
+    }
+    const snapshot = computeQuickClassSnapshot(db.timetable, { role: 'STUDENT', students: [student] });
+    const nameParts = student.fullName.trim().split(/\s+/);
+    const studentShortName = nameParts.length >= 2 ? nameParts.slice(-2).join(' ') : student.fullName;
+    return json({
+      studentCode: student.code,
+      studentShortName,
+      centerClass: student.centerClass,
+      grade: student.grade,
+      snapshot,
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/quick-class/checkin') {
+    const denied = requireRole();
+    if (denied) return denied;
+    const b = await readJson<{ slotId?: string }>();
+    const slotId = String(b.slotId || '').trim();
+    if (!slotId) return json({ error: 'Thiếu mã ca học để xác nhận vào lớp.' }, 400);
+    const db = await loadState(env);
+    const slot = db.timetable.find((s) => s.id === slotId);
+    if (!slot) return json({ error: 'Không tìm thấy ca học này trong Thời khóa biểu.' }, 404);
+    if (!Array.isArray(db.classCheckins)) db.classCheckins = [];
+    const clock = getVietnamClock();
+    const actorId =
+      user!.role === 'STUDENT' && user!.linkedStudentId
+        ? user!.linkedStudentId
+        : user!.role === 'TEACHER' && user!.linkedTeacherId
+          ? user!.linkedTeacherId
+          : user!.id;
+    const existing = db.classCheckins.find(
+      (c) => c.date === clock.isoDate && c.slotId === slot.id && c.actorId === actorId,
+    );
+    if (existing) return json({ checkin: existing, alreadyCheckedIn: true });
+
+    const record: ClassCheckInRecord = {
+      id: `chk-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      date: clock.isoDate,
+      slotId: slot.id,
+      actorRole: user!.role === 'STUDENT' ? 'STUDENT' : 'TEACHER',
+      actorId,
+      actorName: user!.name,
+      centerClass: slot.centerClass,
+      room: slot.room,
+      checkedInAt: nowFormatted(),
+    };
+    db.classCheckins.unshift(record);
+    if (db.classCheckins.length > 300) db.classCheckins = db.classCheckins.slice(0, 300);
+
+    if (user!.role === 'STUDENT' && user!.linkedStudentId) {
+      const st = db.students.find((s) => s.id === user!.linkedStudentId);
+      if (st) {
+        const shiftLabel = `${slot.period === 'SANG' ? 'Sáng' : slot.period === 'CHIEU' ? 'Chiều' : 'Tối'} ${slot.shift === 'CA_1' ? 'Ca 1' : 'Ca 2'} (${slot.timeRange})`;
+        const alreadyAtt = db.attendance.find(
+          (a) => a.date === clock.isoDate && a.studentId === st.id && a.shiftLabel === shiftLabel,
+        );
+        if (!alreadyAtt) {
+          db.attendance.unshift({
+            id: `att-chk-${Date.now()}`,
+            date: clock.isoDate,
+            studentId: st.id,
+            studentName: st.fullName,
+            centerClass: st.centerClass,
+            shiftLabel,
+            status: 'PRESENT',
+            note: `Học sinh tự check-in Vào lớp nhanh · ${slot.room} (${slot.subject})`,
+            parentNotified: true,
+          });
+        }
+      }
+    }
+    await saveState(env, db);
+    return json({ checkin: record, alreadyCheckedIn: false }, 201);
+  }
+
+  // 10c. NOTIFICATION PREFERENCES & 10-MINUTE DISPATCHER
+  if (method === 'GET' && pathname === '/api/v1/me/notification-prefs') {
+    const denied = requireRole();
+    if (denied) return denied;
+    const db = await loadState(env);
+    return json({ preference: getOrBuildUserNotificationPref(db, user!) });
+  }
+
+  if (method === 'PUT' && pathname === '/api/v1/me/notification-prefs') {
+    const denied = requireRole();
+    if (denied) return denied;
+    const db = await loadState(env);
+    const current = getOrBuildUserNotificationPref(db, user!);
+    const b = await readJson<Record<string, unknown>>();
+    const rawChannels = (b.channels || {}) as Record<string, unknown>;
+    const lead = Number(b.leadMinutes);
+    const validLead = lead === 5 || lead === 10 || lead === 15 ? lead : current.leadMinutes || 10;
+
+    const updated: UserNotificationPreference = {
+      userId: resolvePrefKey(user!),
+      role: user!.role,
+      displayName: user!.name,
+      enabled: typeof b.enabled === 'boolean' ? b.enabled : current.enabled,
+      leadMinutes: validLead,
+      channels: {
+        WEB: typeof rawChannels.WEB === 'boolean' ? rawChannels.WEB : current.channels.WEB,
+        ZALO: typeof rawChannels.ZALO === 'boolean' ? rawChannels.ZALO : current.channels.ZALO,
+        EMAIL: typeof rawChannels.EMAIL === 'boolean' ? rawChannels.EMAIL : current.channels.EMAIL,
+        FACEBOOK:
+          typeof rawChannels.FACEBOOK === 'boolean' ? rawChannels.FACEBOOK : current.channels.FACEBOOK,
+      },
+      zaloPhone: typeof b.zaloPhone === 'string' ? b.zaloPhone.trim().slice(0, 30) : current.zaloPhone,
+      email: typeof b.email === 'string' ? b.email.trim().slice(0, 140) : current.email,
+      facebookPsid:
+        typeof b.facebookPsid === 'string' ? b.facebookPsid.trim().slice(0, 120) : current.facebookPsid,
+      updatedAt: nowFormatted(),
+    };
+    if (!Array.isArray(db.notificationPrefs)) db.notificationPrefs = [];
+    const idx = db.notificationPrefs.findIndex((p) => p.userId === updated.userId);
+    if (idx >= 0) db.notificationPrefs[idx] = updated;
+    else db.notificationPrefs.unshift(updated);
+    await saveState(env, db);
+    return json({ preference: updated });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/me/notification-prefs/test') {
+    const denied = requireRole();
+    if (denied) return denied;
+    const db = await loadState(env);
+    const pref = getOrBuildUserNotificationPref(db, user!);
+    const activeChannels = Object.entries(pref.channels)
+      .filter(([, v]) => Boolean(v))
+      .map(([k]) => k)
+      .join(', ');
+    const notif = {
+      id: `ntf-test-${Date.now()}`,
+      createdAt: nowFormatted(),
+      title: `Kiểm thử nhắc lịch trước ${pref.leadMinutes} phút`,
+      body: `Xin chào ${user!.name}! Kênh đang bật: ${activeChannels || 'WEB'}. Bạn sẽ nhận nhắc phòng học & giờ vào lớp tự động trước ${pref.leadMinutes} phút.`,
+      channel: 'APP' as const,
+      targetRole: user!.role,
+      read: false,
+    };
+    db.notifications.unshift(notif);
+    await saveState(env, db);
+    return json({ ok: true, notification: notif, preference: pref });
+  }
+
+  if (method === 'GET' && pathname === '/api/v1/system/notification-config') {
+    const denied = requireRole(['ADMIN']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    return json({
+      config: db.notificationConfig,
+      logs: db.reminderDispatchLogs || [],
+      subscriberCount: (db.notificationPrefs || []).filter((p) => p.enabled).length,
+    });
+  }
+
+  if (method === 'PATCH' && pathname === '/api/v1/system/notification-config') {
+    const denied = requireRole(['ADMIN']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<Record<string, unknown>>();
+    const curr = db.notificationConfig;
+    const urlFields: Array<
+      'zaloWebhookUrl' | 'emailWebhookUrl' | 'facebookWebhookUrl' | 'unifiedWebhookUrl'
+    > = ['zaloWebhookUrl', 'emailWebhookUrl', 'facebookWebhookUrl', 'unifiedWebhookUrl'];
+    const validatedUrls: Partial<Record<(typeof urlFields)[number], string>> = {};
+    for (const field of urlFields) {
+      if (typeof b[field] === 'string') {
+        const check = validateWebhookUrl(b[field] as string);
+        if (!check.ok) return json({ error: `${field}: ${check.error}` }, 400);
+        validatedUrls[field] = check.url || '';
+      }
+    }
+    const rawCh = (b.channelsEnabled || {}) as Record<string, unknown>;
+    const lead = Number(b.leadMinutes);
+    const leadMinutes = Number.isFinite(lead) ? Math.min(60, Math.max(5, Math.round(lead))) : curr.leadMinutes;
+    db.notificationConfig = {
+      ...curr,
+      leadMinutes,
+      channelsEnabled: {
+        WEB: typeof rawCh.WEB === 'boolean' ? rawCh.WEB : curr.channelsEnabled.WEB,
+        ZALO: typeof rawCh.ZALO === 'boolean' ? rawCh.ZALO : curr.channelsEnabled.ZALO,
+        EMAIL: typeof rawCh.EMAIL === 'boolean' ? rawCh.EMAIL : curr.channelsEnabled.EMAIL,
+        FACEBOOK:
+          typeof rawCh.FACEBOOK === 'boolean' ? rawCh.FACEBOOK : curr.channelsEnabled.FACEBOOK,
+      },
+      zaloOaId: typeof b.zaloOaId === 'string' ? b.zaloOaId.trim().slice(0, 100) : curr.zaloOaId,
+      zaloWebhookUrl: validatedUrls.zaloWebhookUrl ?? curr.zaloWebhookUrl,
+      emailWebhookUrl: validatedUrls.emailWebhookUrl ?? curr.emailWebhookUrl,
+      facebookWebhookUrl: validatedUrls.facebookWebhookUrl ?? curr.facebookWebhookUrl,
+      unifiedWebhookUrl: validatedUrls.unifiedWebhookUrl ?? curr.unifiedWebhookUrl,
+      messageTemplate:
+        typeof b.messageTemplate === 'string' && b.messageTemplate.trim().length >= 10
+          ? b.messageTemplate.trim().slice(0, 400)
+          : curr.messageTemplate,
+      updatedAt: nowFormatted(),
+    };
+    appendAuditLog(db, {
+      actorEmail: user!.email,
+      actorRole: user!.role,
+      action: 'POLICY_UPDATE',
+      targetLabel: 'Cấu hình Nhắc lịch 10 phút (Zalo/Email/Facebook)',
+      detail: `Nhắc trước ${db.notificationConfig.leadMinutes} phút.`,
+    });
+    await saveState(env, db);
+    return json({ config: db.notificationConfig });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/notifications/dispatch-upcoming') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const b = await readJson<{ forceSlotId?: string; dryRun?: boolean }>();
+    const db = await loadState(env);
+    const result = await dispatchUpcomingReminders(db, {
+      forceSlotId: typeof b.forceSlotId === 'string' ? b.forceSlotId.trim() || undefined : undefined,
+      dryRun: Boolean(b.dryRun),
+      triggeredBy: 'MANUAL_TEST',
+    });
+    await saveState(env, db);
+    return json({ ...result, reminderDispatchLogs: db.reminderDispatchLogs || [] });
+  }
+
+  // 10d. SOCIAL MEDIA HUB & ACTIVITY LIBRARY
+  if (method === 'GET' && pathname === '/api/v1/social/channels') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    return json({ channels: db.socialChannels || [] });
+  }
+
+  const socialChanMatch = pathname.match(/^\/api\/v1\/social\/channels\/([^/]+)$/);
+  if (method === 'PUT' && socialChanMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const channel = (db.socialChannels || []).find((c) => c.id === socialChanMatch[1]);
+    if (!channel) return json({ error: 'Không tìm thấy kênh mạng xã hội.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.url === 'string' && b.url.trim()) {
+      const check = validateSocialUrl(b.url);
+      if (!check.ok) return json({ error: check.error }, 400);
+      channel.url = check.parsed.toString();
+    }
+    if (typeof b.label === 'string' && b.label.trim()) channel.label = b.label.trim().slice(0, 120);
+    if (typeof b.handle === 'string') channel.handle = b.handle.trim().slice(0, 120);
+    if (typeof b.youtubeChannelId === 'string') channel.youtubeChannelId = b.youtubeChannelId.trim().slice(0, 100);
+    if (typeof b.active === 'boolean') channel.active = b.active;
+    if (typeof b.autoSyncEnabled === 'boolean') channel.autoSyncEnabled = b.autoSyncEnabled;
+    await saveState(env, db);
+    return json({ channel, channels: db.socialChannels });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/social/fetch-metadata') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const b = await readJson<{ url?: string }>();
+    const result = await fetchSocialUrlMetadata(typeof b.url === 'string' ? b.url.trim() : '');
+    if (!result.ok) return json({ error: result.error }, 400);
+    return json({ metadata: result.data });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/social/sync-youtube') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<{ youtubeChannelId?: string }>();
+    const ytChannel = (db.socialChannels || []).find((c) => c.platform === 'YOUTUBE');
+    const channelId =
+      (typeof b.youtubeChannelId === 'string' && b.youtubeChannelId.trim()) ||
+      ytChannel?.youtubeChannelId ||
+      '';
+    if (!channelId) {
+      return json({ error: 'Vui lòng nhập YouTube Channel ID (bắt đầu bằng UC...) trước khi đồng bộ.' }, 400);
+    }
+    const fetched = await fetchYouTubeChannelRssPosts(channelId, 6);
+    if (!fetched.ok) return json({ error: fetched.error }, 400);
+    if (!Array.isArray(db.socialPosts)) db.socialPosts = [];
+    const existingUrls = new Set(db.socialPosts.map((p) => p.sourceUrl));
+    let addedCount = 0;
+    for (const item of fetched.posts) {
+      if (existingUrls.has(item.sourceUrl)) continue;
+      db.socialPosts.unshift({
+        id: `sp-yt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        platform: 'YOUTUBE',
+        mediaType: 'VIDEO',
+        title: item.title,
+        excerpt: item.excerpt,
+        thumbnailUrl: item.thumbnailUrl || DEFAULT_FALLBACK_THUMBNAIL,
+        sourceUrl: item.sourceUrl,
+        embedUrl: item.embedUrl,
+        publishedAt: item.publishedAt,
+        category: 'Video YouTube mới nhất',
+        viewCount: 0,
+        featured: false,
+        visible: true,
+      });
+      existingUrls.add(item.sourceUrl);
+      addedCount++;
+    }
+    if (ytChannel) {
+      ytChannel.youtubeChannelId = channelId;
+      ytChannel.lastSyncedAt = nowFormatted();
+    }
+    await saveState(env, db);
+    return json({ addedCount, posts: db.socialPosts, channels: db.socialChannels });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/social/posts') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const b = await readJson<Record<string, unknown>>();
+    const title = String(b.title || '').trim();
+    const sourceUrl = String(b.sourceUrl || '').trim();
+    if (title.length < 3) return json({ error: 'Vui lòng nhập tiêu đề bài viết/video (tối thiểu 3 ký tự).' }, 400);
+    const urlCheck = validateSocialUrl(sourceUrl);
+    if (!urlCheck.ok) return json({ error: urlCheck.error }, 400);
+    const validPlatforms: SocialPlatform[] = ['FACEBOOK', 'YOUTUBE', 'TIKTOK', 'ZALO'];
+    const validTypes: SocialMediaType[] = ['VIDEO', 'PHOTO', 'POST'];
+    const platform: SocialPlatform = validPlatforms.includes(b.platform as SocialPlatform)
+      ? (b.platform as SocialPlatform)
+      : urlCheck.platform;
+    const mediaType: SocialMediaType = validTypes.includes(b.mediaType as SocialMediaType)
+      ? (b.mediaType as SocialMediaType)
+      : platform === 'YOUTUBE' || platform === 'TIKTOK'
+        ? 'VIDEO'
+        : 'PHOTO';
+    const db = await loadState(env);
+    if (!Array.isArray(db.socialPosts)) db.socialPosts = [];
+    const post: SocialActivityPost = {
+      id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      platform,
+      mediaType,
+      title: title.slice(0, 200),
+      excerpt: String(b.excerpt || '').trim().slice(0, 600),
+      thumbnailUrl:
+        typeof b.thumbnailUrl === 'string' && b.thumbnailUrl.trim()
+          ? b.thumbnailUrl.trim().slice(0, 500)
+          : DEFAULT_FALLBACK_THUMBNAIL,
+      sourceUrl: urlCheck.parsed.toString(),
+      embedUrl:
+        typeof b.embedUrl === 'string' && b.embedUrl.trim()
+          ? b.embedUrl.trim().slice(0, 500)
+          : undefined,
+      publishedAt:
+        typeof b.publishedAt === 'string' && b.publishedAt.trim()
+          ? b.publishedAt.trim().slice(0, 20)
+          : todayIso(),
+      category: String(b.category || 'Hoạt động Nhân Trí').trim().slice(0, 80),
+      viewCount: Math.max(0, Number(b.viewCount) || 0),
+      featured: Boolean(b.featured),
+      visible: b.visible !== false,
+    };
+    db.socialPosts.unshift(post);
+    await saveState(env, db);
+    return json({ post, posts: db.socialPosts }, 201);
+  }
+
+  const socialPostViewMatch = pathname.match(/^\/api\/v1\/social\/posts\/([^/]+)\/view$/);
+  if (method === 'POST' && socialPostViewMatch) {
+    if (isWorkerRateLimited(request, `view:${socialPostViewMatch[1]}`, 10, 60_000)) {
+      return json({ error: 'Thao tác quá nhanh.' }, 429);
+    }
+    const db = await loadState(env);
+    const post = (db.socialPosts || []).find((p) => p.id === socialPostViewMatch[1] && p.visible);
+    if (!post) return json({ error: 'Không tìm thấy bài viết.' }, 404);
+    post.viewCount = (post.viewCount || 0) + 1;
+    await saveState(env, db);
+    return json({ id: post.id, viewCount: post.viewCount });
+  }
+
+  const socialPostMatch = pathname.match(/^\/api\/v1\/social\/posts\/([^/]+)$/);
+  if (method === 'PATCH' && socialPostMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const post = (db.socialPosts || []).find((p) => p.id === socialPostMatch[1]);
+    if (!post) return json({ error: 'Không tìm thấy bài viết hoạt động.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.title === 'string' && b.title.trim()) post.title = b.title.trim().slice(0, 200);
+    if (typeof b.excerpt === 'string') post.excerpt = b.excerpt.trim().slice(0, 600);
+    if (typeof b.category === 'string' && b.category.trim()) post.category = b.category.trim().slice(0, 80);
+    if (typeof b.thumbnailUrl === 'string' && b.thumbnailUrl.trim()) {
+      post.thumbnailUrl = b.thumbnailUrl.trim().slice(0, 500);
+    }
+    if (typeof b.sourceUrl === 'string' && b.sourceUrl.trim()) {
+      const check = validateSocialUrl(b.sourceUrl);
+      if (!check.ok) return json({ error: check.error }, 400);
+      post.sourceUrl = check.parsed.toString();
+    }
+    if (typeof b.featured === 'boolean') post.featured = b.featured;
+    if (typeof b.visible === 'boolean') post.visible = b.visible;
+    await saveState(env, db);
+    return json({ post, posts: db.socialPosts });
+  }
+
+  if (method === 'DELETE' && socialPostMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const before = (db.socialPosts || []).length;
+    db.socialPosts = (db.socialPosts || []).filter((p) => p.id !== socialPostMatch[1]);
+    if (db.socialPosts.length === before) return json({ error: 'Không tìm thấy bài viết cần xóa.' }, 404);
+    await saveState(env, db);
+    return json({ ok: true, posts: db.socialPosts });
   }
 
   // 11. GEMINI AI ROUTES (EDGE WORKER)
@@ -2792,5 +3269,10 @@ export default {
       });
     }
     return new Response('Static assets binding (ASSETS) not configured.', { status: 404 });
+  },
+  async scheduled(_controller: unknown, env: WorkerEnv): Promise<void> {
+    const db = await loadState(env);
+    await dispatchUpcomingReminders(db, { triggeredBy: 'CRON' });
+    await saveState(env, db);
   },
 };

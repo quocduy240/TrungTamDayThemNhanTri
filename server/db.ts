@@ -25,6 +25,24 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
   if (!Array.isArray(parsed.families)) {
     parsed.families = structuredClone(INITIAL_DB.families);
   }
+  if (!Array.isArray(parsed.socialChannels) || parsed.socialChannels.length === 0) {
+    parsed.socialChannels = structuredClone(INITIAL_DB.socialChannels);
+  }
+  if (!Array.isArray(parsed.socialPosts) || parsed.socialPosts.length === 0) {
+    parsed.socialPosts = structuredClone(INITIAL_DB.socialPosts);
+  }
+  if (!parsed.notificationConfig) {
+    parsed.notificationConfig = structuredClone(INITIAL_DB.notificationConfig);
+  }
+  if (!Array.isArray(parsed.notificationPrefs)) {
+    parsed.notificationPrefs = structuredClone(INITIAL_DB.notificationPrefs);
+  }
+  if (!Array.isArray(parsed.classCheckins)) {
+    parsed.classCheckins = [];
+  }
+  if (!Array.isArray(parsed.reminderDispatchLogs)) {
+    parsed.reminderDispatchLogs = structuredClone(INITIAL_DB.reminderDispatchLogs);
+  }
   parsed.teachers = (parsed.teachers || []).map((t) => ({
     ...t,
     teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),

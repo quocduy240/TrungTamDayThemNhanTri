@@ -356,15 +356,116 @@ export interface FeedbackTicket {
   reply?: string;
 }
 
+export type NotificationChannel = 'APP' | 'WEB' | 'ZALO' | 'EMAIL' | 'FACEBOOK';
+
 export interface AppNotification {
   id: string;
   targetUid?: string;
   createdAt: string;
   title: string;
   body: string;
-  channel: 'APP' | 'ZALO' | 'EMAIL';
+  channel: NotificationChannel;
   targetRole: UserRole | 'ALL';
   read: boolean;
+}
+
+export type SocialPlatform = 'FACEBOOK' | 'YOUTUBE' | 'TIKTOK' | 'ZALO';
+export type SocialMediaType = 'VIDEO' | 'REEL' | 'ARTICLE' | 'PHOTO' | 'POST';
+
+export interface SocialChannelConfig {
+  id: string;
+  platform: SocialPlatform;
+  label: string;
+  handle: string;
+  url: string;
+  youtubeChannelId?: string;
+  autoSyncEnabled: boolean;
+  active: boolean;
+  lastSyncedAt?: string;
+}
+
+export interface SocialActivityPost {
+  id: string;
+  platform: SocialPlatform;
+  mediaType: SocialMediaType;
+  title: string;
+  excerpt: string;
+  summary?: string;
+  category: string;
+  tagLabel?: string;
+  sourceUrl: string;
+  url?: string;
+  embedUrl?: string;
+  thumbnailUrl: string;
+  publishedAt: string;
+  viewCount: number;
+  featured: boolean;
+  visible: boolean;
+  source?: 'AUTO_YOUTUBE' | 'AUTO_LINK' | 'MANUAL';
+  createdBy?: string;
+}
+
+export interface NotificationSystemConfig {
+  id?: string;
+  enabled: boolean;
+  leadMinutes: number;
+  channelsEnabled: {
+    WEB: boolean;
+    ZALO: boolean;
+    EMAIL: boolean;
+    FACEBOOK: boolean;
+  };
+  zaloOaId?: string;
+  zaloWebhookUrl?: string;
+  emailWebhookUrl?: string;
+  facebookWebhookUrl?: string;
+  unifiedWebhookUrl?: string;
+  messageTemplate: string;
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
+export interface UserNotificationPreference {
+  userId: string;
+  role: UserRole;
+  displayName: string;
+  enabled: boolean;
+  leadMinutes: number;
+  channels: {
+    WEB: boolean;
+    ZALO: boolean;
+    EMAIL: boolean;
+    FACEBOOK: boolean;
+  };
+  zaloPhone?: string;
+  email?: string;
+  facebookPsid?: string;
+  updatedAt: string;
+}
+
+export interface ClassCheckInRecord {
+  id: string;
+  date: string;
+  slotId: string;
+  centerClass: string;
+  subject?: string;
+  room: string;
+  actorId: string;
+  actorName: string;
+  actorRole: UserRole;
+  checkedInAt: string;
+}
+
+export interface ReminderDispatchLog {
+  id: string;
+  sentAt: string;
+  slotId: string;
+  slotLabel: string;
+  recipientName: string;
+  recipientRole: UserRole;
+  channel: NotificationChannel;
+  status: 'SENT' | 'QUEUED_WEBHOOK' | 'SIMULATED' | 'FAILED';
+  detail: string;
 }
 
 export interface FanpagePost {
@@ -394,6 +495,12 @@ export interface DatabaseState {
   exams: NationalExam[];
   tickets: FeedbackTicket[];
   notifications: AppNotification[];
+  socialChannels: SocialChannelConfig[];
+  socialPosts: SocialActivityPost[];
+  notificationConfig: NotificationSystemConfig;
+  notificationPrefs: UserNotificationPreference[];
+  classCheckins: ClassCheckInRecord[];
+  reminderDispatchLogs: ReminderDispatchLog[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
   adminPasscodeHash?: string;

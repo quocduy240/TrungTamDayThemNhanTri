@@ -1,10 +1,12 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
   Bell,
+  BellRing,
   BookOpen,
   Calendar,
   Check,
+  DoorOpen,
   FileBarChart2,
   Home,
   LayoutDashboard,
@@ -15,6 +17,7 @@ import {
   Pencil,
   Settings,
   ShieldCheck,
+  Tv,
   Users,
   Wallet,
   X,
@@ -60,6 +63,8 @@ import {
 } from './lib/api';
 import { FrontendPortal } from './components/FrontendPortal';
 import type { StudentLoginResult } from './components/PortalAuthGates';
+import { NotificationPrefsModal } from './components/NotificationPrefsModal';
+import { computeQuickClassSnapshot, formatCountdownSeconds } from './lib/quickClassEngine';
 
 const CmsOverview = lazy(() =>
   import('./components/CmsOverview').then((m) => ({ default: m.CmsOverview })),
@@ -87,10 +92,16 @@ const SupportSystemModule = lazy(() =>
 const SystemConfigCms = lazy(() =>
   import('./components/SystemConfigCms').then((m) => ({ default: m.SystemConfigCms })),
 );
+const SocialNotificationCms = lazy(() =>
+  import('./components/SocialNotificationCms').then((m) => ({
+    default: m.SocialNotificationCms,
+  })),
+);
 
 type CmsTab =
   | 'overview'
   | 'system'
+  | 'social'
   | 'timetable'
   | 'students'
   | 'scores'
@@ -124,14 +135,114 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
-  // Notifications & Mobile Drawer
+  // Notifications, Preferences, Attendance Preset & Mobile Drawer
   const [showNotifDrawer, setShowNotifDrawer] = useState(false);
+  const [showNotifPrefsModal, setShowNotifPrefsModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [attendancePreset, setAttendancePreset] = useState<{
+    centerClass?: string;
+    shiftLabel?: string;
+  } | null>(null);
+  const [upcomingAlert, setUpcomingAlert] = useState<{
+    slotId: string;
+    subject: string;
+    centerClass: string;
+    room: string;
+    teacherName: string;
+    timeRange: string;
+    secondsLeft: number;
+  } | null>(null);
+  const dismissedAlertSlotsRef = useRef<Set<string>>(new Set());
+  const browserNotifiedSlotsRef = useRef<Set<string>>(new Set());
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(''), 3200);
   }, []);
+
+  const handleJumpToAttendance = useCallback((centerClass: string, shiftLabel: string) => {
+    setAttendancePreset({ centerClass, shiftLabel });
+    setActiveTab('students');
+    setViewShell('CMS');
+  }, []);
+
+  // Client-side Live T-10m Pre-Class Reminder Engine (Vietnam Time UTC+7)
+  useEffect(() => {
+    if (!currentUser || !workspace) {
+      setUpcomingAlert(null);
+      return;
+    }
+    const pref = workspace.myNotificationPref;
+    if (pref && (!pref.enabled || !pref.channels.WEB)) {
+      setUpcomingAlert(null);
+      return;
+    }
+    if (currentUser.role !== 'STUDENT' && currentUser.role !== 'TEACHER') {
+      setUpcomingAlert(null);
+      return;
+    }
+
+    const leadMinutes =
+      pref?.leadMinutes ?? workspace.notificationConfig?.leadMinutes ?? 10;
+
+    const evaluateUpcoming = () => {
+      const snapshot = computeQuickClassSnapshot(
+        workspace.timetable,
+        {
+          role: currentUser.role,
+          teacherId: currentUser.linkedTeacherId,
+          students: workspace.students,
+        },
+        new Date(),
+      );
+      if (
+        snapshot.nextSlot &&
+        snapshot.secondsUntilNext !== null &&
+        snapshot.secondsUntilNext > 0 &&
+        snapshot.secondsUntilNext <= leadMinutes * 60
+      ) {
+        const slotKey = `${snapshot.todayDateStr}:${snapshot.nextSlot.id}`;
+        if (dismissedAlertSlotsRef.current.has(slotKey)) {
+          setUpcomingAlert(null);
+          return;
+        }
+        setUpcomingAlert({
+          slotId: slotKey,
+          subject: snapshot.nextSlot.subject,
+          centerClass: snapshot.nextSlot.centerClass,
+          room: snapshot.nextSlot.room,
+          teacherName: snapshot.nextSlot.teacherName,
+          timeRange: snapshot.nextSlot.timeRange,
+          secondsLeft: snapshot.secondsUntilNext,
+        });
+
+        if (
+          typeof window !== 'undefined' &&
+          'Notification' in window &&
+          Notification.permission === 'granted' &&
+          !browserNotifiedSlotsRef.current.has(slotKey)
+        ) {
+          browserNotifiedSlotsRef.current.add(slotKey);
+          try {
+            new Notification(
+              `Sắp vào lớp trong ${Math.ceil(snapshot.secondsUntilNext / 60)} phút — ${snapshot.nextSlot.subject}`,
+              {
+                body: `Phòng ${snapshot.nextSlot.room} · Lớp ${snapshot.nextSlot.centerClass} · ${snapshot.nextSlot.teacherName} (${snapshot.nextSlot.timeRange})`,
+              },
+            );
+          } catch {
+            // Browser blocked notification
+          }
+        }
+      } else {
+        setUpcomingAlert(null);
+      }
+    };
+
+    evaluateUpcoming();
+    const timer = window.setInterval(evaluateUpcoming, 15000);
+    return () => window.clearInterval(timer);
+  }, [currentUser, workspace]);
 
   const loadBootstrap = useCallback(async () => {
     const data = await apiRequest<BootstrapPayload>('/api/v1/bootstrap');
@@ -536,6 +647,7 @@ export default function App() {
   const unreadCount = workspace?.notifications.filter((n) => !n.read).length ?? 0;
   const activeRole = currentUser?.role || workspace?.user.role;
   const showSystemCmsNav = isAdminOrSuper(activeRole);
+  const showSocialCmsNav = isAdminOrSuper(activeRole) || activeRole === 'MANAGER';
   const showTuitionNav =
     canManageFinance(activeRole) || activeRole === 'PARENT' || activeRole === 'STUDENT';
 
@@ -551,6 +663,15 @@ export default function App() {
             id: 'system' as CmsTab,
             label: lang === 'vi' ? 'Cấu hình CMS & Phân quyền' : 'Site CMS & RBAC',
             icon: <Settings className="w-4 h-4" />,
+          },
+        ]
+      : []),
+    ...(showSocialCmsNav
+      ? [
+          {
+            id: 'social' as CmsTab,
+            label: lang === 'vi' ? 'Truyền thông & Nhắc lịch' : 'Social Hub & Reminders',
+            icon: <Tv className="w-4 h-4" />,
           },
         ]
       : []),
@@ -622,6 +743,8 @@ export default function App() {
             if (tab) setActiveTab(tab as CmsTab);
             setViewShell('CMS');
           }}
+          onOpenNotificationPrefs={currentUser ? () => setShowNotifPrefsModal(true) : undefined}
+          onJumpToAttendance={handleJumpToAttendance}
           authBusy={authBusy}
         />
       ) : (
@@ -778,18 +901,26 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2.5 shrink-0">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => setLang((l) => (l === 'vi' ? 'en' : 'vi'))}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
+                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap"
                 >
                   {lang === 'vi' ? 'EN' : 'VI'}
                 </button>
                 <button
                   type="button"
+                  onClick={() => setShowNotifPrefsModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <BellRing className="w-3.5 h-3.5 text-amber-700" />
+                  <span className="hidden sm:inline">Nhắc trước 10p</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => setShowNotifDrawer(true)}
-                  className="relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer"
+                  className="relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer whitespace-nowrap"
                 >
                   <Bell className="w-4 h-4 text-blue-900" />
                   <span>Thông báo</span>
@@ -812,6 +943,9 @@ export default function App() {
                   <CmsOverview
                     workspace={workspace}
                     onNavigate={(t) => setActiveTab(t as CmsTab)}
+                    onJumpToAttendance={handleJumpToAttendance}
+                    onOpenNotificationPrefs={() => setShowNotifPrefsModal(true)}
+                    onRefresh={refreshWorkspace}
                   />
                 )}
                 {activeTab === 'system' && showSystemCmsNav && (
@@ -833,11 +967,29 @@ export default function App() {
                     }}
                   />
                 )}
+                {activeTab === 'social' && showSocialCmsNav && (
+                  <SocialNotificationCms
+                    user={currentUser}
+                    channels={workspace.socialChannels || bootstrap.socialChannels || []}
+                    posts={workspace.socialPosts || bootstrap.socialPosts || []}
+                    notificationConfig={workspace.notificationConfig}
+                    dispatchLogs={workspace.reminderDispatchLogs || []}
+                    timetable={workspace.timetable}
+                    onRefresh={async () => {
+                      await Promise.all([refreshWorkspace(), loadBootstrap()]);
+                    }}
+                  />
+                )}
                 {activeTab === 'timetable' && (
                   <TimetableModule workspace={workspace} onRefresh={refreshWorkspace} />
                 )}
                 {activeTab === 'students' && (
-                  <StudentsAttendanceModule workspace={workspace} onRefresh={refreshWorkspace} />
+                  <StudentsAttendanceModule
+                    workspace={workspace}
+                    onRefresh={refreshWorkspace}
+                    initialClassFilter={attendancePreset?.centerClass}
+                    initialShiftLabel={attendancePreset?.shiftLabel}
+                  />
                 )}
                 {activeTab === 'scores' && (
                   <ScoresAiModule workspace={workspace} onRefresh={refreshWorkspace} />
@@ -978,6 +1130,77 @@ export default function App() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Account Notification Preferences Modal (Zalo / Email / Facebook / Web) */}
+      {currentUser && (
+        <NotificationPrefsModal
+          open={showNotifPrefsModal}
+          onClose={() => setShowNotifPrefsModal(false)}
+          initialPref={workspace?.myNotificationPref}
+          onSaved={() => {
+            refreshWorkspace();
+            showToast('Đã lưu cài đặt nhận nhắc lịch trước ca học.');
+          }}
+        />
+      )}
+
+      {/* Live T-10m Pre-Class Reminder Floating Alert */}
+      {upcomingAlert && currentUser && (
+        <div className="fixed bottom-4 left-4 z-50 max-w-md w-[calc(100vw-2rem)] bg-white border-2 border-amber-400 rounded-xl p-4 shadow-xl space-y-2.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <div className="h-9 w-9 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <BellRing className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-amber-800 font-mono-num">
+                  Sắp vào lớp sau {formatCountdownSeconds(upcomingAlert.secondsLeft)}
+                </p>
+                <p className="text-sm font-bold text-slate-950 truncate">
+                  {upcomingAlert.subject} · {upcomingAlert.centerClass}
+                </p>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Phòng <strong className="font-mono-num text-blue-950">{upcomingAlert.room}</strong> ·{' '}
+                  {upcomingAlert.teacherName} ({upcomingAlert.timeRange})
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                dismissedAlertSlotsRef.current.add(upcomingAlert.slotId);
+                setUpcomingAlert(null);
+              }}
+              className="p-1 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+              aria-label="Đóng nhắc lịch"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setShowNotifPrefsModal(true)}
+              className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
+            >
+              Cài đặt kênh nhắc
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFrontendMode('TEACHER_STUDENT');
+                setViewShell('FRONTEND');
+                dismissedAlertSlotsRef.current.add(upcomingAlert.slotId);
+                setUpcomingAlert(null);
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap"
+            >
+              <DoorOpen className="w-3.5 h-3.5" />
+              <span>Vào lớp nhanh</span>
+            </button>
           </div>
         </div>
       )}

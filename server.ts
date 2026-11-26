@@ -42,12 +42,29 @@ import {
   findFamilyForStudent,
   getStudentsInFamily,
 } from './src/lib/tuitionCalculator.ts';
+import {
+  computeQuickClassSnapshot,
+  getVietnamClock,
+} from './src/lib/quickClassEngine.ts';
+import {
+  DEFAULT_FALLBACK_THUMBNAIL,
+  fetchSocialUrlMetadata,
+  fetchYouTubeChannelRssPosts,
+  validateSocialUrl,
+} from './src/lib/socialFetcher.ts';
+import {
+  dispatchUpcomingReminders,
+  getOrBuildUserNotificationPref,
+  resolvePrefKey,
+  validateWebhookUrl,
+} from './src/lib/reminderDispatcher.ts';
 import type {
   AccessAuditLog,
   AttendanceRecord,
   AuthPolicy,
   AuthUser,
   BillingCycle,
+  ClassCheckInRecord,
   DatabaseState,
   DayOfWeek,
   FamilyProfile,
@@ -56,12 +73,16 @@ import type {
   ScoreRecord,
   SessionPeriod,
   ShiftCode,
+  SocialActivityPost,
+  SocialMediaType,
+  SocialPlatform,
   Student,
   Teacher,
   TeacherGroup,
   TeacherLeave,
   TimetableSlot,
   TuitionRecord,
+  UserNotificationPreference,
   UserRole,
 } from './src/types.ts';
 
@@ -265,6 +286,9 @@ app.get('/api/v1/bootstrap', (_req, res) => {
       usingEnvPasscode: hasEnvAdminPasscode,
     },
     authPolicy: getPolicy(db),
+    socialChannels: (db.socialChannels || []).filter((c) => c.active),
+    socialPosts: (db.socialPosts || []).filter((p) => p.visible),
+    notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
   });
 });
 
@@ -955,6 +979,13 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
       (user.role === 'MANAGER' && n.targetRole === 'MANAGER'),
   );
 
+  const todayVn = getVietnamClock().isoDate;
+  const scopedCheckins = (db.classCheckins || []).filter((c) => {
+    if (c.date !== todayVn) return false;
+    if (isStaff) return true;
+    return c.actorId === user.id || (user.linkedStudentId && c.actorId === user.linkedStudentId);
+  });
+
   res.json({
     user,
     rooms: db.rooms,
@@ -972,6 +1003,12 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     notifications,
     authPolicy: getPolicy(db),
     auditLogs: isAdminUser ? (db.auditLogs || []) : [],
+    socialChannels: db.socialChannels || [],
+    socialPosts: isManagerUser ? (db.socialPosts || []) : (db.socialPosts || []).filter((p) => p.visible),
+    notificationConfig: isAdminUser ? db.notificationConfig : undefined,
+    myNotificationPref: getOrBuildUserNotificationPref(db, user),
+    classCheckins: scopedCheckins,
+    reminderDispatchLogs: isAdminUser ? (db.reminderDispatchLogs || []) : [],
   });
 });
 
@@ -2527,6 +2564,503 @@ app.patch('/api/v1/system/auth-policy', requireAuth(['SUPER_ADMIN']), (req: Auth
     authPolicy: nextPolicy,
     auditLogs: db.auditLogs || [],
   });
+});
+
+// ============================================================
+// QUICK CLASS JUMP ("VÀO LỚP NHANH") — 3s LOOKUP & CHECK-IN
+// ============================================================
+
+app.get('/api/v1/quick-class/lookup', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'quick-lookup', 30, 60_000)) {
+    res.status(429).json({ error: 'Bạn tra cứu quá nhanh. Vui lòng thử lại sau ít giây.' });
+    return;
+  }
+  const rawCode = String(req.query.code || '').trim().toUpperCase();
+  if (rawCode.length < 3) {
+    res.status(400).json({ error: 'Vui lòng nhập Mã số học sinh (VD: NT-6A1-01 hoặc NT6A1H).' });
+    return;
+  }
+  const db = loadDb();
+  const student = db.students.find(
+    (s) =>
+      s.accessStatus !== 'LOCKED' &&
+      (s.code.trim().toUpperCase() === rawCode ||
+        (s.parentLinkCode && s.parentLinkCode.trim().toUpperCase() === rawCode)),
+  );
+  if (!student) {
+    res.status(404).json({
+      error: 'Không tìm thấy Mã học sinh phù hợp. Vui lòng kiểm tra lại thẻ học viên hoặc hỏi Giáo viên.',
+    });
+    return;
+  }
+
+  const snapshot = computeQuickClassSnapshot(db.timetable, {
+    role: 'STUDENT',
+    students: [student],
+  });
+  const nameParts = student.fullName.trim().split(/\s+/);
+  const studentShortName = nameParts.length >= 2 ? nameParts.slice(-2).join(' ') : student.fullName;
+
+  // Privacy-first: return ONLY schedule/room/subject/teacher — ZERO PII (no phone, email, scores, tuition)
+  res.json({
+    studentCode: student.code,
+    studentShortName,
+    centerClass: student.centerClass,
+    grade: student.grade,
+    snapshot,
+  });
+});
+
+app.post('/api/v1/quick-class/checkin', requireAuth(), (req: AuthedRequest, res) => {
+  const user = req.user!;
+  const slotId = String(req.body?.slotId || '').trim();
+  if (!slotId) {
+    res.status(400).json({ error: 'Thiếu mã ca học để xác nhận vào lớp.' });
+    return;
+  }
+  const db = loadDb();
+  const slot = db.timetable.find((s) => s.id === slotId);
+  if (!slot) {
+    res.status(404).json({ error: 'Không tìm thấy ca học này trong Thời khóa biểu.' });
+    return;
+  }
+  if (!Array.isArray(db.classCheckins)) db.classCheckins = [];
+
+  const clock = getVietnamClock();
+  const actorId =
+    user.role === 'STUDENT' && user.linkedStudentId
+      ? user.linkedStudentId
+      : user.role === 'TEACHER' && user.linkedTeacherId
+        ? user.linkedTeacherId
+        : user.id;
+
+  const existing = db.classCheckins.find(
+    (c) => c.date === clock.isoDate && c.slotId === slot.id && c.actorId === actorId,
+  );
+  if (existing) {
+    res.json({ checkin: existing, alreadyCheckedIn: true });
+    return;
+  }
+
+  const record: ClassCheckInRecord = {
+    id: `chk-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    date: clock.isoDate,
+    slotId: slot.id,
+    actorRole: user.role === 'STUDENT' ? 'STUDENT' : 'TEACHER',
+    actorId,
+    actorName: user.name,
+    centerClass: slot.centerClass,
+    room: slot.room,
+    checkedInAt: nowFormatted(),
+  };
+  db.classCheckins.unshift(record);
+  if (db.classCheckins.length > 300) {
+    db.classCheckins = db.classCheckins.slice(0, 300);
+  }
+
+  // Also log AttendanceRecord when a student self-checks in
+  if (user.role === 'STUDENT' && user.linkedStudentId) {
+    const st = db.students.find((s) => s.id === user.linkedStudentId);
+    if (st) {
+      const shiftLabel = `${slot.period === 'SANG' ? 'Sáng' : slot.period === 'CHIEU' ? 'Chiều' : 'Tối'} ${slot.shift === 'CA_1' ? 'Ca 1' : 'Ca 2'} (${slot.timeRange})`;
+      const alreadyAtt = db.attendance.find(
+        (a) => a.date === clock.isoDate && a.studentId === st.id && a.shiftLabel === shiftLabel,
+      );
+      if (!alreadyAtt) {
+        const att: AttendanceRecord = {
+          id: `att-chk-${Date.now()}`,
+          date: clock.isoDate,
+          studentId: st.id,
+          studentName: st.fullName,
+          centerClass: st.centerClass,
+          shiftLabel,
+          status: 'PRESENT',
+          note: `Học sinh tự check-in Vào lớp nhanh · ${slot.room} (${slot.subject})`,
+          parentNotified: true,
+        };
+        db.attendance.unshift(att);
+      }
+    }
+  }
+
+  saveDb(db);
+  res.status(201).json({ checkin: record, alreadyCheckedIn: false });
+});
+
+// ============================================================
+// 10-MINUTE PRE-CLASS REMINDERS & USER NOTIFICATION SETTINGS
+// ============================================================
+
+app.get('/api/v1/me/notification-prefs', requireAuth(), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  res.json({ preference: getOrBuildUserNotificationPref(db, req.user!) });
+});
+
+app.put('/api/v1/me/notification-prefs', requireAuth(), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  const current = getOrBuildUserNotificationPref(db, user);
+  const b = (req.body || {}) as Record<string, unknown>;
+  const rawChannels = (b.channels || {}) as Record<string, unknown>;
+
+  const lead = Number(b.leadMinutes);
+  const validLead = lead === 5 || lead === 10 || lead === 15 ? lead : current.leadMinutes || 10;
+
+  const updated: UserNotificationPreference = {
+    userId: resolvePrefKey(user),
+    role: user.role,
+    displayName: user.name,
+    enabled: typeof b.enabled === 'boolean' ? b.enabled : current.enabled,
+    leadMinutes: validLead,
+    channels: {
+      WEB: typeof rawChannels.WEB === 'boolean' ? rawChannels.WEB : current.channels.WEB,
+      ZALO: typeof rawChannels.ZALO === 'boolean' ? rawChannels.ZALO : current.channels.ZALO,
+      EMAIL: typeof rawChannels.EMAIL === 'boolean' ? rawChannels.EMAIL : current.channels.EMAIL,
+      FACEBOOK:
+        typeof rawChannels.FACEBOOK === 'boolean' ? rawChannels.FACEBOOK : current.channels.FACEBOOK,
+    },
+    zaloPhone:
+      typeof b.zaloPhone === 'string' ? b.zaloPhone.trim().slice(0, 30) : current.zaloPhone,
+    email: typeof b.email === 'string' ? b.email.trim().slice(0, 140) : current.email,
+    facebookPsid:
+      typeof b.facebookPsid === 'string'
+        ? b.facebookPsid.trim().slice(0, 120)
+        : current.facebookPsid,
+    updatedAt: nowFormatted(),
+  };
+
+  if (!Array.isArray(db.notificationPrefs)) db.notificationPrefs = [];
+  const idx = db.notificationPrefs.findIndex((p) => p.userId === updated.userId);
+  if (idx >= 0) db.notificationPrefs[idx] = updated;
+  else db.notificationPrefs.unshift(updated);
+
+  saveDb(db);
+  res.json({ preference: updated });
+});
+
+app.post('/api/v1/me/notification-prefs/test', requireAuth(), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  const pref = getOrBuildUserNotificationPref(db, user);
+  const activeChannels = Object.entries(pref.channels)
+    .filter(([, v]) => Boolean(v))
+    .map(([k]) => k)
+    .join(', ');
+
+  const notif = {
+    id: `ntf-test-${Date.now()}`,
+    createdAt: nowFormatted(),
+    title: `Kiểm thử nhắc lịch trước ${pref.leadMinutes} phút`,
+    body: `Xin chào ${user.name}! Kênh đang bật: ${activeChannels || 'WEB'}. Bạn sẽ nhận nhắc phòng học & giờ vào lớp tự động trước ${pref.leadMinutes} phút.`,
+    channel: 'APP' as const,
+    targetRole: user.role,
+    read: false,
+  };
+  db.notifications.unshift(notif);
+  saveDb(db);
+  res.json({ ok: true, notification: notif, preference: pref });
+});
+
+app.get('/api/v1/system/notification-config', requireAuth(['ADMIN']), (_req, res) => {
+  const db = loadDb();
+  res.json({
+    config: db.notificationConfig,
+    logs: db.reminderDispatchLogs || [],
+    subscriberCount: (db.notificationPrefs || []).filter((p) => p.enabled).length,
+  });
+});
+
+app.patch('/api/v1/system/notification-config', requireAuth(['ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const b = (req.body || {}) as Record<string, unknown>;
+  const curr = db.notificationConfig;
+
+  const urlFields: Array<
+    'zaloWebhookUrl' | 'emailWebhookUrl' | 'facebookWebhookUrl' | 'unifiedWebhookUrl'
+  > = ['zaloWebhookUrl', 'emailWebhookUrl', 'facebookWebhookUrl', 'unifiedWebhookUrl'];
+  const validatedUrls: Partial<Record<(typeof urlFields)[number], string>> = {};
+  for (const field of urlFields) {
+    if (typeof b[field] === 'string') {
+      const check = validateWebhookUrl(b[field] as string);
+      if (!check.ok) {
+        res.status(400).json({ error: `${field}: ${check.error}` });
+        return;
+      }
+      validatedUrls[field] = check.url || '';
+    }
+  }
+
+  const rawCh = (b.channelsEnabled || {}) as Record<string, unknown>;
+  const lead = Number(b.leadMinutes);
+  const leadMinutes = Number.isFinite(lead) ? Math.min(60, Math.max(5, Math.round(lead))) : curr.leadMinutes;
+
+  db.notificationConfig = {
+    ...curr,
+    leadMinutes,
+    channelsEnabled: {
+      WEB: typeof rawCh.WEB === 'boolean' ? rawCh.WEB : curr.channelsEnabled.WEB,
+      ZALO: typeof rawCh.ZALO === 'boolean' ? rawCh.ZALO : curr.channelsEnabled.ZALO,
+      EMAIL: typeof rawCh.EMAIL === 'boolean' ? rawCh.EMAIL : curr.channelsEnabled.EMAIL,
+      FACEBOOK:
+        typeof rawCh.FACEBOOK === 'boolean' ? rawCh.FACEBOOK : curr.channelsEnabled.FACEBOOK,
+    },
+    zaloOaId: typeof b.zaloOaId === 'string' ? b.zaloOaId.trim().slice(0, 100) : curr.zaloOaId,
+    zaloWebhookUrl: validatedUrls.zaloWebhookUrl ?? curr.zaloWebhookUrl,
+    emailWebhookUrl: validatedUrls.emailWebhookUrl ?? curr.emailWebhookUrl,
+    facebookWebhookUrl: validatedUrls.facebookWebhookUrl ?? curr.facebookWebhookUrl,
+    unifiedWebhookUrl: validatedUrls.unifiedWebhookUrl ?? curr.unifiedWebhookUrl,
+    messageTemplate:
+      typeof b.messageTemplate === 'string' && b.messageTemplate.trim().length >= 10
+        ? b.messageTemplate.trim().slice(0, 400)
+        : curr.messageTemplate,
+    updatedAt: nowFormatted(),
+  };
+
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'POLICY_UPDATE',
+    targetLabel: 'Cấu hình Nhắc lịch 10 phút (Zalo/Email/Facebook)',
+    detail: `Nhắc trước ${db.notificationConfig.leadMinutes} phút · Kênh bật: ${Object.entries(
+      db.notificationConfig.channelsEnabled,
+    )
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+      .join(', ')}.`,
+  });
+  saveDb(db);
+  res.json({ config: db.notificationConfig });
+});
+
+app.post('/api/v1/notifications/dispatch-upcoming', requireAuth(['MANAGER']), async (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const forceSlotId = typeof req.body?.forceSlotId === 'string' ? req.body.forceSlotId.trim() : undefined;
+  const dryRun = Boolean(req.body?.dryRun);
+  const result = await dispatchUpcomingReminders(db, {
+    forceSlotId: forceSlotId || undefined,
+    dryRun,
+    triggeredBy: 'MANUAL_TEST',
+  });
+  saveDb(db);
+  res.json({
+    ...result,
+    reminderDispatchLogs: db.reminderDispatchLogs || [],
+  });
+});
+
+// ============================================================
+// SOCIAL MEDIA HUB & "HOẠT ĐỘNG TRUNG TÂM NHÂN TRÍ" LIBRARY
+// ============================================================
+
+app.get('/api/v1/social/channels', requireAuth(['MANAGER']), (_req, res) => {
+  const db = loadDb();
+  res.json({ channels: db.socialChannels || [] });
+});
+
+app.put('/api/v1/social/channels/:id', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const channel = (db.socialChannels || []).find((c) => c.id === req.params.id);
+  if (!channel) {
+    res.status(404).json({ error: 'Không tìm thấy kênh mạng xã hội.' });
+    return;
+  }
+  const b = (req.body || {}) as Record<string, unknown>;
+  if (typeof b.url === 'string' && b.url.trim()) {
+    const check = validateSocialUrl(b.url);
+    if (!check.ok) {
+      res.status(400).json({ error: check.error });
+      return;
+    }
+    channel.url = check.parsed.toString();
+  }
+  if (typeof b.label === 'string' && b.label.trim()) channel.label = b.label.trim().slice(0, 120);
+  if (typeof b.handle === 'string') channel.handle = b.handle.trim().slice(0, 120);
+  if (typeof b.youtubeChannelId === 'string') {
+    channel.youtubeChannelId = b.youtubeChannelId.trim().slice(0, 100);
+  }
+  if (typeof b.active === 'boolean') channel.active = b.active;
+  if (typeof b.autoSyncEnabled === 'boolean') channel.autoSyncEnabled = b.autoSyncEnabled;
+
+  saveDb(db);
+  res.json({ channel, channels: db.socialChannels });
+});
+
+app.post('/api/v1/social/fetch-metadata', requireAuth(['MANAGER']), async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  const result = await fetchSocialUrlMetadata(url);
+  if (!result.ok) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+  res.json({ metadata: result.data });
+});
+
+app.post('/api/v1/social/sync-youtube', requireAuth(['MANAGER']), async (req, res) => {
+  const db = loadDb();
+  const ytChannel = (db.socialChannels || []).find((c) => c.platform === 'YOUTUBE');
+  const channelId =
+    (typeof req.body?.youtubeChannelId === 'string' && req.body.youtubeChannelId.trim()) ||
+    ytChannel?.youtubeChannelId ||
+    '';
+  if (!channelId) {
+    res.status(400).json({
+      error: 'Vui lòng nhập YouTube Channel ID (bắt đầu bằng UC...) trong cấu hình kênh YouTube trước khi đồng bộ.',
+    });
+    return;
+  }
+
+  const fetched = await fetchYouTubeChannelRssPosts(channelId, 6);
+  if (!fetched.ok) {
+    res.status(400).json({ error: fetched.error });
+    return;
+  }
+
+  if (!Array.isArray(db.socialPosts)) db.socialPosts = [];
+  const existingUrls = new Set(db.socialPosts.map((p) => p.sourceUrl));
+  let addedCount = 0;
+
+  for (const item of fetched.posts) {
+    if (existingUrls.has(item.sourceUrl)) continue;
+    db.socialPosts.unshift({
+      id: `sp-yt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      platform: 'YOUTUBE',
+      mediaType: 'VIDEO',
+      title: item.title,
+      excerpt: item.excerpt,
+      thumbnailUrl: item.thumbnailUrl || DEFAULT_FALLBACK_THUMBNAIL,
+      sourceUrl: item.sourceUrl,
+      embedUrl: item.embedUrl,
+      publishedAt: item.publishedAt,
+      category: 'Video YouTube mới nhất',
+      viewCount: 0,
+      featured: false,
+      visible: true,
+    });
+    existingUrls.add(item.sourceUrl);
+    addedCount++;
+  }
+
+  if (ytChannel) {
+    ytChannel.youtubeChannelId = channelId;
+    ytChannel.lastSyncedAt = nowFormatted();
+  }
+  saveDb(db);
+  res.json({ addedCount, posts: db.socialPosts, channels: db.socialChannels });
+});
+
+app.post('/api/v1/social/posts', requireAuth(['MANAGER']), (req, res) => {
+  const b = (req.body || {}) as Record<string, unknown>;
+  const title = String(b.title || '').trim();
+  const sourceUrl = String(b.sourceUrl || '').trim();
+  if (title.length < 3) {
+    res.status(400).json({ error: 'Vui lòng nhập tiêu đề bài viết/video (tối thiểu 3 ký tự).' });
+    return;
+  }
+  const urlCheck = validateSocialUrl(sourceUrl);
+  if (!urlCheck.ok) {
+    res.status(400).json({ error: urlCheck.error });
+    return;
+  }
+
+  const validPlatforms: SocialPlatform[] = ['FACEBOOK', 'YOUTUBE', 'TIKTOK', 'ZALO'];
+  const validTypes: SocialMediaType[] = ['VIDEO', 'PHOTO', 'POST'];
+  const platform: SocialPlatform = validPlatforms.includes(b.platform as SocialPlatform)
+    ? (b.platform as SocialPlatform)
+    : urlCheck.platform;
+  const mediaType: SocialMediaType = validTypes.includes(b.mediaType as SocialMediaType)
+    ? (b.mediaType as SocialMediaType)
+    : platform === 'YOUTUBE' || platform === 'TIKTOK'
+      ? 'VIDEO'
+      : 'PHOTO';
+
+  const db = loadDb();
+  if (!Array.isArray(db.socialPosts)) db.socialPosts = [];
+  const post: SocialActivityPost = {
+    id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    platform,
+    mediaType,
+    title: title.slice(0, 200),
+    excerpt: String(b.excerpt || '').trim().slice(0, 600),
+    thumbnailUrl:
+      typeof b.thumbnailUrl === 'string' && b.thumbnailUrl.trim()
+        ? b.thumbnailUrl.trim().slice(0, 500)
+        : DEFAULT_FALLBACK_THUMBNAIL,
+    sourceUrl: urlCheck.parsed.toString(),
+    embedUrl:
+      typeof b.embedUrl === 'string' && b.embedUrl.trim()
+        ? b.embedUrl.trim().slice(0, 500)
+        : undefined,
+    publishedAt:
+      typeof b.publishedAt === 'string' && b.publishedAt.trim()
+        ? b.publishedAt.trim().slice(0, 20)
+        : todayIso(),
+    category: String(b.category || 'Hoạt động Nhân Trí').trim().slice(0, 80),
+    viewCount: Math.max(0, Number(b.viewCount) || 0),
+    featured: Boolean(b.featured),
+    visible: b.visible !== false,
+  };
+  db.socialPosts.unshift(post);
+  saveDb(db);
+  res.status(201).json({ post, posts: db.socialPosts });
+});
+
+app.patch('/api/v1/social/posts/:id', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const post = (db.socialPosts || []).find((p) => p.id === req.params.id);
+  if (!post) {
+    res.status(404).json({ error: 'Không tìm thấy bài viết hoạt động.' });
+    return;
+  }
+  const b = (req.body || {}) as Record<string, unknown>;
+  if (typeof b.title === 'string' && b.title.trim()) post.title = b.title.trim().slice(0, 200);
+  if (typeof b.excerpt === 'string') post.excerpt = b.excerpt.trim().slice(0, 600);
+  if (typeof b.category === 'string' && b.category.trim()) post.category = b.category.trim().slice(0, 80);
+  if (typeof b.thumbnailUrl === 'string' && b.thumbnailUrl.trim()) {
+    post.thumbnailUrl = b.thumbnailUrl.trim().slice(0, 500);
+  }
+  if (typeof b.sourceUrl === 'string' && b.sourceUrl.trim()) {
+    const check = validateSocialUrl(b.sourceUrl);
+    if (!check.ok) {
+      res.status(400).json({ error: check.error });
+      return;
+    }
+    post.sourceUrl = check.parsed.toString();
+  }
+  if (typeof b.featured === 'boolean') post.featured = b.featured;
+  if (typeof b.visible === 'boolean') post.visible = b.visible;
+
+  saveDb(db);
+  res.json({ post, posts: db.socialPosts });
+});
+
+app.delete('/api/v1/social/posts/:id', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const before = (db.socialPosts || []).length;
+  db.socialPosts = (db.socialPosts || []).filter((p) => p.id !== req.params.id);
+  if (db.socialPosts.length === before) {
+    res.status(404).json({ error: 'Không tìm thấy bài viết cần xóa.' });
+    return;
+  }
+  saveDb(db);
+  res.json({ ok: true, posts: db.socialPosts });
+});
+
+app.post('/api/v1/social/posts/:id/view', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, `view:${req.params.id}`, 10, 60_000)) {
+    res.status(429).json({ error: 'Thao tác quá nhanh.' });
+    return;
+  }
+  const db = loadDb();
+  const post = (db.socialPosts || []).find((p) => p.id === req.params.id && p.visible);
+  if (!post) {
+    res.status(404).json({ error: 'Không tìm thấy bài viết.' });
+    return;
+  }
+  post.viewCount = (post.viewCount || 0) + 1;
+  saveDb(db);
+  res.json({ id: post.id, viewCount: post.viewCount });
 });
 
 // ============================================================

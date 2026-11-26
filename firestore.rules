@@ -468,9 +468,71 @@ service cloud.firestore {
         && isNonEmptyString(data.createdAt, 40)
         && isNonEmptyString(data.title, 180)
         && isNonEmptyString(data.body, 600)
-        && data.channel in ['APP', 'ZALO', 'EMAIL']
+        && data.channel in ['APP', 'ZALO', 'EMAIL', 'FACEBOOK']
         && data.targetRole in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT', 'ALL']
         && data.read is bool;
+    }
+
+    function isValidSocialChannel(data) {
+      return data.keys().hasAll(['id', 'platform', 'label', 'url', 'active'])
+        && data.keys().hasOnly(['id', 'platform', 'label', 'handle', 'url', 'youtubeChannelId', 'active', 'autoSyncEnabled', 'lastSyncedAt'])
+        && isValidId(data.id)
+        && data.platform in ['FACEBOOK', 'YOUTUBE', 'TIKTOK', 'ZALO']
+        && isNonEmptyString(data.label, 120)
+        && isOptionalString(data, 'handle', 120)
+        && isNonEmptyString(data.url, 400)
+        && isOptionalString(data, 'youtubeChannelId', 120)
+        && data.active is bool
+        && (!('autoSyncEnabled' in data) || data.autoSyncEnabled is bool)
+        && isOptionalString(data, 'lastSyncedAt', 40);
+    }
+
+    function isValidSocialPost(data) {
+      return data.keys().hasAll(['id', 'platform', 'mediaType', 'title', 'sourceUrl', 'publishedAt', 'viewCount', 'featured', 'visible'])
+        && data.keys().hasOnly(['id', 'platform', 'mediaType', 'title', 'excerpt', 'thumbnailUrl', 'sourceUrl', 'embedUrl', 'publishedAt', 'category', 'viewCount', 'featured', 'visible'])
+        && isValidId(data.id)
+        && data.platform in ['FACEBOOK', 'YOUTUBE', 'TIKTOK', 'ZALO']
+        && data.mediaType in ['VIDEO', 'PHOTO', 'POST']
+        && isNonEmptyString(data.title, 200)
+        && isOptionalString(data, 'excerpt', 600)
+        && isOptionalString(data, 'thumbnailUrl', 500)
+        && isNonEmptyString(data.sourceUrl, 500)
+        && isOptionalString(data, 'embedUrl', 500)
+        && isNonEmptyString(data.publishedAt, 40)
+        && isOptionalString(data, 'category', 80)
+        && data.viewCount is number && data.viewCount >= 0 && data.viewCount <= 100000000
+        && data.featured is bool
+        && data.visible is bool;
+    }
+
+    function isValidNotificationConfig(data) {
+      return data.keys().hasAll(['id', 'leadMinutes', 'channelsEnabled', 'messageTemplate'])
+        && data.keys().hasOnly(['id', 'leadMinutes', 'channelsEnabled', 'zaloWebhookUrl', 'zaloOaId', 'emailWebhookUrl', 'facebookWebhookUrl', 'unifiedWebhookUrl', 'messageTemplate', 'updatedAt'])
+        && isValidId(data.id)
+        && data.leadMinutes is number && data.leadMinutes >= 5 && data.leadMinutes <= 60
+        && data.channelsEnabled is map
+        && isOptionalString(data, 'zaloWebhookUrl', 400)
+        && isOptionalString(data, 'zaloOaId', 120)
+        && isOptionalString(data, 'emailWebhookUrl', 400)
+        && isOptionalString(data, 'facebookWebhookUrl', 400)
+        && isOptionalString(data, 'unifiedWebhookUrl', 400)
+        && isNonEmptyString(data.messageTemplate, 400)
+        && isOptionalString(data, 'updatedAt', 40);
+    }
+
+    function isValidNotificationPref(data) {
+      return data.keys().hasAll(['userId', 'role', 'enabled', 'leadMinutes', 'channels'])
+        && data.keys().hasOnly(['userId', 'role', 'displayName', 'enabled', 'leadMinutes', 'channels', 'zaloPhone', 'email', 'facebookPsid', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.role in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT']
+        && isOptionalString(data, 'displayName', 120)
+        && data.enabled is bool
+        && data.leadMinutes is number && data.leadMinutes >= 5 && data.leadMinutes <= 30
+        && data.channels is map
+        && isOptionalString(data, 'zaloPhone', 40)
+        && isOptionalString(data, 'email', 160)
+        && isOptionalString(data, 'facebookPsid', 120)
+        && isOptionalString(data, 'updatedAt', 40);
     }
 
     // =========================================================================
@@ -719,6 +781,52 @@ service cloud.firestore {
         )
       );
       allow delete: if isValidId(notifId) && isAdmin();
+    }
+
+    // 15. Official Social Media Channels (Publicly readable; Managed by Manager / Admin / SuperAdmin)
+    match /social_channels/{channelId} {
+      allow get: if isValidId(channelId);
+      allow list: if true;
+      allow create: if isValidId(channelId) && isValidSocialChannel(incoming()) && isManager();
+      allow update: if isValidId(channelId) && isValidSocialChannel(incoming()) && isManager();
+      allow delete: if isValidId(channelId) && isAdmin();
+    }
+
+    // 16. Editorial Activity Media Library Posts (Publicly readable; Managed by Manager / Admin / SuperAdmin)
+    match /social_posts/{postId} {
+      allow get: if isValidId(postId) && (existing().visible == true || isManager());
+      allow list: if existing().visible == true || isManager();
+      allow create: if isValidId(postId) && isValidSocialPost(incoming()) && isManager();
+      allow update: if isValidId(postId) && isValidSocialPost(incoming()) && (
+        isManager() ||
+        (
+          incoming().viewCount == existing().viewCount + 1 &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['viewCount'])
+        )
+      );
+      allow delete: if isValidId(postId) && isManager();
+    }
+
+    // 17. Admin 10-Minute Reminder Config (Strictly Admin / SuperAdmin Only — Protects Webhook URLs)
+    match /notification_config/{configId} {
+      allow get: if isValidId(configId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(configId) && isValidNotificationConfig(incoming()) && isAdmin();
+      allow update: if isValidId(configId) && isValidNotificationConfig(incoming()) && isAdmin();
+      allow delete: if false;
+    }
+
+    // 18. User Pre-Class Notification Preferences (Self-Owned or Admin)
+    match /notification_prefs/{uid} {
+      allow get: if isValidId(uid) && isVerified() && (request.auth.uid == uid || isAdmin());
+      allow list: if isVerified() && (isAdmin() || existing().userId == request.auth.uid);
+      allow create: if isValidId(uid) && isVerified() && isValidNotificationPref(incoming()) && (
+        isAdmin() || (request.auth.uid == uid && incoming().userId == request.auth.uid)
+      );
+      allow update: if isValidId(uid) && isVerified() && isValidNotificationPref(incoming()) && (
+        isAdmin() || (request.auth.uid == uid && incoming().userId == request.auth.uid && existing().userId == request.auth.uid)
+      );
+      allow delete: if isValidId(uid) && isAdmin();
     }
   }
 }

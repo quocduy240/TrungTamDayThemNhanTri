@@ -4,19 +4,25 @@ import type {
   AttendanceRecord,
   AuthPolicy,
   AuthUser,
+  ClassCheckInRecord,
   CoursePackage,
   ExpenseRecord,
   FamilyProfile,
   FanpagePost,
   FeedbackTicket,
   NationalExam,
+  NotificationSystemConfig,
+  ReminderDispatchLog,
   Room,
   ScoreRecord,
+  SocialActivityPost,
+  SocialChannelConfig,
   Student,
   Teacher,
   TeacherLeave,
   TimetableSlot,
   TuitionRecord,
+  UserNotificationPreference,
   UserRole,
 } from '../types';
 
@@ -80,6 +86,9 @@ export interface BootstrapPayload {
   exams?: NationalExam[];
   gallery: { id: string; url: string; title: string; caption: string }[];
   fanpagePosts?: FanpagePost[];
+  socialChannels?: SocialChannelConfig[];
+  socialPosts?: SocialActivityPost[];
+  notificationLeadMinutes?: number;
   examsSummary: {
     id: string;
     title: string;
@@ -120,6 +129,12 @@ export interface WorkspacePayload {
   exams: NationalExam[];
   tickets: FeedbackTicket[];
   notifications: AppNotification[];
+  socialChannels: SocialChannelConfig[];
+  socialPosts: SocialActivityPost[];
+  notificationConfig?: NotificationSystemConfig;
+  myNotificationPref?: UserNotificationPreference;
+  classCheckins: ClassCheckInRecord[];
+  reminderDispatchLogs: ReminderDispatchLog[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
 }
