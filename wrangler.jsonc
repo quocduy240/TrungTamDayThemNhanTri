@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "trung-tam-nhan-tri",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  }
+  // Tùy chọn bật lưu trữ bền vững Cloudflare D1 (sau khi tạo DB bằng `wrangler d1 create nhantri-db`):
+  // "d1_databases": [
+  //   {
+  //     "binding": "DB",
+  //     "database_name": "nhantri-db",
+  //     "database_id": "<PASTE_YOUR_D1_DATABASE_ID>"
+  //   }
+  // ]
+}
