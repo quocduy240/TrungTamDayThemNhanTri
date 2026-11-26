@@ -1,124 +1,277 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import {
   Bell,
   BookOpen,
   Calendar,
+  Check,
   FileBarChart2,
-  GraduationCap,
   Home,
   LayoutDashboard,
+  LogIn,
   LogOut,
   Menu,
   MessageSquare,
+  Pencil,
+  Settings,
   ShieldCheck,
   Users,
   Wallet,
   X,
 } from 'lucide-react';
-import type { AuthUser, Language, UserRole } from './types';
+import type {
+  AuthUser,
+  CoursePackage,
+  FrontendMode,
+  Language,
+  SiteConfig,
+  UserRole,
+} from './types';
+import {
+  ADMIN_EMAIL,
+  auth,
+  signInWithGmailPopup,
+  signOutGmail,
+  SUPER_ADMIN_EMAIL,
+} from './lib/firebase';
+import {
+  DEFAULT_SITE_CONFIG,
+  ensureUserProfileFromGmail,
+  saveCourseToFirestore,
+  saveSiteConfigPatch,
+  subscribeCourses,
+  subscribeSiteConfig,
+} from './lib/firestoreStore';
 import {
   apiRequest,
+  isAdminOrSuper,
+  isSuperAdminRole,
   roleLabel,
   setAuthToken,
   type BootstrapPayload,
   type WorkspacePayload,
 } from './lib/api';
-import { PublicPortal } from './components/PublicPortal';
+import { FrontendPortal } from './components/FrontendPortal';
 import { CmsOverview } from './components/CmsOverview';
 import { TimetableModule } from './components/TimetableModule';
 import { StudentsAttendanceModule } from './components/StudentsAttendanceModule';
 import { ScoresAiModule } from './components/ScoresAiModule';
 import { ExamLibraryModule } from './components/ExamLibraryModule';
 import { SupportSystemModule, TuitionModule } from './components/TuitionSupportModule';
+import { SystemConfigCms } from './components/SystemConfigCms';
 
-type CmsTab = 'overview' | 'timetable' | 'students' | 'scores' | 'exams' | 'tuition' | 'support';
+type CmsTab =
+  | 'overview'
+  | 'system'
+  | 'timetable'
+  | 'students'
+  | 'scores'
+  | 'exams'
+  | 'tuition'
+  | 'support';
 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [workspace, setWorkspace] = useState<WorkspacePayload | null>(null);
-  const [mode, setMode] = useState<'PUBLIC' | 'CMS'>('PUBLIC');
+  const [siteConfig, setSiteConfig] = useState<SiteConfig>(DEFAULT_SITE_CONFIG);
+  const [liveCourses, setLiveCourses] = useState<CoursePackage[]>([]);
+
+  // Default Frontend Display Mode: Teacher & Student (user confirmed)
+  const [frontendMode, setFrontendMode] = useState<FrontendMode>('TEACHER_STUDENT');
+  const [modeInitializedFromConfig, setModeInitializedFromConfig] = useState(false);
+
+  const [viewShell, setViewShell] = useState<'FRONTEND' | 'CMS'>('FRONTEND');
   const [activeTab, setActiveTab] = useState<CmsTab>('overview');
   const [lang, setLang] = useState<Language>('vi');
 
-  // Auth Modal State
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authLoading, setAuthLoading] = useState(false);
+  // Authenticated Gmail / Session user
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [adminPasscode, setAdminPasscode] = useState('');
-  const [needsAdminPasscode, setNeedsAdminPasscode] = useState(false);
-  const [claimPasscode, setClaimPasscode] = useState('');
-  const [showClaimForm, setShowClaimForm] = useState(false);
+  const [showRoleModal, setShowRoleModal] = useState(false);
 
-  // Notifications & Mobile Sidebar
+  // 1-Click Visual Inline Editing State (SuperAdmin & Admin only)
+  const [editMode, setEditMode] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+
+  // Notifications & Mobile Drawer
   const [showNotifDrawer, setShowNotifDrawer] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3200);
+  }, []);
 
   const loadBootstrap = useCallback(async () => {
     const data = await apiRequest<BootstrapPayload>('/api/v1/bootstrap');
     setBootstrap(data);
+    setLiveCourses((prev) => (prev.length > 0 ? prev : data.courses));
   }, []);
 
   const refreshWorkspace = useCallback(async () => {
-    const data = await apiRequest<WorkspacePayload>('/api/v1/workspace');
-    setWorkspace(data);
+    try {
+      const data = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace(data);
+    } catch {
+      // ignore if session expired
+    }
   }, []);
 
   useEffect(() => {
     loadBootstrap();
   }, [loadBootstrap]);
 
-  async function signInAsRole(role: UserRole, passcode?: string) {
-    setAuthLoading(true);
+  // Subscribe to live Firestore SiteConfig
+  useEffect(() => {
+    const unsub = subscribeSiteConfig((cfg) => {
+      setSiteConfig(cfg);
+      if (cfg.seoTitle) {
+        document.title = cfg.seoTitle;
+      }
+      if (!modeInitializedFromConfig && cfg.defaultFrontendMode) {
+        setFrontendMode(cfg.defaultFrontendMode);
+        setModeInitializedFromConfig(true);
+      }
+    });
+    return () => unsub();
+  }, [modeInitializedFromConfig]);
+
+  // Subscribe to live Firestore Courses (fallback cleanly to bootstrap courses)
+  useEffect(() => {
+    if (!bootstrap) return;
+    const unsub = subscribeCourses(bootstrap.courses, setLiveCourses);
+    return () => unsub();
+  }, [bootstrap]);
+
+  // Subscribe to Firebase Auth state (Gmail login)
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) {
+        return;
+      }
+      setAuthBusy(true);
+      try {
+        const profile = await ensureUserProfileFromGmail(fbUser);
+        setCurrentUser(profile);
+        const idToken = await fbUser.getIdToken();
+        const bridged = await apiRequest<{ token: string; user: AuthUser }>(
+          '/api/v1/auth/firebase-bridge',
+          {
+            method: 'POST',
+            body: JSON.stringify({ idToken, requestedRole: profile.role }),
+          },
+        );
+        setAuthToken(bridged.token);
+        const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+        setWorkspace({ ...ws, user: profile });
+      } catch (err) {
+        console.error('Firebase auth sync error:', err);
+      } finally {
+        setAuthBusy(false);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  async function handleSignInGmail() {
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const cred = await signInWithGmailPopup();
+      const profile = await ensureUserProfileFromGmail(cred.user);
+      setCurrentUser(profile);
+      const idToken = await cred.user.getIdToken();
+      const bridged = await apiRequest<{ token: string; user: AuthUser }>(
+        '/api/v1/auth/firebase-bridge',
+        {
+          method: 'POST',
+          body: JSON.stringify({ idToken, requestedRole: profile.role }),
+        },
+      );
+      setAuthToken(bridged.token);
+      const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace({ ...ws, user: profile });
+      setShowRoleModal(false);
+      showToast(`Chào mừng ${profile.name} (${roleLabel(profile.role, 'vi')})`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Đăng nhập Gmail chưa thành công.';
+      if (!msg.includes('popup-closed-by-user')) {
+        setAuthError(msg);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signInPreviewRole(role: UserRole) {
+    setAuthBusy(true);
     setAuthError('');
     try {
       const res = await apiRequest<{ token: string; user: AuthUser }>('/api/v1/auth/role-session', {
         method: 'POST',
-        body: JSON.stringify({ role, passcode }),
+        body: JSON.stringify({ role }),
       });
       setAuthToken(res.token);
-      await refreshWorkspace();
-      setMode('CMS');
-      setShowAuthModal(false);
-      setNeedsAdminPasscode(false);
-      setAdminPasscode('');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Đăng nhập không thành công.';
-      setAuthError(msg);
-      if (role === 'ADMIN' && msg.toLowerCase().includes('mật khẩu')) {
-        setNeedsAdminPasscode(true);
+      const localUser: AuthUser = { ...res.user, authProvider: 'LOCAL_SESSION' };
+      setCurrentUser(localUser);
+      const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace({ ...ws, user: localUser });
+      setShowRoleModal(false);
+      if (role === 'PARENT') {
+        setFrontendMode('PARENT');
+        setViewShell('FRONTEND');
+      } else {
+        setViewShell('CMS');
       }
-    } finally {
-      setAuthLoading(false);
-    }
-  }
-
-  async function handleClaimAdminPasscode(e: React.FormEvent) {
-    e.preventDefault();
-    setAuthLoading(true);
-    setAuthError('');
-    try {
-      const res = await apiRequest<{ token: string; user: AuthUser }>('/api/v1/auth/admin-claim', {
-        method: 'POST',
-        body: JSON.stringify({ passcode: claimPasscode }),
-      });
-      setAuthToken(res.token);
-      await loadBootstrap();
-      await refreshWorkspace();
-      setShowClaimForm(false);
-      setClaimPasscode('');
-      setShowAuthModal(false);
-      setMode('CMS');
+      showToast(`Đã chuyển phiên xem thử: ${roleLabel(role, 'vi')}`);
     } catch (err: unknown) {
-      setAuthError(err instanceof Error ? err.message : 'Không thể thiết lập mật khẩu quản trị.');
+      setAuthError(err instanceof Error ? err.message : 'Không thể chuyển vai trò.');
     } finally {
-      setAuthLoading(false);
+      setAuthBusy(false);
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await signOutGmail();
+    } catch {
+      // ignore if local session only
+    }
     setAuthToken(null);
+    setCurrentUser(null);
     setWorkspace(null);
-    setMode('PUBLIC');
+    setEditMode(false);
+    setViewShell('FRONTEND');
+    showToast('Đã đăng xuất an toàn.');
+  }
+
+  async function handleQuickSaveConfig(patch: Partial<SiteConfig>) {
+    if (!currentUser || !isAdminOrSuper(currentUser.role)) return;
+    if (currentUser.authProvider === 'GOOGLE_FIREBASE') {
+      const saved = await saveSiteConfigPatch(
+        siteConfig,
+        patch,
+        currentUser.email,
+        isSuperAdminRole(currentUser.role),
+      );
+      setSiteConfig(saved);
+      showToast('Đã lưu 1-Click lên Cloud Firestore.');
+    } else {
+      setSiteConfig((prev) => ({ ...prev, ...patch }));
+      showToast('Đã sửa bản xem trước (Đăng nhập Gmail quản trị để ghi Firestore).');
+    }
+  }
+
+  async function handleQuickSaveCourse(updatedCourse: CoursePackage) {
+    if (!currentUser || !isAdminOrSuper(currentUser.role)) return;
+    setLiveCourses((prev) => prev.map((c) => (c.id === updatedCourse.id ? updatedCourse : c)));
+    if (currentUser.authProvider === 'GOOGLE_FIREBASE') {
+      await saveCourseToFirestore(updatedCourse);
+      showToast(`Đã lưu khóa học "${updatedCourse.title}" lên Firestore.`);
+    } else {
+      showToast('Đã sửa khóa học trên bản xem trước.');
+    }
   }
 
   async function handleReadAllNotifications() {
@@ -133,38 +286,95 @@ export default function App() {
           <div className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-blue-900 text-white font-bold">
             NT
           </div>
-          <p className="text-sm font-semibold text-slate-900">Đang khởi tạo Trung Tâm Nhân Trí...</p>
+          <p className="text-sm font-semibold text-slate-900">
+            Đang khởi tạo daythemnhantri.com...
+          </p>
         </div>
       </div>
     );
   }
 
   const unreadCount = workspace?.notifications.filter((n) => !n.read).length ?? 0;
+  const activeRole = currentUser?.role || workspace?.user.role;
+  const showSystemCmsNav = isAdminOrSuper(activeRole);
 
   const navItems: { id: CmsTab; label: string; icon: React.ReactNode }[] = [
-    { id: 'overview', label: lang === 'vi' ? 'Tổng quan & Phân tích' : 'Analytics Overview', icon: <LayoutDashboard className="w-4 h-4" /> },
-    { id: 'timetable', label: lang === 'vi' ? 'Thời khóa biểu động' : 'Dynamic Timetable', icon: <Calendar className="w-4 h-4" /> },
-    { id: 'students', label: lang === 'vi' ? 'Học sinh & Điểm danh' : 'Students & Attendance', icon: <Users className="w-4 h-4" /> },
-    { id: 'scores', label: lang === 'vi' ? 'Học bạ Online & AI' : 'Report Card & AI Scan', icon: <FileBarChart2 className="w-4 h-4" /> },
-    { id: 'exams', label: lang === 'vi' ? 'Thư viện Đề chuẩn' : 'National Exam Bank', icon: <BookOpen className="w-4 h-4" /> },
-    { id: 'tuition', label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing', icon: <Wallet className="w-4 h-4" /> },
-    { id: 'support', label: lang === 'vi' ? 'Hỗ trợ 24/7 & RBAC' : '24/7 AI & System', icon: <MessageSquare className="w-4 h-4" /> },
+    {
+      id: 'overview',
+      label: lang === 'vi' ? 'Tổng quan & Phân tích' : 'Analytics Overview',
+      icon: <LayoutDashboard className="w-4 h-4" />,
+    },
+    ...(showSystemCmsNav
+      ? [
+          {
+            id: 'system' as CmsTab,
+            label: lang === 'vi' ? 'Cấu hình CMS & Phân quyền' : 'Site CMS & RBAC',
+            icon: <Settings className="w-4 h-4" />,
+          },
+        ]
+      : []),
+    {
+      id: 'timetable',
+      label: lang === 'vi' ? 'Thời khóa biểu động' : 'Dynamic Timetable',
+      icon: <Calendar className="w-4 h-4" />,
+    },
+    {
+      id: 'students',
+      label: lang === 'vi' ? 'Học sinh & Điểm danh' : 'Students & Attendance',
+      icon: <Users className="w-4 h-4" />,
+    },
+    {
+      id: 'scores',
+      label: lang === 'vi' ? 'Học bạ Online & AI' : 'Report Card & AI Scan',
+      icon: <FileBarChart2 className="w-4 h-4" />,
+    },
+    {
+      id: 'exams',
+      label: lang === 'vi' ? 'Thư viện Đề chuẩn' : 'National Exam Bank',
+      icon: <BookOpen className="w-4 h-4" />,
+    },
+    {
+      id: 'tuition',
+      label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing',
+      icon: <Wallet className="w-4 h-4" />,
+    },
+    {
+      id: 'support',
+      label: lang === 'vi' ? 'Hỗ trợ 24/7 & Hạ tầng' : '24/7 AI & System',
+      icon: <MessageSquare className="w-4 h-4" />,
+    },
   ];
 
   const activeNavLabel = navItems.find((n) => n.id === activeTab)?.label || 'Tổng quan';
 
   return (
     <>
-      {mode === 'PUBLIC' || !workspace ? (
-        <PublicPortal
+      {viewShell === 'FRONTEND' || !workspace || !currentUser ? (
+        <FrontendPortal
           bootstrap={bootstrap}
+          workspace={workspace}
+          siteConfig={siteConfig}
+          courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
+          currentUser={currentUser}
+          frontendMode={frontendMode}
+          onChangeFrontendMode={setFrontendMode}
           lang={lang}
           onToggleLang={() => setLang((l) => (l === 'vi' ? 'en' : 'vi'))}
-          onOpenAuthModal={() => setShowAuthModal(true)}
+          editMode={editMode}
+          onToggleEditMode={() => setEditMode((e) => !e)}
+          onQuickSaveConfig={handleQuickSaveConfig}
+          onQuickSaveCourse={handleQuickSaveCourse}
+          onSignInGmail={handleSignInGmail}
+          onOpenRoleModal={() => setShowRoleModal(true)}
+          onOpenCms={(tab) => {
+            if (tab) setActiveTab(tab as CmsTab);
+            setViewShell('CMS');
+          }}
+          authBusy={authBusy}
         />
       ) : (
         <div className="min-h-screen bg-slate-50 flex">
-          {/* Desktop Sidebar (256px) */}
+          {/* Desktop Sidebar */}
           <aside className="hidden lg:flex w-64 shrink-0 bg-white border-r border-slate-200 flex-col justify-between">
             <div>
               <div className="h-16 px-5 border-b border-slate-200 flex items-center gap-2.5">
@@ -173,7 +383,9 @@ export default function App() {
                 </span>
                 <div className="min-w-0">
                   <p className="text-sm font-extrabold text-blue-950 truncate">Nhân Trí CMS</p>
-                  <p className="text-[11px] text-slate-500 truncate">Trao tri thức – Gửi yêu thương</p>
+                  <p className="text-[11px] font-mono-num text-slate-500 truncate">
+                    {siteConfig.domain}
+                  </p>
                 </div>
               </div>
 
@@ -198,24 +410,35 @@ export default function App() {
 
             <div className="p-4 border-t border-slate-200 space-y-3">
               <div className="text-xs">
-                <p className="font-bold text-slate-950 truncate">{workspace.user.name}</p>
-                <p className="text-slate-500 mt-0.5">{roleLabel(workspace.user.role, lang)}</p>
+                <p className="font-bold text-slate-950 truncate">{currentUser.name}</p>
+                <p className="text-blue-900 font-semibold mt-0.5">{roleLabel(currentUser.role, lang)}</p>
+                <p className="text-[11px] font-mono-num text-slate-500 truncate mt-0.5">
+                  {currentUser.email}
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-2">
+                {isAdminOrSuper(currentUser.role) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditMode(true);
+                      setViewShell('FRONTEND');
+                    }}
+                    className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer whitespace-nowrap"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Sửa 1-Click</span>
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => setShowAuthModal(true)}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer whitespace-nowrap"
-                >
-                  Đổi vai trò
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('PUBLIC')}
-                  className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap"
+                  onClick={() => setViewShell('FRONTEND')}
+                  className={`inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap ${
+                    isAdminOrSuper(currentUser.role) ? '' : 'col-span-2'
+                  }`}
                 >
                   <Home className="w-3.5 h-3.5" />
-                  <span>Trang chủ</span>
+                  <span>Frontend</span>
                 </button>
               </div>
               <button
@@ -224,7 +447,7 @@ export default function App() {
                 className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 rounded-lg cursor-pointer"
               >
                 <LogOut className="w-3.5 h-3.5" />
-                <span>Đăng xuất phiên</span>
+                <span>Đăng xuất</span>
               </button>
             </div>
           </aside>
@@ -265,42 +488,39 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       setMobileMenuOpen(false);
-                      setShowAuthModal(true);
-                    }}
-                    className="w-full py-2 text-xs font-semibold text-blue-950 bg-blue-50 rounded-lg"
-                  >
-                    Đổi vai trò ({roleLabel(workspace.user.role, lang)})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMobileMenuOpen(false);
-                      setMode('PUBLIC');
+                      setViewShell('FRONTEND');
                     }}
                     className="w-full py-2 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg"
                   >
-                    Về Trang chủ khóa học
+                    Về Frontend ({siteConfig.domain})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full py-2 text-xs font-semibold text-red-700 bg-red-50 rounded-lg"
+                  >
+                    Đăng xuất
                   </button>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Main Workspace Area */}
+          {/* Main CMS Workspace */}
           <div className="flex-1 min-w-0 flex flex-col">
-            {/* Contextual Breadcrumb Top Header */}
             <header className="h-16 bg-white border-b border-slate-200 px-4 lg:px-8 flex items-center justify-between gap-4 sticky top-0 z-30">
               <div className="flex items-center gap-3 min-w-0">
                 <button
                   type="button"
                   onClick={() => setMobileMenuOpen(true)}
                   className="lg:hidden p-2 text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
-                  aria-label="Mở menu"
                 >
                   <Menu className="w-5 h-5" />
                 </button>
                 <div className="flex items-center gap-2 text-sm min-w-0">
-                  <span className="text-slate-400 hidden sm:inline">Trung Tâm Nhân Trí</span>
+                  <span className="text-slate-400 hidden sm:inline font-mono-num">
+                    {siteConfig.domain}
+                  </span>
                   <span className="text-slate-300 hidden sm:inline">/</span>
                   <span className="font-semibold text-slate-950 truncate">{activeNavLabel}</span>
                 </div>
@@ -310,14 +530,14 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setLang((l) => (l === 'vi' ? 'en' : 'vi'))}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap"
+                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
                 >
                   {lang === 'vi' ? 'EN' : 'VI'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowNotifDrawer(true)}
-                  className="relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer whitespace-nowrap"
+                  className="relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg cursor-pointer"
                 >
                   <Bell className="w-4 h-4 text-blue-900" />
                   <span>Thông báo</span>
@@ -333,6 +553,22 @@ export default function App() {
                 <CmsOverview
                   workspace={workspace}
                   onNavigate={(t) => setActiveTab(t as CmsTab)}
+                />
+              )}
+              {activeTab === 'system' && showSystemCmsNav && (
+                <SystemConfigCms
+                  currentUser={currentUser}
+                  siteConfig={siteConfig}
+                  courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
+                  bootstrap={bootstrap}
+                  onConfigSaved={(next) => {
+                    setSiteConfig(next);
+                    showToast('Đã đồng bộ cấu hình hệ thống.');
+                  }}
+                  onJumpToInlineEdit={() => {
+                    setEditMode(true);
+                    setViewShell('FRONTEND');
+                  }}
                 />
               )}
               {activeTab === 'timetable' && (
@@ -358,23 +594,23 @@ export default function App() {
         </div>
       )}
 
-      {/* Role Sign-in & First-Run Admin Security Modal */}
-      {showAuthModal && (
+      {/* Gmail Sign-In & Role Preview Modal */}
+      {showRoleModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold text-blue-900 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4" />
-                  <span>Cổng đăng nhập phân quyền RBAC · Trung Tâm Nhân Trí</span>
+                  <span>Đăng nhập Gmail &amp; Phân quyền RBAC · {siteConfig.domain}</span>
                 </p>
                 <h2 className="text-lg font-bold text-slate-950 mt-0.5">
-                  Chọn vai trò truy cập hệ thống CMS
+                  Đăng nhập tài khoản Trung Tâm Nhân Trí
                 </h2>
               </div>
               <button
                 type="button"
-                onClick={() => setShowAuthModal(false)}
+                onClick={() => setShowRoleModal(false)}
                 className="text-slate-400 hover:text-slate-900 cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -387,110 +623,50 @@ export default function App() {
               </div>
             )}
 
-            <div className="grid sm:grid-cols-2 gap-3">
-              {[
-                {
-                  role: 'ADMIN' as UserRole,
-                  title: 'Quản trị viên (Ban Giám Đốc)',
-                  desc: 'Toàn quyền TKB, đối soát thu chi, nhắc nợ & xuất SQL.',
-                },
-                {
-                  role: 'TEACHER' as UserRole,
-                  title: 'Giáo viên (Cô Mẫn)',
-                  desc: 'Điểm danh ca học, nhập Excel/OCR danh sách & dạy thay.',
-                },
-                {
-                  role: 'PARENT' as UserRole,
-                  title: 'Phụ huynh (PH em Phúc Hòa)',
-                  desc: 'Xem Học bạ Online, tải TKB Google Calendar & đóng học phí QR.',
-                },
-                {
-                  role: 'STUDENT' as UserRole,
-                  title: 'Học sinh (Nguyễn Phúc Hòa 6A1)',
-                  desc: 'Chụp bài kiểm tra quét AI, luyện đề trắc nghiệm & hỏi AI 24/7.',
-                },
-              ].map((item) => (
-                <button
-                  key={item.role}
-                  type="button"
-                  disabled={authLoading}
-                  onClick={() => signInAsRole(item.role, item.role === 'ADMIN' ? adminPasscode : undefined)}
-                  className="text-left p-4 border border-slate-200 hover:border-blue-900 hover:bg-blue-50/40 rounded-xl transition-colors cursor-pointer space-y-1"
-                >
-                  <p className="text-sm font-bold text-slate-950">{item.title}</p>
-                  <p className="text-xs text-slate-600">{item.desc}</p>
-                </button>
-              ))}
+            <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+              <div className="text-xs text-slate-700 space-y-1">
+                <p className="font-bold text-blue-950">Đăng nhập chính thức bằng Gmail (Firebase Auth)</p>
+                <p>
+                  SuperAdmin: <span className="font-mono-num font-semibold">{SUPER_ADMIN_EMAIL}</span>
+                </p>
+                <p>
+                  Admin Vận hành: <span className="font-mono-num font-semibold">{ADMIN_EMAIL}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={handleSignInGmail}
+                className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 text-sm font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-60 rounded-lg cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>{authBusy ? 'Đang mở xác thực Google...' : 'Tiếp tục với tài khoản Gmail'}</span>
+              </button>
             </div>
 
-            {needsAdminPasscode && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  signInAsRole('ADMIN', adminPasscode);
-                }}
-                className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5"
-              >
-                <label className="block text-xs font-semibold text-slate-800">
-                  Nhập mật khẩu Quản trị viên để xác thực:
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    required
-                    value={adminPasscode}
-                    onChange={(e) => setAdminPasscode(e.target.value)}
-                    placeholder="Nhập mật khẩu quản trị..."
-                    className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                  />
+            <div className="space-y-2.5 pt-2 border-t border-slate-200">
+              <p className="text-xs font-semibold text-slate-500">
+                Hoặc trải nghiệm nhanh giao diện theo vai trò (chế độ xem thử):
+              </p>
+              <div className="grid sm:grid-cols-3 gap-2.5">
+                {[
+                  { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Điểm danh & TKB' },
+                  { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'Học bạ & Học phí' },
+                  { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'Đề thi & AI chấm' },
+                ].map((item) => (
                   <button
-                    type="submit"
-                    disabled={authLoading}
-                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-900 rounded-lg cursor-pointer"
-                  >
-                    Xác thực
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {!bootstrap.security.adminPasscodeConfigured && (
-              <div className="pt-3 border-t border-slate-200 text-xs">
-                {!showClaimForm ? (
-                  <button
+                    key={item.role}
                     type="button"
-                    onClick={() => setShowClaimForm(true)}
-                    className="text-blue-900 font-semibold hover:underline cursor-pointer"
+                    disabled={authBusy}
+                    onClick={() => signInPreviewRole(item.role)}
+                    className="text-left p-3 border border-slate-200 hover:border-blue-900 hover:bg-blue-50/40 rounded-lg cursor-pointer"
                   >
-                    Thiết lập mật khẩu bảo vệ riêng cho tài khoản Quản trị viên (tùy chọn trước khi chia sẻ)
+                    <p className="text-xs font-bold text-slate-950">{item.label}</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">{item.desc}</p>
                   </button>
-                ) : (
-                  <form onSubmit={handleClaimAdminPasscode} className="space-y-2">
-                    <p className="text-slate-600">
-                      Mật khẩu sẽ được băm bảo mật (scrypt) trên máy chủ và yêu cầu khi đăng nhập vai trò Quản trị viên.
-                    </p>
-                    <div className="flex gap-2">
-                      <input
-                        type="password"
-                        required
-                        minLength={6}
-                        value={claimPasscode}
-                        onChange={(e) => setClaimPasscode(e.target.value)}
-                        placeholder="Đặt mật khẩu quản trị (≥ 6 ký tự)..."
-                        className="flex-1 px-3 py-1.5 text-sm border border-slate-300 rounded-lg"
-                      />
-                      <button
-                        type="submit"
-                        disabled={authLoading}
-                        className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-900 rounded-lg cursor-pointer"
-                      >
-                        Lưu bảo mật
-                      </button>
-                    </div>
-                  </form>
-                )}
+                ))}
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -531,6 +707,14 @@ export default function App() {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Subtle Toast Confirmation */}
+      {toastMessage && (
+        <div className="fixed top-20 right-4 z-50 bg-slate-950 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-lg flex items-center gap-2 border border-slate-800">
+          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>{toastMessage}</span>
         </div>
       )}
     </>

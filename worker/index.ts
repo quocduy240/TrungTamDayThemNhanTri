@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import firebaseConfig from '../firebase-applet-config.json';
 import { INITIAL_DB, REAL_CENTER_GALLERY } from '../server/seedData.ts';
 import { CLOUDFLARE_D1_SCHEMA_SQL } from '../server/schemaSql.ts';
 import type {
@@ -46,31 +47,40 @@ export interface WorkerEnv {
   ADMIN_PASSCODE?: string;
 }
 
+const SUPER_ADMIN_EMAIL = 'duyweb5@gmail.com';
+const ADMIN_EMAIL = 'lethituman2021@gmail.com';
+
 const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
+  SUPER_ADMIN: {
+    id: 'usr-super-admin',
+    name: 'SuperAdmin Hệ thống Nhân Trí',
+    email: SUPER_ADMIN_EMAIL,
+    role: 'SUPER_ADMIN',
+  },
   ADMIN: {
     id: 'usr-admin',
-    name: 'Ban Giám Đốc Nhân Trí',
-    email: 'admin@nhantri.edu.vn',
+    name: 'Admin Quản trị Vận hành (Cô Mẫn)',
+    email: ADMIN_EMAIL,
     role: 'ADMIN',
   },
   TEACHER: {
     id: 'usr-teacher',
     name: 'Cô Nguyễn Thị Mẫn (GV Toán)',
-    email: 'co.man@nhantri.edu.vn',
+    email: 'co.man@daythemnhantri.com',
     role: 'TEACHER',
     linkedTeacherId: 't-man',
   },
   PARENT: {
     id: 'usr-parent',
     name: 'Anh Nguyễn Văn Phúc (PH em Hòa)',
-    email: 'ph.phuchoa@nhantri.edu.vn',
+    email: 'ph.phuchoa@daythemnhantri.com',
     role: 'PARENT',
     linkedStudentId: 'st-01',
   },
   STUDENT: {
     id: 'usr-student',
     name: 'Nguyễn Phúc Hòa (Lớp 6A1)',
-    email: 'hoanp.6a1@nhantri.edu.vn',
+    email: 'hoanp.6a1@daythemnhantri.com',
     role: 'STUDENT',
     linkedStudentId: 'st-01',
   },
@@ -402,8 +412,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     if (!user) {
       return json({ error: 'Vui lòng đăng nhập phiên làm việc để thực hiện thao tác này.' }, 401);
     }
-    if (roles && roles.length > 0 && !roles.includes(user.role)) {
-      return json({ error: 'Tài khoản hiện tại không đủ quyền truy cập chức năng này.' }, 403);
+    if (roles && roles.length > 0) {
+      const allowed =
+        roles.includes(user.role) || (user.role === 'SUPER_ADMIN' && roles.includes('ADMIN'));
+      if (!allowed) {
+        return json({ error: 'Tài khoản hiện tại không đủ quyền truy cập chức năng này.' }, 403);
+      }
     }
     return null;
   };
@@ -432,10 +446,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           'Cơ sở 2: Trung Tâm Nhân Trí 2 — TP. Long Xuyên, Tỉnh An Giang',
         ],
         hotlineZalo: '0918 990 999',
-        email: 'lienhe@nhantri.edu.vn',
+        email: 'lienhe@daythemnhantri.com',
+        domain: 'daythemnhantri.com',
       },
       courses: db.courses,
       teachers: db.teachers,
+      timetable: db.timetable,
+      exams: db.exams,
       gallery: REAL_CENTER_GALLERY,
       examsSummary: db.exams.map(
         ({
@@ -521,6 +538,53 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     return json({ token, user: DEMO_ACCOUNTS.ADMIN, claimed: true });
   }
 
+  if (method === 'POST' && pathname === '/api/v1/auth/firebase-bridge') {
+    const body = await readJson<{ idToken?: string; requestedRole?: string }>();
+    const idToken = typeof body.idToken === 'string' ? body.idToken : '';
+    if (!idToken) return json({ error: 'Thiếu Firebase ID token.' }, 401);
+
+    const lookupRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      },
+    );
+    if (!lookupRes.ok) {
+      return json({ error: 'Token Gmail Firebase không hợp lệ.' }, 401);
+    }
+    const lookupData = (await lookupRes.json()) as {
+      users?: { localId: string; email?: string; emailVerified?: boolean; displayName?: string; photoUrl?: string }[];
+    };
+    const fb = lookupData.users?.[0];
+    if (!fb || !fb.email || !fb.emailVerified) {
+      return json({ error: 'Tài khoản Gmail chưa được xác minh.' }, 401);
+    }
+
+    const email = fb.email.toLowerCase();
+    let role: UserRole = 'STUDENT';
+    if (email === SUPER_ADMIN_EMAIL) {
+      role = 'SUPER_ADMIN';
+    } else if (email === ADMIN_EMAIL) {
+      role = 'ADMIN';
+    } else if (body.requestedRole === 'PARENT' || body.requestedRole === 'STUDENT') {
+      role = body.requestedRole;
+    }
+
+    const bridgedUser: AuthUser = {
+      id: fb.localId,
+      name: fb.displayName || email.split('@')[0],
+      email,
+      photoURL: fb.photoUrl,
+      role,
+      linkedStudentId: role === 'STUDENT' || role === 'PARENT' ? 'st-01' : undefined,
+      authProvider: 'GOOGLE_FIREBASE',
+    };
+    const token = await signToken(bridgedUser, env);
+    return json({ token, user: bridgedUser });
+  }
+
   if (method === 'GET' && pathname === '/api/v1/auth/me') {
     const denied = requireRole();
     if (denied) return denied;
@@ -532,7 +596,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const denied = requireRole();
     if (denied) return denied;
     const db = await loadState(env);
-    const isStaff = user!.role === 'ADMIN' || user!.role === 'TEACHER';
+    const isAdminUser = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN';
+    const isStaff = isAdminUser || user!.role === 'TEACHER';
 
     return json({
       user,
@@ -542,13 +607,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       scores: isStaff ? db.scores : db.scores.filter((sc) => sc.studentId === user!.linkedStudentId),
       attendance: isStaff ? db.attendance : db.attendance.filter((a) => a.studentId === user!.linkedStudentId),
       tuition: isStaff ? db.tuition : db.tuition.filter((t) => t.studentId === user!.linkedStudentId),
-      expenses: user!.role === 'ADMIN' ? db.expenses : [],
+      expenses: isAdminUser ? db.expenses : [],
       exams: db.exams,
       tickets: isStaff
         ? db.tickets
         : db.tickets.filter((t) => t.authorRole === user!.role || t.authorName.includes('Hòa')),
       notifications: db.notifications.filter(
-        (n) => n.targetRole === 'ALL' || n.targetRole === user!.role || user!.role === 'ADMIN',
+        (n) => n.targetRole === 'ALL' || n.targetRole === user!.role || isAdminUser,
       ),
     });
   }

@@ -66,7 +66,10 @@ interface SubstituteSuggestion {
 }
 
 export const TimetableModule: React.FC<TimetableModuleProps> = ({ workspace, onRefresh }) => {
-  const isStaff = workspace.user.role === 'ADMIN' || workspace.user.role === 'TEACHER';
+  const isStaff =
+    workspace.user.role === 'SUPER_ADMIN' ||
+    workspace.user.role === 'ADMIN' ||
+    workspace.user.role === 'TEACHER';
 
   const [viewMode, setViewMode] = useState<'MASTER' | 'PERSONAL' | 'PE_MAKEUP'>('MASTER');
   const [classFilter, setClassFilter] = useState<string>('Tất cả lớp');
@@ -576,7 +579,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({ workspace, onR
                                       <UserX className="w-3 h-3" />
                                       <span>GV nghỉ đột xuất</span>
                                     </button>
-                                    {workspace.user.role === 'ADMIN' && (
+                                    {(workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN') && (
                                       <button
                                         type="button"
                                         onClick={() => handleDeleteSlot(slot.id)}

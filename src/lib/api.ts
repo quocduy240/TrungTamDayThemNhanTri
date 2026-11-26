@@ -65,9 +65,12 @@ export interface BootstrapPayload {
     campuses: string[];
     hotlineZalo: string;
     email: string;
+    domain?: string;
   };
   courses: CoursePackage[];
   teachers: Teacher[];
+  timetable?: TimetableSlot[];
+  exams?: NationalExam[];
   gallery: { id: string; url: string; title: string; caption: string }[];
   examsSummary: {
     id: string;
@@ -113,12 +116,21 @@ export function formatVnd(amount: number): string {
 
 export function roleLabel(role: UserRole, lang: 'vi' | 'en' = 'vi'): string {
   const map: Record<UserRole, { vi: string; en: string }> = {
-    ADMIN: { vi: 'Quản trị viên', en: 'Administrator' },
+    SUPER_ADMIN: { vi: 'SuperAdmin (Toàn quyền)', en: 'SuperAdmin' },
+    ADMIN: { vi: 'Admin (Quản trị vận hành)', en: 'Operations Admin' },
     TEACHER: { vi: 'Giáo viên', en: 'Teacher' },
     PARENT: { vi: 'Phụ huynh', en: 'Parent' },
     STUDENT: { vi: 'Học sinh', en: 'Student' },
   };
   return map[role][lang];
+}
+
+export function isAdminOrSuper(role?: UserRole | null): boolean {
+  return role === 'SUPER_ADMIN' || role === 'ADMIN';
+}
+
+export function isSuperAdminRole(role?: UserRole | null): boolean {
+  return role === 'SUPER_ADMIN';
 }
 
 export function buildZaloReportText(
@@ -159,7 +171,7 @@ export function buildZaloReportText(
       : 'Đi học chuyên cần đầy đủ';
 
   return [
-    `TRUNG TÂM DẠY THÊM HỌC THÊM NHÂN TRÍ`,
+    `TRUNG TÂM DẠY THÊM HỌC THÊM NHÂN TRÍ (daythemnhantri.com)`,
     `BÁO CÁO HỌC BẠ & LỊCH HỌC TUẦN`,
     `--------------------------------`,
     `Học sinh: ${student.fullName} (${student.centerClass} · ${student.school})`,

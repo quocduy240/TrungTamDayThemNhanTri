@@ -55,7 +55,7 @@ export const CmsOverview: React.FC<CmsOverviewProps> = ({ workspace, onNavigate 
     return [
       { name: 'Đã thu', amount: Number(paid.toFixed(2)) },
       { name: 'Công nợ', amount: Number(unpaid.toFixed(2)) },
-      ...(workspace.user.role === 'ADMIN'
+      ...(workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN'
         ? [{ name: 'Chi vận hành', amount: Number(expense.toFixed(2)) }]
         : []),
     ];

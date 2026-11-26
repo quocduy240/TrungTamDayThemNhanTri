@@ -1,38 +1,85 @@
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
+import firebaseConfig from '../firebase-applet-config.json' with { type: 'json' };
 import type { AuthUser, UserRole } from '../src/types.ts';
 
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
+export const SUPER_ADMIN_EMAIL = 'duyweb5@gmail.com';
+export const ADMIN_EMAIL = 'lethituman2021@gmail.com';
+
 export const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
+  SUPER_ADMIN: {
+    id: 'usr-super-admin',
+    name: 'SuperAdmin Hệ thống Nhân Trí',
+    email: SUPER_ADMIN_EMAIL,
+    role: 'SUPER_ADMIN',
+  },
   ADMIN: {
     id: 'usr-admin',
-    name: 'Ban Giám Đốc Nhân Trí',
-    email: 'admin@nhantri.edu.vn',
+    name: 'Admin Quản trị Vận hành (Cô Mẫn)',
+    email: ADMIN_EMAIL,
     role: 'ADMIN',
   },
   TEACHER: {
     id: 'usr-teacher',
     name: 'Cô Nguyễn Thị Mẫn (GV Toán)',
-    email: 'co.man@nhantri.edu.vn',
+    email: 'co.man@daythemnhantri.com',
     role: 'TEACHER',
     linkedTeacherId: 't-man',
   },
   PARENT: {
     id: 'usr-parent',
     name: 'Anh Nguyễn Văn Phúc (PH em Hòa)',
-    email: 'ph.phuchoa@nhantri.edu.vn',
+    email: 'ph.phuchoa@daythemnhantri.com',
     role: 'PARENT',
     linkedStudentId: 'st-01',
   },
   STUDENT: {
     id: 'usr-student',
     name: 'Nguyễn Phúc Hòa (Lớp 6A1)',
-    email: 'hoanp.6a1@nhantri.edu.vn',
+    email: 'hoanp.6a1@daythemnhantri.com',
     role: 'STUDENT',
     linkedStudentId: 'st-01',
   },
 };
+
+export async function verifyFirebaseIdToken(
+  idToken: string,
+): Promise<{ uid: string; email: string; emailVerified: boolean; displayName: string; photoURL?: string } | null> {
+  if (!idToken || typeof idToken !== 'string') return null;
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      users?: {
+        localId: string;
+        email?: string;
+        emailVerified?: boolean;
+        displayName?: string;
+        photoUrl?: string;
+      }[];
+    };
+    const u = data.users?.[0];
+    if (!u || !u.email) return null;
+    return {
+      uid: u.localId,
+      email: u.email.toLowerCase(),
+      emailVerified: Boolean(u.emailVerified),
+      displayName: u.displayName || u.email.split('@')[0],
+      photoURL: u.photoUrl,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -78,9 +125,11 @@ export function verifySessionToken(token: string): AuthUser | null {
       id: parsed.id,
       name: parsed.name,
       email: parsed.email,
+      photoURL: parsed.photoURL,
       role: parsed.role,
       linkedStudentId: parsed.linkedStudentId,
       linkedTeacherId: parsed.linkedTeacherId,
+      authProvider: parsed.authProvider,
     };
   } catch {
     return null;
@@ -109,9 +158,14 @@ export function requireAuth(roles?: UserRole[]) {
       res.status(401).json({ error: 'Vui lòng đăng nhập phiên làm việc để thực hiện thao tác này.' });
       return;
     }
-    if (roles && roles.length > 0 && !roles.includes(req.user.role)) {
-      res.status(403).json({ error: 'Tài khoản hiện tại không đủ quyền truy cập chức năng này.' });
-      return;
+    if (roles && roles.length > 0) {
+      const allowed =
+        roles.includes(req.user.role) ||
+        (req.user.role === 'SUPER_ADMIN' && roles.includes('ADMIN'));
+      if (!allowed) {
+        res.status(403).json({ error: 'Tài khoản hiện tại không đủ quyền truy cập chức năng này.' });
+        return;
+      }
     }
     next();
   };

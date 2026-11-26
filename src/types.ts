@@ -1,4 +1,6 @@
-export type UserRole = 'ADMIN' | 'TEACHER' | 'PARENT' | 'STUDENT';
+export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'TEACHER' | 'PARENT' | 'STUDENT';
+
+export type FrontendMode = 'TEACHER_STUDENT' | 'PARENT' | 'NEW_CUSTOMER';
 
 export type Language = 'vi' | 'en';
 
@@ -14,9 +16,72 @@ export interface AuthUser {
   id: string;
   name: string;
   email: string;
+  photoURL?: string;
   role: UserRole;
   linkedStudentId?: string;
   linkedTeacherId?: string;
+  authProvider?: 'GOOGLE_FIREBASE' | 'LOCAL_SESSION';
+}
+
+export interface SiteConfig {
+  domain: string;
+  centerName: string;
+  shortName: string;
+  slogan: string;
+  philosophy: string;
+  seoTitle: string;
+  seoDescription: string;
+  hotlineZalo: string;
+  zaloUrl: string;
+  contactEmail: string;
+  campus1: string;
+  campus2: string;
+  announcementBanner: string;
+  showAnnouncement: boolean;
+  defaultFrontendMode: FrontendMode;
+  heroTitleTeacherStudent: string;
+  heroSubtitleTeacherStudent: string;
+  heroTitleParent: string;
+  heroSubtitleParent: string;
+  heroTitleCustomer: string;
+  heroSubtitleCustomer: string;
+  heroImageUrl: string;
+  heroCaption: string;
+  annualDiscountPercent: number;
+  bankName: string;
+  bankAccount: string;
+  bankOwner: string;
+  momoPhone: string;
+  enableAiAdvisor: boolean;
+  enableOnlineExams: boolean;
+  enableOnlinePayment: boolean;
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
+export interface UserProfileDoc {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL?: string;
+  role: UserRole;
+  phone?: string;
+  preferredView?: FrontendMode;
+  linkedStudentId?: string;
+  linkedTeacherId?: string;
+  active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface RoleInviteDoc {
+  email: string;
+  role: Exclude<UserRole, 'SUPER_ADMIN'>;
+  displayName?: string;
+  linkedStudentId?: string;
+  linkedTeacherId?: string;
+  createdBy: string;
+  createdAt?: string;
 }
 
 export interface CoursePackage {
@@ -50,6 +115,7 @@ export interface Teacher {
 
 export interface Student {
   id: string;
+  ownerUid?: string;
   code: string;
   fullName: string;
   grade: number;
@@ -92,6 +158,7 @@ export interface TimetableSlot {
 
 export interface ScoreRecord {
   id: string;
+  ownerUid?: string;
   studentId: string;
   studentName: string;
   centerClass: string;
@@ -111,6 +178,7 @@ export interface ScoreRecord {
 
 export interface AttendanceRecord {
   id: string;
+  ownerUid?: string;
   date: string;
   studentId: string;
   studentName: string;
@@ -123,6 +191,7 @@ export interface AttendanceRecord {
 
 export interface TuitionRecord {
   id: string;
+  ownerUid?: string;
   studentId: string;
   studentName: string;
   centerClass: string;
@@ -172,6 +241,7 @@ export interface NationalExam {
 
 export interface FeedbackTicket {
   id: string;
+  authorUid?: string;
   createdAt: string;
   authorName: string;
   authorRole: UserRole | 'GUEST';
@@ -185,6 +255,7 @@ export interface FeedbackTicket {
 
 export interface AppNotification {
   id: string;
+  targetUid?: string;
   createdAt: string;
   title: string;
   body: string;

@@ -1,0 +1,374 @@
+{
+  "entities": {
+    "SiteConfig": {
+      "title": "SiteConfig",
+      "description": "Global dynamic website configuration, SEO metadata, contact channels, payment details, 3-mode frontend copy, gallery items, and feature toggles for daythemnhantri.com.",
+      "type": "object",
+      "properties": {
+        "domain": { "type": "string", "minLength": 4, "maxLength": 120 },
+        "centerName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "shortName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "slogan": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "philosophy": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "seoTitle": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "seoDescription": { "type": "string", "minLength": 2, "maxLength": 320 },
+        "hotlineZalo": { "type": "string", "minLength": 6, "maxLength": 40 },
+        "zaloUrl": { "type": "string", "minLength": 4, "maxLength": 200 },
+        "contactEmail": { "type": "string", "minLength": 5, "maxLength": 120 },
+        "campus1": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "campus2": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "announcementBanner": { "type": "string", "maxLength": 260 },
+        "showAnnouncement": { "type": "boolean" },
+        "defaultFrontendMode": { "type": "string", "enum": ["TEACHER_STUDENT", "PARENT", "NEW_CUSTOMER"] },
+        "heroTitleTeacherStudent": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "heroSubtitleTeacherStudent": { "type": "string", "minLength": 2, "maxLength": 400 },
+        "heroTitleParent": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "heroSubtitleParent": { "type": "string", "minLength": 2, "maxLength": 400 },
+        "heroTitleCustomer": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "heroSubtitleCustomer": { "type": "string", "minLength": 2, "maxLength": 400 },
+        "heroImageUrl": { "type": "string", "minLength": 4, "maxLength": 300 },
+        "heroCaption": { "type": "string", "maxLength": 260 },
+        "annualDiscountPercent": { "type": "number" },
+        "bankName": { "type": "string", "maxLength": 100 },
+        "bankAccount": { "type": "string", "maxLength": 60 },
+        "bankOwner": { "type": "string", "maxLength": 120 },
+        "momoPhone": { "type": "string", "maxLength": 40 },
+        "enableAiAdvisor": { "type": "boolean" },
+        "enableOnlineExams": { "type": "boolean" },
+        "enableOnlinePayment": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "domain",
+        "centerName",
+        "shortName",
+        "slogan",
+        "hotlineZalo",
+        "defaultFrontendMode",
+        "heroTitleTeacherStudent",
+        "heroTitleParent",
+        "heroTitleCustomer"
+      ]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated Gmail user profile and RBAC role assignment.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 2, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT"] },
+        "phone": { "type": "string", "maxLength": 40 },
+        "preferredView": { "type": "string", "enum": ["TEACHER_STUDENT", "PARENT", "NEW_CUSTOMER"] },
+        "linkedStudentId": { "type": "string", "maxLength": 128 },
+        "linkedTeacherId": { "type": "string", "maxLength": 128 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "active"]
+    },
+    "RoleInvite": {
+      "title": "RoleInvite",
+      "description": "Pre-assigned Gmail-to-role mapping managed exclusively by SuperAdmin.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "role": { "type": "string", "enum": ["ADMIN", "TEACHER", "PARENT", "STUDENT"] },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "linkedStudentId": { "type": "string", "maxLength": 128 },
+        "linkedTeacherId": { "type": "string", "maxLength": 128 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "createdBy"]
+    },
+    "CoursePackage": {
+      "title": "CoursePackage",
+      "description": "Publicly visible course package for Grades 3-12 editable via 1-click CMS.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "level": { "type": "string", "enum": ["CAP_1", "CAP_2", "CAP_3"] },
+        "title": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "titleEn": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "grades": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "billingModel": { "type": "string", "enum": ["TUTORING", "ALL_IN_ONE", "PER_SUBJECT"] },
+        "monthlyPrice": { "type": "number" },
+        "annualDiscountPercent": { "type": "number" },
+        "boardingAddonPrice": { "type": "number" },
+        "shuttleAddonPrice": { "type": "number" },
+        "subjects": { "type": "array" },
+        "highlights": { "type": "array" },
+        "highlightsEn": { "type": "array" },
+        "imageUrl": { "type": "string", "maxLength": 300 }
+      },
+      "required": ["id", "level", "title", "grades", "billingModel", "monthlyPrice", "annualDiscountPercent"]
+    },
+    "PublicTeacher": {
+      "title": "PublicTeacher",
+      "description": "Public faculty directory entry without personal contact PII.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "shortName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "subjects": { "type": "array" },
+        "degree": { "type": "string", "maxLength": 140 },
+        "experienceYears": { "type": "number" },
+        "roomDefault": { "type": "string", "maxLength": 60 },
+        "status": { "type": "string", "enum": ["ACTIVE", "ON_LEAVE"] }
+      },
+      "required": ["id", "name", "shortName", "subjects", "degree", "experienceYears", "status"]
+    },
+    "PublicTimetableSlot": {
+      "title": "PublicTimetableSlot",
+      "description": "Class schedule slot synced across center shifts (Morning/Afternoon/Evening).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "weekLabel": { "type": "string", "maxLength": 80 },
+        "period": { "type": "string", "enum": ["SANG", "CHIEU", "TOI"] },
+        "shift": { "type": "string", "enum": ["CA_1", "CA_2"] },
+        "timeRange": { "type": "string", "maxLength": 40 },
+        "day": { "type": "string", "enum": ["T2", "T3", "T4", "T5", "T6", "T7"] },
+        "centerClass": { "type": "string", "maxLength": 60 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 80 },
+        "room": { "type": "string", "maxLength": 60 },
+        "slotType": { "type": "string", "enum": ["MAIN", "TRA_BAI", "PHU_DAO", "BU_THE_DUC"] },
+        "status": { "type": "string", "enum": ["SCHEDULED", "TEACHER_ABSENT", "SUBSTITUTED", "OFF"] },
+        "note": { "type": "string", "maxLength": 300 }
+      },
+      "required": ["id", "period", "shift", "timeRange", "day", "centerClass", "subject", "teacherId", "teacherName", "room", "slotType", "status"]
+    },
+    "StudentRecord": {
+      "title": "StudentRecord",
+      "description": "Protected student record containing parent contact PII.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 40 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "grade": { "type": "number" },
+        "level": { "type": "string", "enum": ["CAP_1", "CAP_2", "CAP_3"] },
+        "centerClass": { "type": "string", "maxLength": 60 },
+        "schoolClass": { "type": "string", "maxLength": 40 },
+        "school": { "type": "string", "maxLength": 140 },
+        "homeroomTeacher": { "type": "string", "maxLength": 80 },
+        "room": { "type": "string", "maxLength": 60 },
+        "parentName": { "type": "string", "maxLength": 120 },
+        "parentPhone": { "type": "string", "maxLength": 40 },
+        "parentZalo": { "type": "string", "maxLength": 40 },
+        "packageType": { "type": "string", "enum": ["TUTORING", "ALL_IN_ONE", "PER_SUBJECT"] },
+        "hasBoarding": { "type": "boolean" },
+        "hasShuttle": { "type": "boolean" },
+        "annualPrepaid": { "type": "boolean" },
+        "peConflictDay": { "type": "string", "maxLength": 10 },
+        "peConflictShift": { "type": "string", "maxLength": 80 },
+        "eveningMakeupSlot": { "type": "string", "maxLength": 180 },
+        "enrolledSubjects": { "type": "array" },
+        "status": { "type": "string", "enum": ["ACTIVE", "PAUSED"] }
+      },
+      "required": ["id", "code", "fullName", "grade", "level", "centerClass", "school", "parentName", "parentPhone", "packageType", "status"]
+    },
+    "ScoreRecord": {
+      "title": "ScoreRecord",
+      "description": "Student academic grade entry (self-entered, teacher-entered, AI-scanned, or quiz).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centerClass": { "type": "string", "maxLength": 60 },
+        "subject": { "type": "string", "maxLength": 80 },
+        "examType": { "type": "string", "enum": ["15_PHUT", "1_TIET", "GIUA_KY", "CUOI_KY", "TRAC_NGHIEM_ONLINE"] },
+        "score": { "type": "number" },
+        "maxScore": { "type": "number" },
+        "date": { "type": "string", "maxLength": 30 },
+        "school": { "type": "string", "maxLength": 140 },
+        "source": { "type": "string", "enum": ["SELF_ENTRY", "AI_SCAN", "TEACHER", "ONLINE_QUIZ"] },
+        "verified": { "type": "boolean" },
+        "aiSummary": { "type": "string", "maxLength": 600 },
+        "strengths": { "type": "array" },
+        "improvements": { "type": "array" },
+        "imageUrl": { "type": "string", "maxLength": 300 }
+      },
+      "required": ["id", "studentId", "studentName", "centerClass", "subject", "examType", "score", "maxScore", "date", "source", "verified"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily attendance record linked to student and shift.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 30 },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centerClass": { "type": "string", "maxLength": 60 },
+        "shiftLabel": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["PRESENT", "LATE", "EXCUSED", "MAKEUP_EVENING"] },
+        "note": { "type": "string", "maxLength": 300 },
+        "parentNotified": { "type": "boolean" }
+      },
+      "required": ["id", "date", "studentId", "studentName", "centerClass", "shiftLabel", "status", "parentNotified"]
+    },
+    "TuitionRecord": {
+      "title": "TuitionRecord",
+      "description": "Monthly tuition invoice, online payment status, and reminder count.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 120 },
+        "centerClass": { "type": "string", "maxLength": 60 },
+        "parentPhone": { "type": "string", "maxLength": 40 },
+        "monthLabel": { "type": "string", "maxLength": 100 },
+        "baseAmount": { "type": "number" },
+        "boardingAmount": { "type": "number" },
+        "shuttleAmount": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "dueDate": { "type": "string", "maxLength": 30 },
+        "status": { "type": "string", "enum": ["PAID", "DUE_SOON", "OVERDUE"] },
+        "paymentMethod": { "type": "string", "enum": ["VIETQR", "MOMO", "ZALOPAY", "CASH"] },
+        "paidAt": { "type": "string", "maxLength": 30 },
+        "remindersSent": { "type": "number" }
+      },
+      "required": ["id", "studentId", "studentName", "centerClass", "monthLabel", "totalAmount", "paidAmount", "dueDate", "status", "remindersSent"]
+    },
+    "ExpenseRecord": {
+      "title": "ExpenseRecord",
+      "description": "Admin-only operating expense entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "date": { "type": "string", "maxLength": 30 },
+        "category": { "type": "string", "enum": ["SALARY", "MEALS", "UTILITIES", "MATERIALS"] },
+        "description": { "type": "string", "minLength": 2, "maxLength": 260 },
+        "amount": { "type": "number" }
+      },
+      "required": ["id", "date", "category", "description", "amount"]
+    },
+    "NationalExam": {
+      "title": "NationalExam",
+      "description": "GDPT 2018 national practice exam with MCQ questions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "level": { "type": "string", "enum": ["CAP_1", "CAP_2", "CAP_3"] },
+        "grade": { "type": "number" },
+        "subject": { "type": "string", "maxLength": 80 },
+        "durationMinutes": { "type": "number" },
+        "curriculumStandard": { "type": "string", "maxLength": 160 },
+        "difficulty": { "type": "string", "enum": ["CO_BAN", "KHA", "NANG_CAO"] },
+        "attemptsCount": { "type": "number" },
+        "questions": { "type": "array" }
+      },
+      "required": ["id", "title", "level", "grade", "subject", "durationMinutes", "difficulty", "attemptsCount", "questions"]
+    },
+    "FeedbackTicket": {
+      "title": "FeedbackTicket",
+      "description": "Parent, student, or teacher inquiry and support ticket.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "authorRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT", "GUEST"] },
+        "phone": { "type": "string", "maxLength": 40 },
+        "category": { "type": "string", "enum": ["CONSULTATION", "FEEDBACK", "SCHEDULE_CHANGE", "TUITION"] },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "message": { "type": "string", "minLength": 2, "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["OPEN", "IN_PROGRESS", "RESOLVED"] },
+        "reply": { "type": "string", "maxLength": 1000 }
+      },
+      "required": ["id", "authorUid", "createdAt", "authorName", "authorRole", "category", "subject", "message", "status"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Real-time notification for app, Zalo, or email channels.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "body": { "type": "string", "minLength": 2, "maxLength": 600 },
+        "channel": { "type": "string", "enum": ["APP", "ZALO", "EMAIL"] },
+        "targetRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT", "ALL"] },
+        "read": { "type": "boolean" }
+      },
+      "required": ["id", "createdAt", "title", "body", "channel", "targetRole", "read"]
+    }
+  },
+  "firestore": {
+    "/site_config/{configId}": {
+      "schema": { "$ref": "#/entities/SiteConfig" },
+      "description": "Live dynamic configuration and 1-click editable frontend copy for daythemnhantri.com."
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated Gmail user profiles with strict RBAC roles."
+    },
+    "/role_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/RoleInvite" },
+      "description": "Pre-assigned Gmail role invites managed exclusively by SuperAdmin."
+    },
+    "/courses/{courseId}": {
+      "schema": { "$ref": "#/entities/CoursePackage" },
+      "description": "Publicly readable course packages editable by Admin and SuperAdmin."
+    },
+    "/public_teachers/{teacherId}": {
+      "schema": { "$ref": "#/entities/PublicTeacher" },
+      "description": "Non-PII public faculty directory."
+    },
+    "/public_timetable/{slotId}": {
+      "schema": { "$ref": "#/entities/PublicTimetableSlot" },
+      "description": "Synced weekly center schedule across Morning, Afternoon, and Evening shifts."
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentRecord" },
+      "description": "Protected student roster and parent Zalo contact records."
+    },
+    "/scores/{scoreId}": {
+      "schema": { "$ref": "#/entities/ScoreRecord" },
+      "description": "Online report card scores (manual, AI-scanned, and online exams)."
+    },
+    "/attendance/{attId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Daily attendance records and evening PE makeup logs."
+    },
+    "/tuition/{tuitionId}": {
+      "schema": { "$ref": "#/entities/TuitionRecord" },
+      "description": "Student tuition invoices, online payments, and debt reminders."
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/ExpenseRecord" },
+      "description": "Admin-only operating expenses for financial reconciliation."
+    },
+    "/exams/{examId}": {
+      "schema": { "$ref": "#/entities/NationalExam" },
+      "description": "GDPT 2018 national practice exam library."
+    },
+    "/tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/FeedbackTicket" },
+      "description": "Support, consultation, schedule-change, and feedback tickets."
+    },
+    "/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/AppNotification" },
+      "description": "Real-time notifications across App, Zalo, and Email."
+    }
+  }
+}

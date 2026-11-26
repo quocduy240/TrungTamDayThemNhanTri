@@ -70,7 +70,10 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
   workspace,
   onRefresh,
 }) => {
-  const isStaff = workspace.user.role === 'ADMIN' || workspace.user.role === 'TEACHER';
+  const isStaff =
+    workspace.user.role === 'SUPER_ADMIN' ||
+    workspace.user.role === 'ADMIN' ||
+    workspace.user.role === 'TEACHER';
 
   const [search, setSearch] = useState('');
   const [gradeFilter, setGradeFilter] = useState<'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3'>('ALL');

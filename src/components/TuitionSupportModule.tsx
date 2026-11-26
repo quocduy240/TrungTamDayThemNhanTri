@@ -22,7 +22,7 @@ interface TuitionViewProps {
 }
 
 export const TuitionModule: React.FC<TuitionViewProps> = ({ workspace, onRefresh }) => {
-  const isAdmin = workspace.user.role === 'ADMIN';
+  const isAdmin = workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PAID' | 'DUE_SOON' | 'OVERDUE'>('ALL');
   const [payModal, setPayModal] = useState<TuitionRecord | null>(null);
   const [payMethod, setPayMethod] = useState<'VIETQR' | 'MOMO' | 'ZALOPAY'>('VIETQR');
@@ -327,7 +327,7 @@ export const SupportSystemModule: React.FC<SupportSystemModuleProps> = ({
   workspace,
   onRefresh,
 }) => {
-  const isAdmin = workspace.user.role === 'ADMIN';
+  const isAdmin = workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiReply, setAiReply] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
@@ -517,7 +517,7 @@ export const SupportSystemModule: React.FC<SupportSystemModuleProps> = ({
                   <strong>Phản hồi Nhân Trí:</strong> {tk.reply}
                 </p>
               )}
-              {(workspace.user.role === 'ADMIN' || workspace.user.role === 'TEACHER') && !tk.reply && (
+              {(workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN' || workspace.user.role === 'TEACHER') && !tk.reply && (
                 <div className="flex gap-2 pt-1">
                   <input
                     type="text"

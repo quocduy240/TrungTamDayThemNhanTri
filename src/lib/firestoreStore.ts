@@ -1,0 +1,487 @@
+import type { User as FirebaseUser } from 'firebase/auth';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  onSnapshot,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
+import {
+  ADMIN_EMAIL,
+  db,
+  handleFirestoreError,
+  OFFICIAL_DOMAIN,
+  OperationType,
+  SUPER_ADMIN_EMAIL,
+} from './firebase';
+import type { BootstrapPayload } from './api';
+import type {
+  AuthUser,
+  CoursePackage,
+  RoleInviteDoc,
+  SiteConfig,
+  UserProfileDoc,
+  UserRole,
+} from '../types';
+
+export const DEFAULT_SITE_CONFIG: SiteConfig = {
+  domain: OFFICIAL_DOMAIN,
+  centerName: 'TRUNG TÂM DẠY THÊM HỌC THÊM NHÂN TRÍ',
+  shortName: 'Nhân Trí',
+  slogan: 'Trao tri thức – Gửi yêu thương',
+  philosophy: 'Soạn bài, trả bài, làm bài tập theo thời khóa biểu trong lớp · Tận tâm, tận lực, tận tình',
+  seoTitle: 'Trung Tâm Dạy Thêm Học Thêm Nhân Trí — daythemnhantri.com',
+  seoDescription:
+    'Hệ quản trị học vụ CMS, khóa học Cấp 1-2-3, thời khóa biểu động, học bạ online AI, thư viện đề GDPT 2018 và thanh toán học phí trực tuyến tại Long Xuyên.',
+  hotlineZalo: '0918 990 999',
+  zaloUrl: 'https://zalo.me/0918990999',
+  contactEmail: 'lienhe@daythemnhantri.com',
+  campus1: 'Cơ sở 1: TP. Long Xuyên, Tỉnh An Giang',
+  campus2: 'Cơ sở 2: Trung Tâm Nhân Trí 2 — TP. Long Xuyên, Tỉnh An Giang',
+  announcementBanner:
+    'Tuần 13 đang áp dụng lịch học bù tối 17h30–19h00 cho học sinh trùng tiết Thể dục · Ưu đãi -10% khi đóng học phí trọn năm.',
+  showAnnouncement: true,
+  defaultFrontendMode: 'TEACHER_STUDENT',
+  heroTitleTeacherStudent: 'Cổng Học Tập & Giảng Dạy Nhân Trí',
+  heroSubtitleTeacherStudent:
+    'Tra cứu thời khóa biểu Sáng · Chiều · Tối theo thời gian thực, luyện ngân hàng đề chuẩn GDPT 2018 và tải ảnh bài kiểm tra để AI phân tích điểm số ngay lập tức.',
+  heroTitleParent: 'Cổng Theo Dõi Học Tập Phụ Huynh',
+  heroSubtitleParent:
+    'Tra cứu Học bạ Online của con, xem chuyên cần & lịch học bù Thể dục, đồng bộ Google Calendar, xuất báo cáo Zalo và thanh toán học phí qua mã VietQR/MoMo.',
+  heroTitleCustomer: 'Trung Tâm Dạy Thêm Nhân Trí — Trao tri thức, Gửi yêu thương',
+  heroSubtitleCustomer:
+    'Hệ thống giáo dục chuẩn mực từ Lớp 3 đến Lớp 12: Dạy kèm Cấp 1, Trọn gói Cấp 2 (có trả bài, bán trú cơm nước, đưa rước) và Chuyên sâu từng môn Cấp 3 tại Long Xuyên.',
+  heroImageUrl: '/assets/aistudio/IMG_9559_62d21d91.JPG',
+  heroCaption: 'Thầy cô và học sinh Trung Tâm Dạy Thêm Học Thêm Nhân Trí 2 tại TP. Long Xuyên, An Giang.',
+  annualDiscountPercent: 10,
+  bankName: 'Vietcombank CN An Giang',
+  bankAccount: '0151000889999',
+  bankOwner: 'TRUNG TAM DAY THEM NHAN TRI',
+  momoPhone: '0918 990 999',
+  enableAiAdvisor: true,
+  enableOnlineExams: true,
+  enableOnlinePayment: true,
+};
+
+const ADMIN_ALLOWED_CONFIG_KEYS = new Set<keyof SiteConfig>([
+  'centerName',
+  'shortName',
+  'slogan',
+  'philosophy',
+  'hotlineZalo',
+  'zaloUrl',
+  'contactEmail',
+  'campus1',
+  'campus2',
+  'announcementBanner',
+  'showAnnouncement',
+  'defaultFrontendMode',
+  'heroTitleTeacherStudent',
+  'heroSubtitleTeacherStudent',
+  'heroTitleParent',
+  'heroSubtitleParent',
+  'heroTitleCustomer',
+  'heroSubtitleCustomer',
+  'heroImageUrl',
+  'heroCaption',
+  'annualDiscountPercent',
+  'updatedBy',
+  'updatedAt',
+]);
+
+function clampStr(val: unknown, maxLen: number, fallback = ''): string {
+  const s = typeof val === 'string' ? val.trim() : fallback;
+  return s.slice(0, maxLen);
+}
+
+function sanitizeSiteConfig(cfg: SiteConfig): SiteConfig {
+  return {
+    domain: clampStr(cfg.domain, 120, OFFICIAL_DOMAIN) || OFFICIAL_DOMAIN,
+    centerName: clampStr(cfg.centerName, 160, DEFAULT_SITE_CONFIG.centerName) || DEFAULT_SITE_CONFIG.centerName,
+    shortName: clampStr(cfg.shortName, 60, DEFAULT_SITE_CONFIG.shortName) || DEFAULT_SITE_CONFIG.shortName,
+    slogan: clampStr(cfg.slogan, 200, DEFAULT_SITE_CONFIG.slogan) || DEFAULT_SITE_CONFIG.slogan,
+    philosophy: clampStr(cfg.philosophy, 300, DEFAULT_SITE_CONFIG.philosophy),
+    seoTitle: clampStr(cfg.seoTitle, 160, DEFAULT_SITE_CONFIG.seoTitle),
+    seoDescription: clampStr(cfg.seoDescription, 320, DEFAULT_SITE_CONFIG.seoDescription),
+    hotlineZalo: clampStr(cfg.hotlineZalo, 40, DEFAULT_SITE_CONFIG.hotlineZalo) || DEFAULT_SITE_CONFIG.hotlineZalo,
+    zaloUrl: clampStr(cfg.zaloUrl, 200, DEFAULT_SITE_CONFIG.zaloUrl),
+    contactEmail: clampStr(cfg.contactEmail, 120, DEFAULT_SITE_CONFIG.contactEmail),
+    campus1: clampStr(cfg.campus1, 200, DEFAULT_SITE_CONFIG.campus1),
+    campus2: clampStr(cfg.campus2, 200, DEFAULT_SITE_CONFIG.campus2),
+    announcementBanner: clampStr(cfg.announcementBanner, 260, ''),
+    showAnnouncement: Boolean(cfg.showAnnouncement),
+    defaultFrontendMode: ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER'].includes(cfg.defaultFrontendMode)
+      ? cfg.defaultFrontendMode
+      : 'TEACHER_STUDENT',
+    heroTitleTeacherStudent:
+      clampStr(cfg.heroTitleTeacherStudent, 180, DEFAULT_SITE_CONFIG.heroTitleTeacherStudent) ||
+      DEFAULT_SITE_CONFIG.heroTitleTeacherStudent,
+    heroSubtitleTeacherStudent: clampStr(
+      cfg.heroSubtitleTeacherStudent,
+      400,
+      DEFAULT_SITE_CONFIG.heroSubtitleTeacherStudent,
+    ),
+    heroTitleParent:
+      clampStr(cfg.heroTitleParent, 180, DEFAULT_SITE_CONFIG.heroTitleParent) ||
+      DEFAULT_SITE_CONFIG.heroTitleParent,
+    heroSubtitleParent: clampStr(cfg.heroSubtitleParent, 400, DEFAULT_SITE_CONFIG.heroSubtitleParent),
+    heroTitleCustomer:
+      clampStr(cfg.heroTitleCustomer, 180, DEFAULT_SITE_CONFIG.heroTitleCustomer) ||
+      DEFAULT_SITE_CONFIG.heroTitleCustomer,
+    heroSubtitleCustomer: clampStr(cfg.heroSubtitleCustomer, 400, DEFAULT_SITE_CONFIG.heroSubtitleCustomer),
+    heroImageUrl: clampStr(cfg.heroImageUrl, 300, DEFAULT_SITE_CONFIG.heroImageUrl),
+    heroCaption: clampStr(cfg.heroCaption, 260, DEFAULT_SITE_CONFIG.heroCaption),
+    annualDiscountPercent: Math.min(50, Math.max(0, Number(cfg.annualDiscountPercent) || 0)),
+    bankName: clampStr(cfg.bankName, 100, DEFAULT_SITE_CONFIG.bankName),
+    bankAccount: clampStr(cfg.bankAccount, 60, DEFAULT_SITE_CONFIG.bankAccount),
+    bankOwner: clampStr(cfg.bankOwner, 120, DEFAULT_SITE_CONFIG.bankOwner),
+    momoPhone: clampStr(cfg.momoPhone, 40, DEFAULT_SITE_CONFIG.momoPhone),
+    enableAiAdvisor: Boolean(cfg.enableAiAdvisor),
+    enableOnlineExams: Boolean(cfg.enableOnlineExams),
+    enableOnlinePayment: Boolean(cfg.enableOnlinePayment),
+    updatedBy: clampStr(cfg.updatedBy, 128, 'system'),
+    updatedAt: clampStr(cfg.updatedAt, 60, new Date().toISOString()),
+  };
+}
+
+export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<AuthUser> {
+  const email = (fbUser.email || '').toLowerCase();
+  const userRef = doc(db, 'users', fbUser.uid);
+
+  let resolvedRole: UserRole = 'STUDENT';
+  let linkedStudentId: string | undefined = 'st-01';
+  let linkedTeacherId: string | undefined;
+
+  if (email === SUPER_ADMIN_EMAIL) {
+    resolvedRole = 'SUPER_ADMIN';
+    linkedStudentId = undefined;
+  } else if (email === ADMIN_EMAIL) {
+    resolvedRole = 'ADMIN';
+    linkedStudentId = undefined;
+  } else if (email) {
+    // Check if SuperAdmin pre-assigned a role invite for this Gmail address
+    try {
+      const inviteSnap = await getDoc(doc(db, 'role_invites', email));
+      if (inviteSnap.exists()) {
+        const invite = inviteSnap.data() as RoleInviteDoc;
+        resolvedRole = invite.role;
+        linkedStudentId = invite.linkedStudentId;
+        linkedTeacherId = invite.linkedTeacherId;
+      }
+    } catch {
+      // No invite or permission denied -> default cleanly to STUDENT
+    }
+  }
+
+  try {
+    const existingSnap = await getDoc(userRef);
+    const nowIso = new Date().toISOString();
+
+    if (existingSnap.exists()) {
+      const existingData = existingSnap.data() as UserProfileDoc;
+      // Enforce bootstrapped privileges if email matches
+      const effectiveRole: UserRole =
+        email === SUPER_ADMIN_EMAIL
+          ? 'SUPER_ADMIN'
+          : email === ADMIN_EMAIL
+            ? 'ADMIN'
+            : existingData.role;
+
+      return {
+        id: fbUser.uid,
+        name: existingData.displayName || fbUser.displayName || email.split('@')[0],
+        email,
+        photoURL: fbUser.photoURL || existingData.photoURL,
+        role: effectiveRole,
+        linkedStudentId: existingData.linkedStudentId || linkedStudentId,
+        linkedTeacherId: existingData.linkedTeacherId || linkedTeacherId,
+        authProvider: 'GOOGLE_FIREBASE',
+      };
+    }
+
+    const profilePayload: UserProfileDoc = {
+      uid: fbUser.uid,
+      email,
+      displayName: clampStr(fbUser.displayName || email.split('@')[0], 120, 'Người dùng Nhân Trí'),
+      role: resolvedRole,
+      active: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      ...(fbUser.photoURL ? { photoURL: clampStr(fbUser.photoURL, 500) } : {}),
+      ...(linkedStudentId ? { linkedStudentId } : {}),
+      ...(linkedTeacherId ? { linkedTeacherId } : {}),
+    };
+
+    await setDoc(userRef, profilePayload);
+
+    return {
+      id: fbUser.uid,
+      name: profilePayload.displayName,
+      email,
+      photoURL: profilePayload.photoURL,
+      role: resolvedRole,
+      linkedStudentId,
+      linkedTeacherId,
+      authProvider: 'GOOGLE_FIREBASE',
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${fbUser.uid}`);
+  }
+}
+
+export function subscribeSiteConfig(onChange: (config: SiteConfig) => void): () => void {
+  const ref = doc(db, 'site_config', 'main');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        onChange({ ...DEFAULT_SITE_CONFIG, ...(snap.data() as Partial<SiteConfig>) });
+      } else {
+        onChange(DEFAULT_SITE_CONFIG);
+      }
+    },
+    (error) => {
+      console.warn('SiteConfig listener fallback to defaults:', error.message);
+      onChange(DEFAULT_SITE_CONFIG);
+    },
+  );
+}
+
+export function subscribeCourses(
+  fallbackCourses: CoursePackage[],
+  onChange: (courses: CoursePackage[]) => void,
+): () => void {
+  const colRef = collection(db, 'courses');
+  return onSnapshot(
+    colRef,
+    (snap) => {
+      if (snap.empty) {
+        onChange(fallbackCourses);
+        return;
+      }
+      const list = snap.docs
+        .map((d) => d.data() as CoursePackage)
+        .sort((a, b) => a.level.localeCompare(b.level));
+      onChange(list);
+    },
+    (error) => {
+      console.warn('Courses listener fallback to defaults:', error.message);
+      onChange(fallbackCourses);
+    },
+  );
+}
+
+export function subscribeUsersList(
+  enabled: boolean,
+  onChange: (users: UserProfileDoc[]) => void,
+): () => void {
+  if (!enabled) return () => {};
+  return onSnapshot(
+    collection(db, 'users'),
+    (snap) => {
+      onChange(snap.docs.map((d) => d.data() as UserProfileDoc));
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'users');
+    },
+  );
+}
+
+export function subscribeRoleInvites(
+  enabled: boolean,
+  onChange: (invites: RoleInviteDoc[]) => void,
+): () => void {
+  if (!enabled) return () => {};
+  return onSnapshot(
+    collection(db, 'role_invites'),
+    (snap) => {
+      onChange(snap.docs.map((d) => d.data() as RoleInviteDoc));
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'role_invites');
+    },
+  );
+}
+
+export async function saveSiteConfigPatch(
+  currentConfig: SiteConfig,
+  patch: Partial<SiteConfig>,
+  userEmail: string,
+  isSuperAdmin: boolean,
+): Promise<SiteConfig> {
+  const ref = doc(db, 'site_config', 'main');
+  const filteredPatch: Partial<SiteConfig> = {};
+
+  for (const [k, v] of Object.entries(patch) as [keyof SiteConfig, unknown][]) {
+    if (isSuperAdmin || ADMIN_ALLOWED_CONFIG_KEYS.has(k)) {
+      (filteredPatch as Record<string, unknown>)[k] = v;
+    }
+  }
+
+  const nextConfig = sanitizeSiteConfig({
+    ...currentConfig,
+    ...filteredPatch,
+    updatedBy: userEmail,
+    updatedAt: new Date().toISOString(),
+  });
+
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      await setDoc(ref, nextConfig);
+    } else if (isSuperAdmin) {
+      await setDoc(ref, nextConfig);
+    } else {
+      // Partial update strictly within Admin's allowed keys
+      const updatePayload: Record<string, unknown> = {
+        updatedBy: nextConfig.updatedBy,
+        updatedAt: nextConfig.updatedAt,
+      };
+      for (const k of Object.keys(filteredPatch) as (keyof SiteConfig)[]) {
+        updatePayload[k] = nextConfig[k];
+      }
+      await updateDoc(ref, updatePayload);
+    }
+    return nextConfig;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'site_config/main');
+  }
+}
+
+export async function saveCourseToFirestore(course: CoursePackage): Promise<void> {
+  const safeCourse: CoursePackage = {
+    id: clampStr(course.id, 128),
+    level: course.level,
+    title: clampStr(course.title, 180),
+    titleEn: clampStr(course.titleEn || course.title, 180),
+    grades: clampStr(course.grades, 80),
+    billingModel: course.billingModel,
+    monthlyPrice: Math.max(0, Math.min(50000000, Number(course.monthlyPrice) || 0)),
+    annualDiscountPercent: Math.max(0, Math.min(50, Number(course.annualDiscountPercent) || 0)),
+    ...(typeof course.boardingAddonPrice === 'number'
+      ? { boardingAddonPrice: Math.max(0, course.boardingAddonPrice) }
+      : {}),
+    ...(typeof course.shuttleAddonPrice === 'number'
+      ? { shuttleAddonPrice: Math.max(0, course.shuttleAddonPrice) }
+      : {}),
+    subjects: (course.subjects || []).slice(0, 15).map((s) => clampStr(s, 200)),
+    highlights: (course.highlights || []).slice(0, 10).map((s) => clampStr(s, 200)),
+    highlightsEn: (course.highlightsEn || []).slice(0, 10).map((s) => clampStr(s, 200)),
+    imageUrl: clampStr(course.imageUrl, 300),
+  };
+
+  try {
+    await setDoc(doc(db, 'courses', safeCourse.id), safeCourse);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `courses/${safeCourse.id}`);
+  }
+}
+
+export async function upsertRoleInvite(invite: RoleInviteDoc): Promise<void> {
+  const email = invite.email.trim().toLowerCase();
+  const payload: RoleInviteDoc = {
+    email,
+    role: invite.role,
+    createdBy: clampStr(invite.createdBy, 128),
+    createdAt: new Date().toISOString(),
+    ...(invite.displayName ? { displayName: clampStr(invite.displayName, 120) } : {}),
+    ...(invite.linkedStudentId ? { linkedStudentId: clampStr(invite.linkedStudentId, 128) } : {}),
+    ...(invite.linkedTeacherId ? { linkedTeacherId: clampStr(invite.linkedTeacherId, 128) } : {}),
+  };
+
+  try {
+    await setDoc(doc(db, 'role_invites', email), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `role_invites/${email}`);
+  }
+}
+
+export async function deleteRoleInvite(email: string): Promise<void> {
+  const normalized = email.trim().toLowerCase();
+  try {
+    await deleteDoc(doc(db, 'role_invites', normalized));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `role_invites/${normalized}`);
+  }
+}
+
+export async function updateUserProfileRole(
+  uid: string,
+  role: UserRole,
+  linkedStudentId?: string,
+): Promise<void> {
+  try {
+    const payload: Record<string, unknown> = {
+      role,
+      updatedAt: new Date().toISOString(),
+    };
+    if (linkedStudentId !== undefined) {
+      payload.linkedStudentId = clampStr(linkedStudentId, 128);
+    }
+    await updateDoc(doc(db, 'users', uid), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
+  }
+}
+
+export async function syncInitialSeedToFirestore(
+  bootstrap: BootstrapPayload,
+  currentConfig: SiteConfig,
+  userEmail: string,
+): Promise<{ coursesSynced: number; teachersSynced: number }> {
+  // 1. Seed site_config/main
+  const safeCfg = sanitizeSiteConfig({
+    ...currentConfig,
+    updatedBy: userEmail,
+    updatedAt: new Date().toISOString(),
+  });
+  try {
+    await setDoc(doc(db, 'site_config', 'main'), safeCfg);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'site_config/main');
+  }
+
+  // 2. Seed courses
+  for (const course of bootstrap.courses) {
+    await saveCourseToFirestore(course);
+  }
+
+  // 3. Seed public non-PII teachers
+  for (const teacher of bootstrap.teachers) {
+    try {
+      await setDoc(doc(db, 'public_teachers', teacher.id), {
+        id: teacher.id,
+        name: clampStr(teacher.name, 120),
+        shortName: clampStr(teacher.shortName, 60),
+        subjects: teacher.subjects.slice(0, 10).map((s) => clampStr(s, 200)),
+        degree: clampStr(teacher.degree, 140),
+        experienceYears: Number(teacher.experienceYears) || 1,
+        roomDefault: clampStr(teacher.roomDefault, 60),
+        status: teacher.status,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `public_teachers/${teacher.id}`);
+    }
+  }
+
+  // 4. Ensure bootstrapped lethituman2021@gmail.com invite exists if SuperAdmin triggered sync
+  if (userEmail.toLowerCase() === SUPER_ADMIN_EMAIL) {
+    try {
+      await upsertRoleInvite({
+        email: ADMIN_EMAIL,
+        role: 'ADMIN',
+        displayName: 'Admin Quản trị Vận hành (Lê Thị Tú Mẫn)',
+        createdBy: userEmail,
+      });
+    } catch {
+      // Ignore if not SuperAdmin
+    }
+  }
+
+  return {
+    coursesSynced: bootstrap.courses.length,
+    teachersSynced: bootstrap.teachers.length,
+  };
+}

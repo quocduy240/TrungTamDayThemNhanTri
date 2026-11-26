@@ -1,0 +1,611 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // GLOBAL SAFETY NET (Default Deny Catch-All)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // PRIMITIVE HELPERS & TIERED IDENTITY LOGIC
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmailId(id) {
+      return id is string && id.size() >= 5 && id.size() <= 160 && id.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isVerified() && request.auth.token.email == 'duyweb5@gmail.com';
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'lethituman2021@gmail.com';
+    }
+
+    function userDocExists() {
+      return isVerified() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userDocRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function hasMatchingRoleInvite(requestedRole) {
+      return isVerified()
+        && exists(/databases/$(database)/documents/role_invites/$(request.auth.token.email))
+        && get(/databases/$(database)/documents/role_invites/$(request.auth.token.email)).data.role == requestedRole;
+    }
+
+    function isSuperAdmin() {
+      return isBootstrappedSuperAdmin() || (userDocExists() && userDocRole() == 'SUPER_ADMIN');
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || isBootstrappedAdmin() || (userDocExists() && userDocRole() == 'ADMIN');
+    }
+
+    function isStaff() {
+      return isAdmin() || (userDocExists() && userDocRole() == 'TEACHER');
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isBoundedStringList(val, maxItems) {
+      return val is list && val.size() <= maxItems && (val.size() == 0 || (val[0] is string && val[0].size() <= 200));
+    }
+
+    // =========================================================================
+    // VALIDATION BLUEPRINTS (Anti-Update-Gap Helpers)
+    // =========================================================================
+    function isValidSiteConfig(data) {
+      return data.keys().hasAll([
+          'domain', 'centerName', 'shortName', 'slogan', 'hotlineZalo',
+          'defaultFrontendMode', 'heroTitleTeacherStudent', 'heroTitleParent', 'heroTitleCustomer'
+        ])
+        && data.keys().hasOnly([
+          'domain', 'centerName', 'shortName', 'slogan', 'philosophy',
+          'seoTitle', 'seoDescription', 'hotlineZalo', 'zaloUrl', 'contactEmail',
+          'campus1', 'campus2', 'announcementBanner', 'showAnnouncement',
+          'defaultFrontendMode',
+          'heroTitleTeacherStudent', 'heroSubtitleTeacherStudent',
+          'heroTitleParent', 'heroSubtitleParent',
+          'heroTitleCustomer', 'heroSubtitleCustomer',
+          'heroImageUrl', 'heroCaption',
+          'annualDiscountPercent', 'bankName', 'bankAccount', 'bankOwner', 'momoPhone',
+          'enableAiAdvisor', 'enableOnlineExams', 'enableOnlinePayment',
+          'updatedBy', 'updatedAt'
+        ])
+        && isNonEmptyString(data.domain, 120)
+        && isNonEmptyString(data.centerName, 160)
+        && isNonEmptyString(data.shortName, 60)
+        && isNonEmptyString(data.slogan, 200)
+        && isOptionalString(data, 'philosophy', 300)
+        && isOptionalString(data, 'seoTitle', 160)
+        && isOptionalString(data, 'seoDescription', 320)
+        && isNonEmptyString(data.hotlineZalo, 40)
+        && isOptionalString(data, 'zaloUrl', 200)
+        && isOptionalString(data, 'contactEmail', 120)
+        && isOptionalString(data, 'campus1', 200)
+        && isOptionalString(data, 'campus2', 200)
+        && isOptionalString(data, 'announcementBanner', 260)
+        && (!('showAnnouncement' in data) || data.showAnnouncement is bool)
+        && data.defaultFrontendMode in ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER']
+        && isNonEmptyString(data.heroTitleTeacherStudent, 180)
+        && isOptionalString(data, 'heroSubtitleTeacherStudent', 400)
+        && isNonEmptyString(data.heroTitleParent, 180)
+        && isOptionalString(data, 'heroSubtitleParent', 400)
+        && isNonEmptyString(data.heroTitleCustomer, 180)
+        && isOptionalString(data, 'heroSubtitleCustomer', 400)
+        && isOptionalString(data, 'heroImageUrl', 300)
+        && isOptionalString(data, 'heroCaption', 260)
+        && (!('annualDiscountPercent' in data) || (data.annualDiscountPercent is number && data.annualDiscountPercent >= 0 && data.annualDiscountPercent <= 50))
+        && isOptionalString(data, 'bankName', 100)
+        && isOptionalString(data, 'bankAccount', 60)
+        && isOptionalString(data, 'bankOwner', 120)
+        && isOptionalString(data, 'momoPhone', 40)
+        && (!('enableAiAdvisor' in data) || data.enableAiAdvisor is bool)
+        && (!('enableOnlineExams' in data) || data.enableOnlineExams is bool)
+        && (!('enableOnlinePayment' in data) || data.enableOnlinePayment is bool)
+        && isOptionalString(data, 'updatedBy', 128)
+        && isOptionalString(data, 'updatedAt', 60);
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'role', 'phone',
+          'preferredView', 'linkedStudentId', 'linkedTeacherId', 'active', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.email, 160)
+        && isNonEmptyString(data.displayName, 120)
+        && isOptionalString(data, 'photoURL', 500)
+        && data.role in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT']
+        && isOptionalString(data, 'phone', 40)
+        && (!('preferredView' in data) || data.preferredView in ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER'])
+        && isOptionalString(data, 'linkedStudentId', 128)
+        && isOptionalString(data, 'linkedTeacherId', 128)
+        && data.active is bool
+        && isOptionalString(data, 'createdAt', 60)
+        && isOptionalString(data, 'updatedAt', 60);
+    }
+
+    function isValidRoleInvite(data) {
+      return data.keys().hasAll(['email', 'role', 'createdBy'])
+        && data.keys().hasOnly(['email', 'role', 'displayName', 'linkedStudentId', 'linkedTeacherId', 'createdBy', 'createdAt'])
+        && isNonEmptyString(data.email, 160)
+        && data.role in ['ADMIN', 'TEACHER', 'PARENT', 'STUDENT']
+        && isOptionalString(data, 'displayName', 120)
+        && isOptionalString(data, 'linkedStudentId', 128)
+        && isOptionalString(data, 'linkedTeacherId', 128)
+        && isNonEmptyString(data.createdBy, 128)
+        && isOptionalString(data, 'createdAt', 60);
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasAll(['id', 'level', 'title', 'grades', 'billingModel', 'monthlyPrice', 'annualDiscountPercent'])
+        && data.keys().hasOnly([
+          'id', 'level', 'title', 'titleEn', 'grades', 'billingModel',
+          'monthlyPrice', 'annualDiscountPercent', 'boardingAddonPrice', 'shuttleAddonPrice',
+          'subjects', 'highlights', 'highlightsEn', 'imageUrl'
+        ])
+        && isValidId(data.id)
+        && data.level in ['CAP_1', 'CAP_2', 'CAP_3']
+        && isNonEmptyString(data.title, 180)
+        && isOptionalString(data, 'titleEn', 180)
+        && isNonEmptyString(data.grades, 80)
+        && data.billingModel in ['TUTORING', 'ALL_IN_ONE', 'PER_SUBJECT']
+        && data.monthlyPrice is number && data.monthlyPrice >= 0 && data.monthlyPrice <= 50000000
+        && data.annualDiscountPercent is number && data.annualDiscountPercent >= 0 && data.annualDiscountPercent <= 50
+        && (!('boardingAddonPrice' in data) || (data.boardingAddonPrice is number && data.boardingAddonPrice >= 0))
+        && (!('shuttleAddonPrice' in data) || (data.shuttleAddonPrice is number && data.shuttleAddonPrice >= 0))
+        && (!('subjects' in data) || isBoundedStringList(data.subjects, 15))
+        && (!('highlights' in data) || isBoundedStringList(data.highlights, 10))
+        && (!('highlightsEn' in data) || isBoundedStringList(data.highlightsEn, 10))
+        && isOptionalString(data, 'imageUrl', 300);
+    }
+
+    function isValidPublicTeacher(data) {
+      return data.keys().hasAll(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'status'])
+        && data.keys().hasOnly(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'roomDefault', 'status'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.name, 120)
+        && isNonEmptyString(data.shortName, 60)
+        && isBoundedStringList(data.subjects, 10)
+        && isNonEmptyString(data.degree, 140)
+        && data.experienceYears is number && data.experienceYears >= 0 && data.experienceYears <= 60
+        && isOptionalString(data, 'roomDefault', 60)
+        && data.status in ['ACTIVE', 'ON_LEAVE'];
+    }
+
+    function isValidTimetableSlot(data) {
+      return data.keys().hasAll([
+          'id', 'period', 'shift', 'timeRange', 'day', 'centerClass',
+          'subject', 'teacherId', 'teacherName', 'room', 'slotType', 'status'
+        ])
+        && data.keys().hasOnly([
+          'id', 'weekLabel', 'period', 'shift', 'timeRange', 'day', 'centerClass',
+          'subject', 'teacherId', 'teacherName', 'room', 'slotType', 'status', 'note'
+        ])
+        && isValidId(data.id)
+        && isOptionalString(data, 'weekLabel', 80)
+        && data.period in ['SANG', 'CHIEU', 'TOI']
+        && data.shift in ['CA_1', 'CA_2']
+        && isNonEmptyString(data.timeRange, 40)
+        && data.day in ['T2', 'T3', 'T4', 'T5', 'T6', 'T7']
+        && isNonEmptyString(data.centerClass, 60)
+        && isNonEmptyString(data.subject, 100)
+        && isNonEmptyString(data.teacherId, 128)
+        && isNonEmptyString(data.teacherName, 80)
+        && isNonEmptyString(data.room, 60)
+        && data.slotType in ['MAIN', 'TRA_BAI', 'PHU_DAO', 'BU_THE_DUC']
+        && data.status in ['SCHEDULED', 'TEACHER_ABSENT', 'SUBSTITUTED', 'OFF']
+        && isOptionalString(data, 'note', 300);
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll([
+          'id', 'code', 'fullName', 'grade', 'level', 'centerClass',
+          'school', 'parentName', 'parentPhone', 'packageType', 'status'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'code', 'fullName', 'grade', 'level', 'centerClass',
+          'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
+          'parentPhone', 'parentZalo', 'packageType', 'hasBoarding', 'hasShuttle',
+          'annualPrepaid', 'peConflictDay', 'peConflictShift', 'eveningMakeupSlot',
+          'enrolledSubjects', 'status'
+        ])
+        && isValidId(data.id)
+        && isOptionalString(data, 'ownerUid', 128)
+        && isNonEmptyString(data.code, 40)
+        && isNonEmptyString(data.fullName, 120)
+        && data.grade is number && data.grade >= 3 && data.grade <= 12
+        && data.level in ['CAP_1', 'CAP_2', 'CAP_3']
+        && isNonEmptyString(data.centerClass, 60)
+        && isOptionalString(data, 'schoolClass', 40)
+        && isNonEmptyString(data.school, 140)
+        && isOptionalString(data, 'homeroomTeacher', 80)
+        && isOptionalString(data, 'room', 60)
+        && isNonEmptyString(data.parentName, 120)
+        && isNonEmptyString(data.parentPhone, 40)
+        && isOptionalString(data, 'parentZalo', 40)
+        && data.packageType in ['TUTORING', 'ALL_IN_ONE', 'PER_SUBJECT']
+        && (!('hasBoarding' in data) || data.hasBoarding is bool)
+        && (!('hasShuttle' in data) || data.hasShuttle is bool)
+        && (!('annualPrepaid' in data) || data.annualPrepaid is bool)
+        && isOptionalString(data, 'peConflictDay', 10)
+        && isOptionalString(data, 'peConflictShift', 80)
+        && isOptionalString(data, 'eveningMakeupSlot', 180)
+        && (!('enrolledSubjects' in data) || isBoundedStringList(data.enrolledSubjects, 15))
+        && data.status in ['ACTIVE', 'PAUSED'];
+    }
+
+    function isValidScore(data) {
+      return data.keys().hasAll([
+          'id', 'studentId', 'studentName', 'centerClass', 'subject',
+          'examType', 'score', 'maxScore', 'date', 'source', 'verified'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'studentId', 'studentName', 'centerClass', 'subject',
+          'examType', 'score', 'maxScore', 'date', 'school', 'source', 'verified',
+          'aiSummary', 'strengths', 'improvements', 'imageUrl'
+        ])
+        && isValidId(data.id)
+        && isOptionalString(data, 'ownerUid', 128)
+        && isNonEmptyString(data.studentId, 128)
+        && isNonEmptyString(data.studentName, 120)
+        && isNonEmptyString(data.centerClass, 60)
+        && isNonEmptyString(data.subject, 80)
+        && data.examType in ['15_PHUT', '1_TIET', 'GIUA_KY', 'CUOI_KY', 'TRAC_NGHIEM_ONLINE']
+        && data.score is number && data.score >= 0 && data.score <= 10
+        && data.maxScore is number && data.maxScore > 0 && data.maxScore <= 100
+        && isNonEmptyString(data.date, 30)
+        && isOptionalString(data, 'school', 140)
+        && data.source in ['SELF_ENTRY', 'AI_SCAN', 'TEACHER', 'ONLINE_QUIZ']
+        && data.verified is bool
+        && isOptionalString(data, 'aiSummary', 600)
+        && (!('strengths' in data) || isBoundedStringList(data.strengths, 10))
+        && (!('improvements' in data) || isBoundedStringList(data.improvements, 10))
+        && isOptionalString(data, 'imageUrl', 300);
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll([
+          'id', 'date', 'studentId', 'studentName', 'centerClass', 'shiftLabel', 'status', 'parentNotified'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'date', 'studentId', 'studentName', 'centerClass', 'shiftLabel', 'status', 'note', 'parentNotified'
+        ])
+        && isValidId(data.id)
+        && isOptionalString(data, 'ownerUid', 128)
+        && isNonEmptyString(data.date, 30)
+        && isNonEmptyString(data.studentId, 128)
+        && isNonEmptyString(data.studentName, 120)
+        && isNonEmptyString(data.centerClass, 60)
+        && isNonEmptyString(data.shiftLabel, 100)
+        && data.status in ['PRESENT', 'LATE', 'EXCUSED', 'MAKEUP_EVENING']
+        && isOptionalString(data, 'note', 300)
+        && data.parentNotified is bool;
+    }
+
+    function isValidTuition(data) {
+      return data.keys().hasAll([
+          'id', 'studentId', 'studentName', 'centerClass', 'monthLabel',
+          'totalAmount', 'paidAmount', 'dueDate', 'status', 'remindersSent'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'studentId', 'studentName', 'centerClass', 'parentPhone',
+          'monthLabel', 'baseAmount', 'boardingAmount', 'shuttleAmount', 'discountAmount',
+          'totalAmount', 'paidAmount', 'dueDate', 'status', 'paymentMethod', 'paidAt', 'remindersSent'
+        ])
+        && isValidId(data.id)
+        && isOptionalString(data, 'ownerUid', 128)
+        && isNonEmptyString(data.studentId, 128)
+        && isNonEmptyString(data.studentName, 120)
+        && isNonEmptyString(data.centerClass, 60)
+        && isOptionalString(data, 'parentPhone', 40)
+        && isNonEmptyString(data.monthLabel, 100)
+        && (!('baseAmount' in data) || (data.baseAmount is number && data.baseAmount >= 0))
+        && (!('boardingAmount' in data) || (data.boardingAmount is number && data.boardingAmount >= 0))
+        && (!('shuttleAmount' in data) || (data.shuttleAmount is number && data.shuttleAmount >= 0))
+        && (!('discountAmount' in data) || (data.discountAmount is number && data.discountAmount >= 0))
+        && data.totalAmount is number && data.totalAmount >= 0 && data.totalAmount <= 100000000
+        && data.paidAmount is number && data.paidAmount >= 0 && data.paidAmount <= 100000000
+        && isNonEmptyString(data.dueDate, 30)
+        && data.status in ['PAID', 'DUE_SOON', 'OVERDUE']
+        && (!('paymentMethod' in data) || data.paymentMethod in ['VIETQR', 'MOMO', 'ZALOPAY', 'CASH'])
+        && isOptionalString(data, 'paidAt', 30)
+        && data.remindersSent is number && data.remindersSent >= 0 && data.remindersSent <= 100;
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll(['id', 'date', 'category', 'description', 'amount'])
+        && data.keys().hasOnly(['id', 'date', 'category', 'description', 'amount'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.date, 30)
+        && data.category in ['SALARY', 'MEALS', 'UTILITIES', 'MATERIALS']
+        && isNonEmptyString(data.description, 260)
+        && data.amount is number && data.amount >= 0 && data.amount <= 500000000;
+    }
+
+    function isValidExam(data) {
+      return data.keys().hasAll(['id', 'title', 'level', 'grade', 'subject', 'durationMinutes', 'difficulty', 'attemptsCount', 'questions'])
+        && data.keys().hasOnly(['id', 'title', 'level', 'grade', 'subject', 'durationMinutes', 'curriculumStandard', 'difficulty', 'attemptsCount', 'questions'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.title, 200)
+        && data.level in ['CAP_1', 'CAP_2', 'CAP_3']
+        && data.grade is number && data.grade >= 3 && data.grade <= 12
+        && isNonEmptyString(data.subject, 80)
+        && data.durationMinutes is number && data.durationMinutes >= 5 && data.durationMinutes <= 180
+        && isOptionalString(data, 'curriculumStandard', 160)
+        && data.difficulty in ['CO_BAN', 'KHA', 'NANG_CAO']
+        && data.attemptsCount is number && data.attemptsCount >= 0
+        && data.questions is list && data.questions.size() <= 50;
+    }
+
+    function isValidTicket(data) {
+      return data.keys().hasAll(['id', 'authorUid', 'createdAt', 'authorName', 'authorRole', 'category', 'subject', 'message', 'status'])
+        && data.keys().hasOnly(['id', 'authorUid', 'createdAt', 'authorName', 'authorRole', 'phone', 'category', 'subject', 'message', 'status', 'reply'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.authorUid, 128)
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.authorName, 120)
+        && data.authorRole in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT', 'GUEST']
+        && isOptionalString(data, 'phone', 40)
+        && data.category in ['CONSULTATION', 'FEEDBACK', 'SCHEDULE_CHANGE', 'TUITION']
+        && isNonEmptyString(data.subject, 180)
+        && isNonEmptyString(data.message, 1000)
+        && data.status in ['OPEN', 'IN_PROGRESS', 'RESOLVED']
+        && isOptionalString(data, 'reply', 1000);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['id', 'createdAt', 'title', 'body', 'channel', 'targetRole', 'read'])
+        && data.keys().hasOnly(['id', 'targetUid', 'createdAt', 'title', 'body', 'channel', 'targetRole', 'read'])
+        && isValidId(data.id)
+        && isOptionalString(data, 'targetUid', 128)
+        && isNonEmptyString(data.createdAt, 40)
+        && isNonEmptyString(data.title, 180)
+        && isNonEmptyString(data.body, 600)
+        && data.channel in ['APP', 'ZALO', 'EMAIL']
+        && data.targetRole in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT', 'ALL']
+        && data.read is bool;
+    }
+
+    // =========================================================================
+    // COLLECTION MATCH BLOCKS (Exhaustive Coverage)
+    // =========================================================================
+
+    // 1. Live Site Configuration (daythemnhantri.com + 1-Click Visual CMS)
+    match /site_config/{configId} {
+      allow get: if isValidId(configId);
+      allow create: if isValidId(configId) && isValidSiteConfig(incoming()) && isAdmin();
+      allow update: if isValidId(configId) && isValidSiteConfig(incoming()) && (
+        isSuperAdmin() ||
+        (
+          isAdmin() &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'centerName', 'shortName', 'slogan', 'philosophy',
+            'hotlineZalo', 'zaloUrl', 'contactEmail', 'campus1', 'campus2',
+            'announcementBanner', 'showAnnouncement', 'defaultFrontendMode',
+            'heroTitleTeacherStudent', 'heroSubtitleTeacherStudent',
+            'heroTitleParent', 'heroSubtitleParent',
+            'heroTitleCustomer', 'heroSubtitleCustomer',
+            'heroImageUrl', 'heroCaption', 'annualDiscountPercent',
+            'updatedBy', 'updatedAt'
+          ])
+        )
+      );
+      allow delete: if false;
+    }
+
+    // 2. Authenticated Gmail User Profiles (PII Isolated, Zero Self-Escalation)
+    match /users/{uid} {
+      allow get: if isValidId(uid) && isVerified() && (request.auth.uid == uid || isSuperAdmin() || isAdmin());
+      allow list: if isVerified() && (isSuperAdmin() || isAdmin() || existing().uid == request.auth.uid);
+      allow create: if isValidId(uid) && isVerified() && isValidUserProfile(incoming()) && (
+        isSuperAdmin() ||
+        (
+          request.auth.uid == uid &&
+          incoming().uid == request.auth.uid &&
+          incoming().email == request.auth.token.email &&
+          (
+            (isBootstrappedSuperAdmin() && incoming().role == 'SUPER_ADMIN') ||
+            (isBootstrappedAdmin() && incoming().role == 'ADMIN') ||
+            hasMatchingRoleInvite(incoming().role) ||
+            (incoming().role in ['PARENT', 'STUDENT'])
+          )
+        )
+      );
+      allow update: if isValidId(uid) && isVerified() && isValidUserProfile(incoming()) && (
+        isSuperAdmin() ||
+        (
+          request.auth.uid == uid &&
+          incoming().uid == existing().uid &&
+          incoming().email == existing().email &&
+          incoming().role == existing().role &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'preferredView', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(uid) && isSuperAdmin();
+    }
+
+    // 3. SuperAdmin Pre-Assigned Role Invites (keyed by verified Gmail address)
+    match /role_invites/{inviteEmail} {
+      allow get: if isValidEmailId(inviteEmail) && isVerified() && (isSuperAdmin() || inviteEmail == request.auth.token.email);
+      allow list: if isVerified() && (isSuperAdmin() || existing().email == request.auth.token.email);
+      allow create: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && isSuperAdmin();
+      allow update: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && isSuperAdmin();
+      allow delete: if isValidEmailId(inviteEmail) && isSuperAdmin();
+    }
+
+    // 4. Public Course Packages (1-Click Editable by Admin & SuperAdmin)
+    match /courses/{courseId} {
+      allow get: if isValidId(courseId);
+      allow list: if true;
+      allow create: if isValidId(courseId) && isValidCourse(incoming()) && isAdmin();
+      allow update: if isValidId(courseId) && isValidCourse(incoming()) && isAdmin();
+      allow delete: if isValidId(courseId) && isSuperAdmin();
+    }
+
+    // 5. Public Non-PII Faculty Directory
+    match /public_teachers/{teacherId} {
+      allow get: if isValidId(teacherId);
+      allow list: if true;
+      allow create: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isAdmin();
+      allow update: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isAdmin();
+      allow delete: if isValidId(teacherId) && isAdmin();
+    }
+
+    // 6. Synced Center Weekly Timetable (Publicly viewable on Default Teacher/Student View)
+    match /public_timetable/{slotId} {
+      allow get: if isValidId(slotId);
+      allow list: if true;
+      allow create: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isStaff();
+      allow update: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isStaff();
+      allow delete: if isValidId(slotId) && isAdmin();
+    }
+
+    // 7. Protected Student Records (Strict PII Isolation)
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow list: if isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(studentId) && isValidStudent(incoming()) && isStaff();
+      allow update: if isValidId(studentId) && isValidStudent(incoming()) && isStaff();
+      allow delete: if isValidId(studentId) && isAdmin();
+    }
+
+    // 8. Academic Scores / Online Report Card
+    match /scores/{scoreId} {
+      allow get: if isValidId(scoreId) && isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow list: if isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(scoreId) && isVerified() && isValidScore(incoming()) && (
+        isStaff() ||
+        (incoming().ownerUid == request.auth.uid && incoming().verified == false && incoming().source in ['SELF_ENTRY', 'AI_SCAN', 'ONLINE_QUIZ'])
+      );
+      allow update: if isValidId(scoreId) && isValidScore(incoming()) && isStaff();
+      allow delete: if isValidId(scoreId) && isAdmin();
+    }
+
+    // 9. Daily Attendance Logs
+    match /attendance/{attId} {
+      allow get: if isValidId(attId) && isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow list: if isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(attId) && isValidAttendance(incoming()) && isStaff();
+      allow update: if isValidId(attId) && isValidAttendance(incoming()) && isStaff();
+      allow delete: if isValidId(attId) && isAdmin();
+    }
+
+    // 10. Tuition & Online Payments (Financial Isolation)
+    match /tuition/{tuitionId} {
+      allow get: if isValidId(tuitionId) && isVerified() && (isAdmin() || existing().ownerUid == request.auth.uid);
+      allow list: if isVerified() && (isAdmin() || existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(tuitionId) && isValidTuition(incoming()) && isAdmin();
+      allow update: if isValidId(tuitionId) && isVerified() && isValidTuition(incoming()) && (
+        isAdmin() ||
+        (
+          existing().ownerUid == request.auth.uid &&
+          existing().status != 'PAID' &&
+          incoming().status == 'PAID' &&
+          incoming().paidAmount == existing().totalAmount &&
+          incoming().totalAmount == existing().totalAmount &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'paymentMethod', 'paidAt'])
+        )
+      );
+      allow delete: if isValidId(tuitionId) && isSuperAdmin();
+    }
+
+    // 11. Center Operating Expenses (Admin & SuperAdmin Only)
+    match /expenses/{expenseId} {
+      allow get: if isValidId(expenseId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(expenseId) && isValidExpense(incoming()) && isAdmin();
+      allow update: if isValidId(expenseId) && isValidExpense(incoming()) && isAdmin();
+      allow delete: if isValidId(expenseId) && isAdmin();
+    }
+
+    // 12. GDPT 2018 National Exam Bank
+    match /exams/{examId} {
+      allow get: if isValidId(examId);
+      allow list: if true;
+      allow create: if isValidId(examId) && isValidExam(incoming()) && isStaff();
+      allow update: if isValidId(examId) && isValidExam(incoming()) && (
+        isStaff() ||
+        (isVerified() && incoming().attemptsCount == existing().attemptsCount + 1 && incoming().diff(existing()).affectedKeys().hasOnly(['attemptsCount']))
+      );
+      allow delete: if isValidId(examId) && isAdmin();
+    }
+
+    // 13. Support, Consultation & Feedback Tickets (Terminal State Locked)
+    match /tickets/{ticketId} {
+      allow get: if isValidId(ticketId) && isVerified() && (isStaff() || existing().authorUid == request.auth.uid);
+      allow list: if isVerified() && (isStaff() || existing().authorUid == request.auth.uid);
+      allow create: if isValidId(ticketId) && isVerified() && isValidTicket(incoming()) && (
+        isStaff() ||
+        (incoming().authorUid == request.auth.uid && incoming().status == 'OPEN' && !('reply' in incoming()))
+      );
+      allow update: if isValidId(ticketId) && isVerified() && isValidTicket(incoming()) && (
+        isAdmin() ||
+        (
+          isStaff() &&
+          existing().status != 'RESOLVED' &&
+          incoming().authorUid == existing().authorUid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reply'])
+        )
+      );
+      allow delete: if isValidId(ticketId) && isAdmin();
+    }
+
+    // 14. Real-Time Notifications
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && isVerified() && (
+        isAdmin() ||
+        existing().targetRole == 'ALL' ||
+        existing().targetUid == request.auth.uid
+      );
+      allow list: if isVerified() && (
+        isAdmin() ||
+        existing().targetRole == 'ALL' ||
+        existing().targetUid == request.auth.uid
+      );
+      allow create: if isValidId(notifId) && isValidNotification(incoming()) && isStaff();
+      allow update: if isValidId(notifId) && isVerified() && isValidNotification(incoming()) && (
+        isAdmin() ||
+        (
+          (existing().targetUid == request.auth.uid || existing().targetRole == 'ALL') &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['read'])
+        )
+      );
+      allow delete: if isValidId(notifId) && isAdmin();
+    }
+  }
+}

@@ -6,11 +6,14 @@ import { createServer as createViteServer } from 'vite';
 import { loadDb, saveDb, CLOUDFLARE_D1_SCHEMA_SQL } from './server/db.ts';
 import { REAL_CENTER_GALLERY } from './server/seedData.ts';
 import {
+  ADMIN_EMAIL,
   DEMO_ACCOUNTS,
   extractAuth,
   hashPassword,
   requireAuth,
   signSessionToken,
+  SUPER_ADMIN_EMAIL,
+  verifyFirebaseIdToken,
   verifyPassword,
   type AuthedRequest,
 } from './server/auth.ts';
@@ -81,10 +84,13 @@ app.get('/api/v1/bootstrap', (_req, res) => {
         'Cơ sở 2: Trung Tâm Nhân Trí 2 — TP. Long Xuyên, Tỉnh An Giang',
       ],
       hotlineZalo: '0918 990 999',
-      email: 'lienhe@nhantri.edu.vn',
+      email: 'lienhe@daythemnhantri.com',
+      domain: 'daythemnhantri.com',
     },
     courses: db.courses,
     teachers: db.teachers,
+    timetable: db.timetable,
+    exams: db.exams,
     gallery: REAL_CENTER_GALLERY,
     examsSummary: db.exams.map(({ id, title, level, grade, subject, durationMinutes, curriculumStandard, difficulty, attemptsCount, questions }) => ({
       id,
@@ -173,6 +179,37 @@ app.post('/api/v1/auth/admin-claim', (req, res) => {
   res.json({ token, user: DEMO_ACCOUNTS.ADMIN, claimed: true });
 });
 
+app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
+  const idToken = typeof req.body?.idToken === 'string' ? req.body.idToken : '';
+  const verified = await verifyFirebaseIdToken(idToken);
+  if (!verified || !verified.emailVerified) {
+    res.status(401).json({ error: 'Token Gmail Firebase không hợp lệ hoặc chưa xác minh email.' });
+    return;
+  }
+
+  let role: UserRole = 'STUDENT';
+  if (verified.email === SUPER_ADMIN_EMAIL) {
+    role = 'SUPER_ADMIN';
+  } else if (verified.email === ADMIN_EMAIL) {
+    role = 'ADMIN';
+  } else if (req.body?.requestedRole === 'PARENT' || req.body?.requestedRole === 'STUDENT') {
+    role = req.body.requestedRole;
+  }
+
+  const user = {
+    id: verified.uid,
+    name: verified.displayName,
+    email: verified.email,
+    photoURL: verified.photoURL,
+    role,
+    linkedStudentId: role === 'STUDENT' || role === 'PARENT' ? 'st-01' : undefined,
+    authProvider: 'GOOGLE_FIREBASE' as const,
+  };
+
+  const token = signSessionToken(user);
+  res.json({ token, user });
+});
+
 app.get('/api/v1/auth/me', requireAuth(), (req: AuthedRequest, res) => {
   res.json({ user: req.user });
 });
@@ -184,7 +221,8 @@ app.get('/api/v1/auth/me', requireAuth(), (req: AuthedRequest, res) => {
 app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
   const user = req.user!;
-  const isStaff = user.role === 'ADMIN' || user.role === 'TEACHER';
+  const isAdminUser = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
+  const isStaff = isAdminUser || user.role === 'TEACHER';
 
   const students = isStaff
     ? db.students
@@ -207,7 +245,7 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     : db.tickets.filter((t) => t.authorRole === user.role || t.authorName.includes('Hòa'));
 
   const notifications = db.notifications.filter(
-    (n) => n.targetRole === 'ALL' || n.targetRole === user.role || user.role === 'ADMIN',
+    (n) => n.targetRole === 'ALL' || n.targetRole === user.role || isAdminUser,
   );
 
   res.json({
@@ -218,7 +256,7 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     scores,
     attendance,
     tuition,
-    expenses: user.role === 'ADMIN' ? db.expenses : [],
+    expenses: isAdminUser ? db.expenses : [],
     exams: db.exams,
     tickets,
     notifications,
