@@ -1,0 +1,6 @@
+{
+  "name": "Trung Tâm Dạy Thêm Học Thêm Nhân Trí",
+  "description": "Hệ thống CMS quản lý giáo dục, thời khóa biểu động, học bạ online, thư viện đề thi chuẩn quốc gia và quản lý học phí cho Trung Tâm Dạy Thêm Học Thêm Nhân Trí.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
