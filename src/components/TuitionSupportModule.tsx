@@ -13,20 +13,28 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import type { TuitionRecord } from '../types';
+import type { SiteConfig, TuitionRecord } from '../types';
 import { apiRequest, formatVnd, type WorkspacePayload } from '../lib/api';
+import { DEFAULT_SITE_CONFIG } from '../lib/firestoreStore';
+import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 
 interface TuitionViewProps {
   workspace: WorkspacePayload;
+  siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
 }
 
-export const TuitionModule: React.FC<TuitionViewProps> = ({ workspace, onRefresh }) => {
+export const TuitionModule: React.FC<TuitionViewProps> = ({
+  workspace,
+  siteConfig = DEFAULT_SITE_CONFIG,
+  onRefresh,
+}) => {
   const isAdmin = workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PAID' | 'DUE_SOON' | 'OVERDUE'>('ALL');
   const [payModal, setPayModal] = useState<TuitionRecord | null>(null);
   const [payMethod, setPayMethod] = useState<'VIETQR' | 'MOMO' | 'ZALOPAY'>('VIETQR');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string>('');
   const [notice, setNotice] = useState('');
 
   const summary = useMemo(() => {
@@ -43,16 +51,36 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({ workspace, onRefresh
     [workspace.tuition, statusFilter],
   );
 
+  function copyText(label: string, text: string) {
+    navigator.clipboard?.writeText(text);
+    setCopiedField(label);
+    setTimeout(() => setCopiedField(''), 2000);
+  }
+
   async function handleConfirmPayment() {
     if (!payModal) return;
     setBusyId(payModal.id);
     try {
-      await apiRequest(`/api/v1/tuition/${payModal.id}/pay`, {
-        method: 'PATCH',
-        body: JSON.stringify({ paymentMethod: payMethod }),
-      });
-      await onRefresh();
-      setNotice(`Đã xác nhận thanh toán ${formatVnd(payModal.totalAmount)} cho em ${payModal.studentName} qua ${payMethod}.`);
+      if (isAdmin) {
+        await apiRequest(`/api/v1/tuition/${payModal.id}/pay`, {
+          method: 'PATCH',
+          body: JSON.stringify({ paymentMethod: payMethod }),
+        });
+        await onRefresh();
+        setNotice(
+          `Admin đã xác nhận thu ${formatVnd(payModal.totalAmount)} cho em ${payModal.studentName} qua ${payMethod}.`,
+        );
+      } else {
+        const res = await apiRequest<{ message: string }>(
+          `/api/v1/tuition/${payModal.id}/confirm-transfer`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ paymentMethod: payMethod }),
+          },
+        );
+        await onRefresh();
+        setNotice(res.message);
+      }
       setPayModal(null);
     } catch (err: unknown) {
       setNotice(err instanceof Error ? err.message : 'Lỗi thanh toán.');
@@ -259,61 +287,134 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({ workspace, onRefresh
         </div>
       )}
 
-      {/* Online Payment Modal (VietQR / MoMo / ZaloPay) */}
-      {payModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-6 space-y-5">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-xs font-semibold text-blue-900">Cổng thanh toán học phí trực tuyến</p>
-                <h3 className="text-lg font-bold text-slate-950 mt-0.5">{payModal.studentName}</h3>
-                <p className="text-xs text-slate-500">{payModal.monthLabel}</p>
+      {/* Online Payment Modal (Dynamic NAPAS VietQR / MoMo / ZaloPay) */}
+      {payModal && (() => {
+        const dueAmount = Math.max(0, payModal.totalAmount - payModal.paidAmount);
+        const transferMemo = buildTuitionTransferMemo(payModal.centerClass, payModal.studentName);
+        const qrUrl = buildVietQrUrl({
+          bankName: siteConfig.bankName,
+          accountNo: siteConfig.bankAccount,
+          accountName: siteConfig.bankOwner,
+          amount: dueAmount,
+          memo: transferMemo,
+        });
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+            <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-6 space-y-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-blue-900">
+                    Cổng thanh toán học phí trực tuyến · {siteConfig.domain}
+                  </p>
+                  <h3 className="text-lg font-bold text-slate-950 mt-0.5">{payModal.studentName}</h3>
+                  <p className="text-xs text-slate-500">
+                    {payModal.centerClass} · {payModal.monthLabel}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPayModal(null)}
+                  className="cursor-pointer text-slate-400 hover:text-slate-700"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button type="button" onClick={() => setPayModal(null)} className="cursor-pointer text-slate-400">
-                <X className="w-5 h-5" />
+
+              <div className="grid grid-cols-3 gap-2">
+                {(['VIETQR', 'MOMO', 'ZALOPAY'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setPayMethod(m)}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold border cursor-pointer ${
+                      payMethod === m
+                        ? 'bg-blue-900 text-white border-blue-900'
+                        : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-center space-y-2.5">
+                {payMethod === 'VIETQR' ? (
+                  <div className="mx-auto w-56 bg-white p-2 rounded-lg border border-slate-200">
+                    <img
+                      src={qrUrl}
+                      alt={`Mã VietQR đóng học phí cho ${payModal.studentName}`}
+                      loading="lazy"
+                      className="w-full h-auto rounded"
+                    />
+                  </div>
+                ) : (
+                  <div className="py-4 space-y-1.5">
+                    <div className="w-20 h-20 mx-auto bg-white border border-slate-300 rounded-lg flex items-center justify-center">
+                      <QrCode className="w-12 h-12 text-blue-950" />
+                    </div>
+                    <p className="text-xs text-slate-700">
+                      Chuyển qua ví <strong>{payMethod}</strong> tới số:{' '}
+                      <strong className="font-mono-num text-blue-950">{siteConfig.momoPhone}</strong>
+                    </p>
+                  </div>
+                )}
+
+                <p className="font-mono-num text-xl font-extrabold text-blue-950">
+                  {formatVnd(dueAmount)}
+                </p>
+
+                <div className="text-left bg-white border border-slate-200 rounded-lg p-3 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">STK ({siteConfig.bankName}):</span>
+                    <button
+                      type="button"
+                      onClick={() => copyText('acct', siteConfig.bankAccount)}
+                      className="inline-flex items-center gap-1 font-mono-num font-bold text-slate-900 hover:text-blue-900 cursor-pointer"
+                    >
+                      <span>{siteConfig.bankAccount}</span>
+                      {copiedField === 'acct' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-700" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-slate-400" />
+                      )}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">Nội dung CK:</span>
+                    <button
+                      type="button"
+                      onClick={() => copyText('memo', transferMemo)}
+                      className="inline-flex items-center gap-1 font-mono-num font-bold text-blue-950 hover:underline cursor-pointer"
+                    >
+                      <span className="truncate max-w-[190px]">{transferMemo}</span>
+                      {copiedField === 'memo' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={busyId === payModal.id}
+                onClick={handleConfirmPayment}
+                className={`w-full py-2.5 text-sm font-semibold text-white rounded-lg cursor-pointer disabled:opacity-60 ${
+                  isAdmin ? 'bg-emerald-700 hover:bg-emerald-600' : 'bg-blue-900 hover:bg-blue-800'
+                }`}
+              >
+                {busyId === payModal.id
+                  ? 'Đang xử lý...'
+                  : isAdmin
+                    ? 'Xác nhận đã thu tiền (Admin)'
+                    : 'Tôi đã chuyển khoản — Báo Ban Học vụ đối soát'}
               </button>
             </div>
-
-            <div className="grid grid-cols-3 gap-2">
-              {(['VIETQR', 'MOMO', 'ZALOPAY'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setPayMethod(m)}
-                  className={`py-2 px-3 rounded-lg text-xs font-bold border cursor-pointer ${
-                    payMethod === m
-                      ? 'bg-blue-900 text-white border-blue-900'
-                      : 'bg-white text-slate-700 border-slate-300'
-                  }`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-
-            <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl text-center space-y-2">
-              <div className="w-28 h-28 mx-auto bg-white border border-slate-300 rounded-lg flex items-center justify-center">
-                <QrCode className="w-20 h-20 text-slate-900" />
-              </div>
-              <p className="text-xs text-slate-600">
-                Quét mã {payMethod} · Nội dung: <strong className="font-mono-num">HP {payModal.centerClass} {payModal.studentName}</strong>
-              </p>
-              <p className="font-mono-num text-xl font-extrabold text-blue-950">
-                {formatVnd(Math.max(0, payModal.totalAmount - payModal.paidAmount))}
-              </p>
-            </div>
-
-            <button
-              type="button"
-              disabled={busyId === payModal.id}
-              onClick={handleConfirmPayment}
-              className="w-full py-2.5 text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-600 rounded-lg cursor-pointer"
-            >
-              {busyId === payModal.id ? 'Đang đối soát...' : 'Xác nhận đã thanh toán'}
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

@@ -50,6 +50,7 @@ export interface WorkerEnv {
   GEMINI_API_KEY?: string;
   SESSION_SECRET?: string;
   ADMIN_PASSCODE?: string;
+  ALLOW_DEMO_LOGIN?: string;
 }
 
 const SUPER_ADMIN_EMAIL = 'duyweb5@gmail.com';
@@ -81,6 +82,7 @@ const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
     email: 'ph.phuchoa@daythemnhantri.com',
     role: 'PARENT',
     linkedStudentId: 'st-01',
+    linkedStudentIds: ['st-01'],
   },
   STUDENT: {
     id: 'usr-student',
@@ -88,13 +90,14 @@ const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
     email: 'hoanp.6a1@daythemnhantri.com',
     role: 'STUDENT',
     linkedStudentId: 'st-01',
+    linkedStudentIds: ['st-01'],
   },
 };
 
 const ALLOWED_SAMPLE_FILES = new Set([
-  'IMG_9542_4ffccfa4.JPG',
-  'IMG_9538_cadb03a1.JPG',
-  'IMG_9534_fd106b28.JPG',
+  'IMG_9542_4ffccfa4.webp',
+  'IMG_9538_cadb03a1.webp',
+  'IMG_9534_fd106b28.webp',
 ]);
 
 const SHIFT_TIMES: Record<`${SessionPeriod}_${ShiftCode}`, string> = {
@@ -121,6 +124,50 @@ function getSessionSecret(env: WorkerEnv): string {
 
 let isolateMemoryDb: DatabaseState | null = null;
 let d1Initialized = false;
+const workerRateBuckets = new Map<string, number[]>();
+
+const SECURITY_HEADERS: Record<string, string> = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(self), microphone=(), geolocation=()',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+};
+
+function isWorkerRateLimited(req: Request, key: string, maxRequests: number, windowMs: number): boolean {
+  const ip = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'edge';
+  const bucketKey = `${key}:${ip}`;
+  const now = Date.now();
+  const recent = (workerRateBuckets.get(bucketKey) || []).filter((ts) => now - ts < windowMs);
+  if (recent.length >= maxRequests) {
+    workerRateBuckets.set(bucketKey, recent);
+    return true;
+  }
+  recent.push(now);
+  workerRateBuckets.set(bucketKey, recent);
+  return false;
+}
+
+function getAllowedStudentIds(user: AuthUser | null): string[] {
+  if (!user) return [];
+  const ids = new Set<string>();
+  if (user.linkedStudentId) ids.add(user.linkedStudentId);
+  if (Array.isArray(user.linkedStudentIds)) {
+    user.linkedStudentIds.forEach((id) => {
+      if (id) ids.add(id);
+    });
+  }
+  return Array.from(ids);
+}
+
+function generateParentLinkCode(grade: number): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(3));
+  let suffix = '';
+  for (let i = 0; i < 3; i++) {
+    suffix += chars[bytes[i] % chars.length];
+  }
+  return `NT${grade}${suffix}`;
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -128,6 +175,7 @@ function json(data: unknown, status = 200): Response {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
+      ...SECURITY_HEADERS,
     },
   });
 }
@@ -279,9 +327,12 @@ async function verifyToken(token: string, env: WorkerEnv): Promise<AuthUser | nu
       id: decoded.id,
       name: decoded.name,
       email: decoded.email,
+      photoURL: decoded.photoURL,
       role: decoded.role,
       linkedStudentId: decoded.linkedStudentId,
+      linkedStudentIds: Array.isArray(decoded.linkedStudentIds) ? decoded.linkedStudentIds : undefined,
       linkedTeacherId: decoded.linkedTeacherId,
+      authProvider: decoded.authProvider,
     };
   } catch {
     return null;
@@ -370,7 +421,7 @@ async function loadSafeSampleBase64(
   const res = env.ASSETS ? await env.ASSETS.fetch(assetUrl) : await fetch(assetUrl);
   if (!res.ok) return null;
   const buf = await res.arrayBuffer();
-  return { base64: arrayBufferToBase64(buf), mimeType: 'image/jpeg' };
+  return { base64: arrayBufferToBase64(buf), mimeType: 'image/webp' };
 }
 
 function findConflicts(
@@ -465,7 +516,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         domain: 'daythemnhantri.com',
       },
       courses: db.courses,
-      teachers: db.teachers,
+      teachers: db.teachers.map(({ phone: _omitPhone, ...pub }) => ({ ...pub, phone: '' })),
       timetable: db.timetable,
       exams: db.exams,
       gallery: REAL_CENTER_GALLERY,
@@ -510,8 +561,17 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   // 2. AUTH ROUTES
   if (method === 'POST' && pathname === '/api/v1/auth/role-session') {
+    if (env.ALLOW_DEMO_LOGIN === 'false') {
+      return json(
+        { error: 'Chế độ đăng nhập dùng thử đã tắt trên môi trường sản xuất. Vui lòng đăng nhập bằng Gmail.' },
+        403,
+      );
+    }
     const body = await readJson<{ role?: string; passcode?: string }>();
     const role = String(body.role || '').toUpperCase() as UserRole;
+    if (role === 'SUPER_ADMIN') {
+      return json({ error: 'Tài khoản SuperAdmin bắt buộc xác thực bằng Gmail chính thức.' }, 403);
+    }
     const account = DEMO_ACCOUNTS[role];
     if (!account) return json({ error: 'Vai trò không hợp lệ.' }, 400);
 
@@ -595,10 +655,38 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       photoURL: fb.photoUrl,
       role,
       linkedStudentId: role === 'STUDENT' || role === 'PARENT' ? 'st-01' : undefined,
+      linkedStudentIds: role === 'STUDENT' || role === 'PARENT' ? ['st-01'] : undefined,
       authProvider: 'GOOGLE_FIREBASE',
     };
     const token = await signToken(bridgedUser, env);
     return json({ token, user: bridgedUser });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/auth/link-student') {
+    const denied = requireRole();
+    if (denied) return denied;
+    const b = await readJson<{ linkCode?: string }>();
+    const code = String(b.linkCode || '').trim().toUpperCase();
+    if (!code || code.length < 4) {
+      return json({ error: 'Vui lòng nhập Mã liên kết Phụ huynh hợp lệ (VD: NT7A1T).' }, 400);
+    }
+    const db = await loadState(env);
+    const student = db.students.find(
+      (s) =>
+        (s.parentLinkCode && s.parentLinkCode.toUpperCase() === code) ||
+        s.code.toUpperCase() === code,
+    );
+    if (!student) {
+      return json({ error: 'Không tìm thấy học sinh khớp với mã liên kết này.' }, 404);
+    }
+    const mergedIds = Array.from(new Set([...getAllowedStudentIds(user), student.id]));
+    const updatedUser: AuthUser = {
+      ...user!,
+      linkedStudentId: user!.linkedStudentId || student.id,
+      linkedStudentIds: mergedIds,
+    };
+    const token = await signToken(updatedUser, env);
+    return json({ token, user: updatedUser, student });
   }
 
   if (method === 'GET' && pathname === '/api/v1/auth/me') {
@@ -614,20 +702,30 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const db = await loadState(env);
     const isAdminUser = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN';
     const isStaff = isAdminUser || user!.role === 'TEACHER';
+    const allowedIds = new Set(getAllowedStudentIds(user));
+    const scopedStudents = isStaff ? db.students : db.students.filter((s) => allowedIds.has(s.id));
 
     return json({
       user,
-      teachers: db.teachers,
-      students: isStaff ? db.students : db.students.filter((s) => s.id === user!.linkedStudentId),
+      teachers: isStaff
+        ? db.teachers
+        : db.teachers.map(({ phone: _omit, ...pub }) => ({ ...pub, phone: '' })),
+      students: scopedStudents,
       timetable: db.timetable,
-      scores: isStaff ? db.scores : db.scores.filter((sc) => sc.studentId === user!.linkedStudentId),
-      attendance: isStaff ? db.attendance : db.attendance.filter((a) => a.studentId === user!.linkedStudentId),
-      tuition: isStaff ? db.tuition : db.tuition.filter((t) => t.studentId === user!.linkedStudentId),
+      scores: isStaff ? db.scores : db.scores.filter((sc) => allowedIds.has(sc.studentId)),
+      attendance: isStaff ? db.attendance : db.attendance.filter((a) => allowedIds.has(a.studentId)),
+      tuition: isStaff ? db.tuition : db.tuition.filter((t) => allowedIds.has(t.studentId)),
       expenses: isAdminUser ? db.expenses : [],
       exams: db.exams,
       tickets: isStaff
         ? db.tickets
-        : db.tickets.filter((t) => t.authorRole === user!.role || t.authorName.includes('Hòa')),
+        : db.tickets.filter(
+            (t) =>
+              t.authorUid === user!.id ||
+              t.authorName === user!.name ||
+              (t.authorRole === user!.role &&
+                scopedStudents.some((st) => t.authorName.includes(st.fullName.split(' ').slice(-1)[0]))),
+          ),
       notifications: db.notifications.filter(
         (n) => n.targetRole === 'ALL' || n.targetRole === user!.role || isAdminUser,
       ),
@@ -636,6 +734,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   // 4. PUBLIC ENROLLMENT
   if (method === 'POST' && pathname === '/api/v1/enrollments') {
+    if (isWorkerRateLimited(request, 'enroll', 10, 60_000)) {
+      return json({ error: 'Bạn thao tác quá nhanh. Vui lòng thử lại sau 1 phút.' }, 429);
+    }
     const b = await readJson<Record<string, unknown>>();
     const studentName = String(b.studentName || '').trim();
     const parentPhone = String(b.parentPhone || '').trim();
@@ -669,6 +770,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const newStudent: Student = {
       id: newStudentId,
       code: `NT-${numericGrade}-${String(db.students.length + 1).padStart(2, '0')}`,
+      parentLinkCode: generateParentLinkCode(numericGrade),
       fullName: studentName,
       grade: numericGrade,
       level: course.level,
@@ -746,6 +848,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const student: Student = {
       id: `st-${Date.now()}`,
       code: `NT-${grade}-${String(db.students.length + 1).padStart(2, '0')}`,
+      parentLinkCode: generateParentLinkCode(grade),
       fullName,
       grade,
       level: grade <= 5 ? 'CAP_1' : grade <= 9 ? 'CAP_2' : 'CAP_3',
@@ -786,6 +889,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       imported.push({
         id: `st-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         code: `NT-${grade}-${String(db.students.length + imported.length + 1).padStart(2, '0')}`,
+        parentLinkCode: generateParentLinkCode(grade),
         fullName,
         grade,
         level: grade <= 5 ? 'CAP_1' : grade <= 9 ? 'CAP_2' : 'CAP_3',
@@ -977,6 +1081,10 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   if (method === 'GET' && icsMatch) {
     const denied = requireRole();
     if (denied) return denied;
+    const isStaff = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'TEACHER';
+    if (!isStaff && !getAllowedStudentIds(user).includes(icsMatch[1])) {
+      return json({ error: 'Bạn chỉ có thể tải lịch học của học sinh đã liên kết với tài khoản.' }, 403);
+    }
     const db = await loadState(env);
     const student = db.students.find((s) => s.id === icsMatch[1]);
     if (!student) return json({ error: 'Không tìm thấy học sinh.' }, 404);
@@ -1020,10 +1128,14 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   if (method === 'POST' && pathname === '/api/v1/scores') {
     const denied = requireRole();
     if (denied) return denied;
+    const isStaff = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'TEACHER';
     const db = await loadState(env);
     const b = await readJson<Record<string, unknown>>();
     const student = db.students.find((s) => s.id === b.studentId);
     if (!student) return json({ error: 'Vui lòng chọn học sinh hợp lệ.' }, 400);
+    if (!isStaff && !getAllowedStudentIds(user).includes(student.id)) {
+      return json({ error: 'Bạn chỉ có thể cập nhật điểm cho học sinh thuộc tài khoản của mình.' }, 403);
+    }
     const numericScore = Number(b.score);
     if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 10) {
       return json({ error: 'Điểm số phải nằm trong thang điểm 0 – 10.' }, 400);
@@ -1039,8 +1151,10 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       maxScore: 10,
       date: String(b.date || todayIso()),
       school: String(b.school || student.school),
-      source: (b.source as ScoreRecord['source']) || (user!.role === 'STUDENT' ? 'SELF_ENTRY' : 'TEACHER'),
-      verified: user!.role === 'ADMIN' || user!.role === 'TEACHER',
+      source: isStaff
+        ? ((b.source as ScoreRecord['source']) || 'TEACHER')
+        : (b.source === 'AI_SCAN' ? 'AI_SCAN' : 'SELF_ENTRY'),
+      verified: isStaff,
       aiSummary: b.aiSummary ? String(b.aiSummary) : undefined,
       strengths: Array.isArray(b.strengths) ? b.strengths.map(String) : undefined,
       improvements: Array.isArray(b.improvements) ? b.improvements.map(String) : undefined,
@@ -1097,10 +1211,10 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     return json({ attendance: rec }, 201);
   }
 
-  // 8. TUITION & REMINDERS
+  // 8. TUITION & REMINDERS (Admin-verified PAID only + Parent Transfer Confirmation)
   const payMatch = pathname.match(/^\/api\/v1\/tuition\/([^/]+)\/pay$/);
   if (method === 'PATCH' && payMatch) {
-    const denied = requireRole();
+    const denied = requireRole(['ADMIN']);
     if (denied) return denied;
     const db = await loadState(env);
     const rec = db.tuition.find((t) => t.id === payMatch[1]);
@@ -1112,6 +1226,45 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     rec.paidAt = todayIso();
     await saveState(env, db);
     return json({ tuition: rec });
+  }
+
+  const transferConfirmMatch = pathname.match(/^\/api\/v1\/tuition\/([^/]+)\/confirm-transfer$/);
+  if (method === 'POST' && transferConfirmMatch) {
+    const denied = requireRole();
+    if (denied) return denied;
+    const db = await loadState(env);
+    const rec = db.tuition.find((t) => t.id === transferConfirmMatch[1]);
+    if (!rec) return json({ error: 'Không tìm thấy phiếu học phí.' }, 404);
+    const isStaff = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'TEACHER';
+    if (!isStaff && !getAllowedStudentIds(user).includes(rec.studentId)) {
+      return json({ error: 'Không có quyền gửi xác nhận cho phiếu học phí này.' }, 403);
+    }
+    const b = await readJson<{ paymentMethod?: string; note?: string }>();
+    const methodLabel = String(b.paymentMethod || 'VIETQR');
+    const note = String(b.note || '').trim();
+    const remaining = Math.max(0, rec.totalAmount - rec.paidAmount);
+    db.tickets.unshift({
+      id: `tk-pay-${Date.now()}`,
+      authorUid: user!.id,
+      createdAt: nowFormatted(),
+      authorName: user!.name,
+      authorRole: user!.role,
+      category: 'TUITION',
+      subject: `Báo đã chuyển khoản học phí (${methodLabel}) — ${rec.studentName}`,
+      message: `Phụ huynh báo đã chuyển ${remaining.toLocaleString('vi-VN')}đ cho kỳ ${rec.monthLabel} (${rec.centerClass}) qua ${methodLabel}.${note ? ` Ghi chú: ${note}` : ''} Vui lòng đối soát.`,
+      status: 'OPEN',
+    });
+    db.notifications.unshift({
+      id: `ntf-${Date.now()}`,
+      createdAt: nowFormatted(),
+      title: `Chờ đối soát học phí · ${rec.studentName}`,
+      body: `${user!.name} vừa báo đã chuyển ${remaining.toLocaleString('vi-VN')}đ qua ${methodLabel}.`,
+      channel: 'APP',
+      targetRole: 'ADMIN',
+      read: false,
+    });
+    await saveState(env, db);
+    return json({ submitted: true, message: 'Đã gửi thông báo đã chuyển khoản tới Ban Học vụ để đối soát.' });
   }
 
   const remindMatch = pathname.match(/^\/api\/v1\/tuition\/([^/]+)\/remind$/);
@@ -1182,6 +1335,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   // 10. TICKETS, NOTIFICATIONS & CLOUDFLARE SCHEMA
   if (method === 'POST' && pathname === '/api/v1/tickets') {
+    if (isWorkerRateLimited(request, 'tickets', 15, 60_000)) {
+      return json({ error: 'Bạn gửi quá nhiều yêu cầu. Vui lòng thử lại sau 1 phút.' }, 429);
+    }
     const b = await readJson<Record<string, unknown>>();
     const authorName = String(b.authorName || '').trim();
     const message = String(b.message || '').trim();
@@ -1189,6 +1345,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const db = await loadState(env);
     const ticket: FeedbackTicket = {
       id: `tk-${Date.now()}`,
+      authorUid: user?.id,
       createdAt: nowFormatted(),
       authorName,
       authorRole: user?.role || 'GUEST',
@@ -1348,10 +1505,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   }
 
   if (method === 'POST' && pathname === '/api/v1/ai/consult') {
+    if (isWorkerRateLimited(request, 'ai-consult', 20, 60_000)) {
+      return json({ error: 'Trợ lý AI đang nhận nhiều yêu cầu, vui lòng thử lại sau ít giây.' }, 429);
+    }
     try {
       const b = await readJson<{ question?: string; language?: string }>();
       const question = typeof b.question === 'string' ? b.question.trim() : '';
-      if (!question) return json({ error: 'Vui lòng nhập câu hỏi cần tư vấn.' }, 400);
+      if (!question || question.length > 800) {
+        return json({ error: 'Vui lòng nhập câu hỏi cần tư vấn (tối đa 800 ký tự).' }, 400);
+      }
       const db = await loadState(env);
       const ai = getGeminiClient(env);
       const lang = b.language === 'en' ? 'en' : 'vi';
@@ -1380,7 +1542,19 @@ export default {
       return handleApiRequest(request, env);
     }
     if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
+      const assetRes = await env.ASSETS.fetch(request);
+      const headers = new Headers(assetRes.headers);
+      for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+        headers.set(k, v);
+      }
+      if (url.pathname.startsWith('/assets/')) {
+        headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+      return new Response(assetRes.body, {
+        status: assetRes.status,
+        statusText: assetRes.statusText,
+        headers,
+      });
     }
     return new Response('Static assets binding (ASSETS) not configured.', { status: 404 });
   },

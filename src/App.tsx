@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import {
   Bell,
@@ -24,7 +24,9 @@ import type {
   CoursePackage,
   FrontendMode,
   Language,
+  NationalExam,
   SiteConfig,
+  TimetableSlot,
   UserRole,
 } from './types';
 import {
@@ -40,6 +42,8 @@ import {
   saveCourseToFirestore,
   saveSiteConfigPatch,
   subscribeCourses,
+  subscribePublicExams,
+  subscribePublicTimetable,
   subscribeSiteConfig,
 } from './lib/firestoreStore';
 import {
@@ -52,13 +56,33 @@ import {
   type WorkspacePayload,
 } from './lib/api';
 import { FrontendPortal } from './components/FrontendPortal';
-import { CmsOverview } from './components/CmsOverview';
-import { TimetableModule } from './components/TimetableModule';
-import { StudentsAttendanceModule } from './components/StudentsAttendanceModule';
-import { ScoresAiModule } from './components/ScoresAiModule';
-import { ExamLibraryModule } from './components/ExamLibraryModule';
-import { SupportSystemModule, TuitionModule } from './components/TuitionSupportModule';
-import { SystemConfigCms } from './components/SystemConfigCms';
+
+const CmsOverview = lazy(() =>
+  import('./components/CmsOverview').then((m) => ({ default: m.CmsOverview })),
+);
+const TimetableModule = lazy(() =>
+  import('./components/TimetableModule').then((m) => ({ default: m.TimetableModule })),
+);
+const StudentsAttendanceModule = lazy(() =>
+  import('./components/StudentsAttendanceModule').then((m) => ({
+    default: m.StudentsAttendanceModule,
+  })),
+);
+const ScoresAiModule = lazy(() =>
+  import('./components/ScoresAiModule').then((m) => ({ default: m.ScoresAiModule })),
+);
+const ExamLibraryModule = lazy(() =>
+  import('./components/ExamLibraryModule').then((m) => ({ default: m.ExamLibraryModule })),
+);
+const TuitionModule = lazy(() =>
+  import('./components/TuitionSupportModule').then((m) => ({ default: m.TuitionModule })),
+);
+const SupportSystemModule = lazy(() =>
+  import('./components/TuitionSupportModule').then((m) => ({ default: m.SupportSystemModule })),
+);
+const SystemConfigCms = lazy(() =>
+  import('./components/SystemConfigCms').then((m) => ({ default: m.SystemConfigCms })),
+);
 
 type CmsTab =
   | 'overview'
@@ -75,6 +99,8 @@ export default function App() {
   const [workspace, setWorkspace] = useState<WorkspacePayload | null>(null);
   const [siteConfig, setSiteConfig] = useState<SiteConfig>(DEFAULT_SITE_CONFIG);
   const [liveCourses, setLiveCourses] = useState<CoursePackage[]>([]);
+  const [liveTimetable, setLiveTimetable] = useState<TimetableSlot[]>([]);
+  const [liveExams, setLiveExams] = useState<NationalExam[]>([]);
 
   // Default Frontend Display Mode: Teacher & Student (user confirmed)
   const [frontendMode, setFrontendMode] = useState<FrontendMode>('TEACHER_STUDENT');
@@ -137,12 +163,28 @@ export default function App() {
     return () => unsub();
   }, [modeInitializedFromConfig]);
 
-  // Subscribe to live Firestore Courses (fallback cleanly to bootstrap courses)
+  // Subscribe to live Firestore Courses, Timetable & Exams (offline-cached with graceful fallback)
   useEffect(() => {
     if (!bootstrap) return;
-    const unsub = subscribeCourses(bootstrap.courses, setLiveCourses);
-    return () => unsub();
+    const unsubCourses = subscribeCourses(bootstrap.courses, setLiveCourses);
+    const unsubTimetable = subscribePublicTimetable(bootstrap.timetable || [], setLiveTimetable);
+    const unsubExams = subscribePublicExams(bootstrap.exams || [], setLiveExams);
+    return () => {
+      unsubCourses();
+      unsubTimetable();
+      unsubExams();
+    };
   }, [bootstrap]);
+
+  const mergedBootstrap = useMemo<BootstrapPayload | null>(() => {
+    if (!bootstrap) return null;
+    return {
+      ...bootstrap,
+      courses: liveCourses.length > 0 ? liveCourses : bootstrap.courses,
+      timetable: liveTimetable.length > 0 ? liveTimetable : bootstrap.timetable,
+      exams: liveExams.length > 0 ? liveExams : bootstrap.exams,
+    };
+  }, [bootstrap, liveCourses, liveTimetable, liveExams]);
 
   // Subscribe to Firebase Auth state (Gmail login)
   useEffect(() => {
@@ -279,6 +321,30 @@ export default function App() {
     await refreshWorkspace();
   }
 
+  async function handleLinkStudent(linkCode: string): Promise<{ studentName: string }> {
+    const res = await apiRequest<{
+      token: string;
+      user: AuthUser;
+      student: { id: string; fullName: string; centerClass: string };
+    }>('/api/v1/auth/link-student', {
+      method: 'POST',
+      body: JSON.stringify({ linkCode }),
+    });
+    setAuthToken(res.token);
+    setCurrentUser((prev) =>
+      prev
+        ? {
+            ...prev,
+            linkedStudentId: res.user.linkedStudentId,
+            linkedStudentIds: res.user.linkedStudentIds,
+          }
+        : res.user,
+    );
+    await refreshWorkspace();
+    showToast(`Đã liên kết học sinh ${res.student.fullName} (${res.student.centerClass}).`);
+    return { studentName: res.student.fullName };
+  }
+
   if (!bootstrap) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
@@ -351,7 +417,7 @@ export default function App() {
     <>
       {viewShell === 'FRONTEND' || !workspace || !currentUser ? (
         <FrontendPortal
-          bootstrap={bootstrap}
+          bootstrap={mergedBootstrap || bootstrap}
           workspace={workspace}
           siteConfig={siteConfig}
           courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
@@ -364,6 +430,8 @@ export default function App() {
           onToggleEditMode={() => setEditMode((e) => !e)}
           onQuickSaveConfig={handleQuickSaveConfig}
           onQuickSaveCourse={handleQuickSaveCourse}
+          onLinkStudent={handleLinkStudent}
+          onRefreshWorkspace={refreshWorkspace}
           onSignInGmail={handleSignInGmail}
           onOpenRoleModal={() => setShowRoleModal(true)}
           onOpenCms={(tab) => {
@@ -549,46 +617,58 @@ export default function App() {
             </header>
 
             <main className="flex-1 p-4 lg:p-8 max-w-[1360px] w-full mx-auto">
-              {activeTab === 'overview' && (
-                <CmsOverview
-                  workspace={workspace}
-                  onNavigate={(t) => setActiveTab(t as CmsTab)}
-                />
-              )}
-              {activeTab === 'system' && showSystemCmsNav && (
-                <SystemConfigCms
-                  currentUser={currentUser}
-                  siteConfig={siteConfig}
-                  courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
-                  bootstrap={bootstrap}
-                  onConfigSaved={(next) => {
-                    setSiteConfig(next);
-                    showToast('Đã đồng bộ cấu hình hệ thống.');
-                  }}
-                  onJumpToInlineEdit={() => {
-                    setEditMode(true);
-                    setViewShell('FRONTEND');
-                  }}
-                />
-              )}
-              {activeTab === 'timetable' && (
-                <TimetableModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
-              {activeTab === 'students' && (
-                <StudentsAttendanceModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
-              {activeTab === 'scores' && (
-                <ScoresAiModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
-              {activeTab === 'exams' && (
-                <ExamLibraryModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
-              {activeTab === 'tuition' && (
-                <TuitionModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
-              {activeTab === 'support' && (
-                <SupportSystemModule workspace={workspace} onRefresh={refreshWorkspace} />
-              )}
+              <Suspense
+                fallback={
+                  <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-xs text-slate-500">
+                    Đang tải phân hệ quản trị...
+                  </div>
+                }
+              >
+                {activeTab === 'overview' && (
+                  <CmsOverview
+                    workspace={workspace}
+                    onNavigate={(t) => setActiveTab(t as CmsTab)}
+                  />
+                )}
+                {activeTab === 'system' && showSystemCmsNav && (
+                  <SystemConfigCms
+                    currentUser={currentUser}
+                    siteConfig={siteConfig}
+                    courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
+                    bootstrap={mergedBootstrap || bootstrap}
+                    onConfigSaved={(next) => {
+                      setSiteConfig(next);
+                      showToast('Đã đồng bộ cấu hình hệ thống.');
+                    }}
+                    onJumpToInlineEdit={() => {
+                      setEditMode(true);
+                      setViewShell('FRONTEND');
+                    }}
+                  />
+                )}
+                {activeTab === 'timetable' && (
+                  <TimetableModule workspace={workspace} onRefresh={refreshWorkspace} />
+                )}
+                {activeTab === 'students' && (
+                  <StudentsAttendanceModule workspace={workspace} onRefresh={refreshWorkspace} />
+                )}
+                {activeTab === 'scores' && (
+                  <ScoresAiModule workspace={workspace} onRefresh={refreshWorkspace} />
+                )}
+                {activeTab === 'exams' && (
+                  <ExamLibraryModule workspace={workspace} onRefresh={refreshWorkspace} />
+                )}
+                {activeTab === 'tuition' && (
+                  <TuitionModule
+                    workspace={workspace}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                  />
+                )}
+                {activeTab === 'support' && (
+                  <SupportSystemModule workspace={workspace} onRefresh={refreshWorkspace} />
+                )}
+              </Suspense>
             </main>
           </div>
         </div>

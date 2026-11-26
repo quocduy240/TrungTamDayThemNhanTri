@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
+import { compressImageFile } from '../lib/imageOptimizer';
 
 interface StudentsAttendanceModuleProps {
   workspace: WorkspacePayload;
@@ -185,23 +186,22 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
     setErrorMsg('');
     try {
       let body: Record<string, string> = {};
+      let compressionNote = '';
       if (sampleFilename) {
         body = { sampleFilename };
       } else if (file) {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        body = { imageBase64: base64, mimeType: file.type || 'image/jpeg' };
+        const compressed = await compressImageFile(file, { maxDim: 1600, quality: 0.84 });
+        body = { imageBase64: compressed.dataUrl, mimeType: compressed.mimeType };
+        compressionNote = ` (đã nén ảnh ${compressed.originalKB} KB → ${compressed.compressedKB} KB)`;
       }
       const res = await apiRequest<{ rows: PreviewRow[] }>('/api/v1/ai/import-students-image', {
         method: 'POST',
         body: JSON.stringify(body),
       });
       setImportPreview(res.rows);
-      setFeedbackMsg(`AI đã nhận dạng ${res.rows.length} học sinh từ ảnh danh sách. Vui lòng kiểm tra trước khi lưu.`);
+      setFeedbackMsg(
+        `AI đã nhận dạng ${res.rows.length} học sinh từ ảnh danh sách${compressionNote}. Vui lòng kiểm tra trước khi lưu.`,
+      );
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi phân tích ảnh danh sách học sinh.');
     } finally {
@@ -366,7 +366,7 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                 <button
                   type="button"
                   disabled={ocrLoading}
-                  onClick={() => handleImageRosterOcr(undefined, 'IMG_9538_cadb03a1.JPG')}
+                  onClick={() => handleImageRosterOcr(undefined, 'IMG_9538_cadb03a1.webp')}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-50 rounded-lg cursor-pointer"
                 >
                   {ocrLoading ? 'AI đang đọc ảnh...' : 'Thử ngay ảnh Danh sách Lớp 7A1 thực'}
@@ -543,7 +543,14 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           <tbody className="divide-y divide-slate-100">
             {filteredStudents.map((st) => (
               <tr key={st.id} className="hover:bg-slate-50">
-                <td className="py-3 px-4 font-mono-num text-xs text-slate-500">{st.code}</td>
+                <td className="py-3 px-4 font-mono-num text-xs text-slate-500">
+                  <p>{st.code}</p>
+                  {st.parentLinkCode && (
+                    <p className="text-[11px] font-semibold text-blue-900 mt-0.5">
+                      Mã PH: {st.parentLinkCode}
+                    </p>
+                  )}
+                </td>
                 <td className="py-3 px-4">
                   <p className="font-semibold text-slate-950">{st.fullName}</p>
                   <p className="text-xs text-slate-500">

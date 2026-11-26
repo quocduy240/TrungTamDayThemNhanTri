@@ -13,6 +13,7 @@ import {
   buildZaloReportText,
   type WorkspacePayload,
 } from '../lib/api';
+import { compressImageFile } from '../lib/imageOptimizer';
 
 interface ScoresAiModuleProps {
   workspace: WorkspacePayload;
@@ -38,6 +39,7 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
   const [aiError, setAiError] = useState('');
   const [aiResult, setAiResult] = useState<AnalyzedResult | null>(null);
   const [previewImage, setPreviewImage] = useState<string>('');
+  const [compressionStat, setCompressionStat] = useState<string>('');
   const [savingAiScore, setSavingAiScore] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
@@ -77,20 +79,19 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
     setAiLoading(true);
     setAiError('');
     setAiResult(null);
+    setCompressionStat('');
     try {
       let body: Record<string, string> = {};
       if (sampleFilename) {
         setPreviewImage(`/assets/aistudio/${sampleFilename}`);
         body = { sampleFilename };
       } else if (file) {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        setPreviewImage(dataUrl);
-        body = { imageBase64: dataUrl, mimeType: file.type || 'image/jpeg' };
+        const compressed = await compressImageFile(file, { maxDim: 1400, quality: 0.82 });
+        setPreviewImage(compressed.dataUrl);
+        setCompressionStat(
+          `Đã tối ưu ảnh tự động: ${compressed.originalKB.toLocaleString('vi-VN')} KB → ${compressed.compressedKB.toLocaleString('vi-VN')} KB (${compressed.width}×${compressed.height})`,
+        );
+        body = { imageBase64: compressed.dataUrl, mimeType: compressed.mimeType };
       }
 
       const res = await apiRequest<{ analysis: AnalyzedResult }>('/api/v1/ai/analyze-test', {
@@ -243,7 +244,7 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
             <button
               type="button"
               disabled={aiLoading}
-              onClick={() => handleAnalyzePhoto(undefined, 'IMG_9542_4ffccfa4.JPG')}
+              onClick={() => handleAnalyzePhoto(undefined, 'IMG_9542_4ffccfa4.webp')}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 rounded-lg disabled:opacity-50 cursor-pointer"
             >
               <Camera className="w-4 h-4" />
@@ -252,6 +253,12 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
               </span>
             </button>
           </div>
+
+          {compressionStat && (
+            <p className="text-[11px] font-mono-num text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
+              {compressionStat}
+            </p>
+          )}
 
           {previewImage && (
             <div className="grid sm:grid-cols-12 gap-4 pt-2">

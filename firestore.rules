@@ -144,7 +144,7 @@ service cloud.firestore {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active'])
         && data.keys().hasOnly([
           'uid', 'email', 'displayName', 'photoURL', 'role', 'phone',
-          'preferredView', 'linkedStudentId', 'linkedTeacherId', 'active', 'createdAt', 'updatedAt'
+          'preferredView', 'linkedStudentId', 'linkedStudentIds', 'linkedTeacherId', 'active', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.uid)
         && isNonEmptyString(data.email, 160)
@@ -154,6 +154,7 @@ service cloud.firestore {
         && isOptionalString(data, 'phone', 40)
         && (!('preferredView' in data) || data.preferredView in ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER'])
         && isOptionalString(data, 'linkedStudentId', 128)
+        && (!('linkedStudentIds' in data) || isBoundedStringList(data.linkedStudentIds, 10))
         && isOptionalString(data, 'linkedTeacherId', 128)
         && data.active is bool
         && isOptionalString(data, 'createdAt', 60)
@@ -239,7 +240,7 @@ service cloud.firestore {
           'school', 'parentName', 'parentPhone', 'packageType', 'status'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerUid', 'code', 'fullName', 'grade', 'level', 'centerClass',
+          'id', 'ownerUid', 'code', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass',
           'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
           'parentPhone', 'parentZalo', 'packageType', 'hasBoarding', 'hasShuttle',
           'annualPrepaid', 'peConflictDay', 'peConflictShift', 'eveningMakeupSlot',
@@ -248,6 +249,7 @@ service cloud.firestore {
         && isValidId(data.id)
         && isOptionalString(data, 'ownerUid', 128)
         && isNonEmptyString(data.code, 40)
+        && isOptionalString(data, 'parentLinkCode', 24)
         && isNonEmptyString(data.fullName, 120)
         && data.grade is number && data.grade >= 3 && data.grade <= 12
         && data.level in ['CAP_1', 'CAP_2', 'CAP_3']
@@ -526,22 +528,12 @@ service cloud.firestore {
       allow delete: if isValidId(attId) && isAdmin();
     }
 
-    // 10. Tuition & Online Payments (Financial Isolation)
+    // 10. Tuition & Online Payments (Strict Financial Isolation — Admin Verified Only)
     match /tuition/{tuitionId} {
       allow get: if isValidId(tuitionId) && isVerified() && (isAdmin() || existing().ownerUid == request.auth.uid);
       allow list: if isVerified() && (isAdmin() || existing().ownerUid == request.auth.uid);
       allow create: if isValidId(tuitionId) && isValidTuition(incoming()) && isAdmin();
-      allow update: if isValidId(tuitionId) && isVerified() && isValidTuition(incoming()) && (
-        isAdmin() ||
-        (
-          existing().ownerUid == request.auth.uid &&
-          existing().status != 'PAID' &&
-          incoming().status == 'PAID' &&
-          incoming().paidAmount == existing().totalAmount &&
-          incoming().totalAmount == existing().totalAmount &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'paymentMethod', 'paidAt'])
-        )
-      );
+      allow update: if isValidId(tuitionId) && isVerified() && isValidTuition(incoming()) && isAdmin();
       allow delete: if isValidId(tuitionId) && isSuperAdmin();
     }
 

@@ -37,14 +37,58 @@ import type {
 
 const PORT = 3000;
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+app.use(express.json({ limit: '6mb' }));
 app.use(extractAuth);
+
+// Lightweight sliding-window rate limiter for public write/AI routes
+const rateBuckets = new Map<string, number[]>();
+function isRateLimited(ip: string, key: string, maxRequests: number, windowMs: number): boolean {
+  const bucketKey = `${key}:${ip}`;
+  const now = Date.now();
+  const recent = (rateBuckets.get(bucketKey) || []).filter((ts) => now - ts < windowMs);
+  if (recent.length >= maxRequests) {
+    rateBuckets.set(bucketKey, recent);
+    return true;
+  }
+  recent.push(now);
+  rateBuckets.set(bucketKey, recent);
+  return false;
+}
+
+function getAllowedStudentIds(user: AuthedRequest['user']): string[] {
+  if (!user) return [];
+  const ids = new Set<string>();
+  if (user.linkedStudentId) ids.add(user.linkedStudentId);
+  if (Array.isArray(user.linkedStudentIds)) {
+    user.linkedStudentIds.forEach((id) => {
+      if (id) ids.add(id);
+    });
+  }
+  return Array.from(ids);
+}
+
+function generateParentLinkCode(grade: number): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let suffix = '';
+  for (let i = 0; i < 3; i++) {
+    suffix += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `NT${grade}${suffix}`;
+}
 
 const ALLOWED_SAMPLE_DIR = path.resolve(process.cwd(), 'public/assets/aistudio');
 const ALLOWED_SAMPLE_FILES = new Set([
-  'IMG_9542_4ffccfa4.JPG',
-  'IMG_9538_cadb03a1.JPG',
-  'IMG_9534_fd106b28.JPG',
+  'IMG_9542_4ffccfa4.webp',
+  'IMG_9538_cadb03a1.webp',
+  'IMG_9534_fd106b28.webp',
 ]);
 
 function readSafeSampleImage(filename: string): { base64: string; mimeType: string } | null {
@@ -53,7 +97,7 @@ function readSafeSampleImage(filename: string): { base64: string; mimeType: stri
   if (!resolved.startsWith(ALLOWED_SAMPLE_DIR + path.sep)) return null;
   if (!fs.existsSync(resolved)) return null;
   const buf = fs.readFileSync(resolved);
-  return { base64: buf.toString('base64'), mimeType: 'image/jpeg' };
+  return { base64: buf.toString('base64'), mimeType: 'image/webp' };
 }
 
 function nowFormatted(): string {
@@ -89,7 +133,10 @@ app.get('/api/v1/bootstrap', (_req, res) => {
       domain: 'daythemnhantri.com',
     },
     courses: db.courses,
-    teachers: db.teachers,
+    teachers: db.teachers.map(({ phone: _omitPhone, ...publicTeacher }) => ({
+      ...publicTeacher,
+      phone: '',
+    })),
     timetable: db.timetable,
     exams: db.exams,
     gallery: REAL_CENTER_GALLERY,
@@ -124,14 +171,24 @@ app.get('/api/v1/bootstrap', (_req, res) => {
 // ============================================================
 
 app.post('/api/v1/auth/role-session', (req, res) => {
+  if (process.env.ALLOW_DEMO_LOGIN === 'false') {
+    res.status(403).json({
+      error: 'Chế độ đăng nhập dùng thử đã tắt trên môi trường sản xuất. Vui lòng đăng nhập bằng Gmail.',
+    });
+    return;
+  }
   const role = String(req.body?.role || '').toUpperCase() as UserRole;
+  if (role === 'SUPER_ADMIN') {
+    res.status(403).json({ error: 'Tài khoản SuperAdmin bắt buộc xác thực bằng Gmail chính thức.' });
+    return;
+  }
   const account = DEMO_ACCOUNTS[role];
   if (!account) {
     res.status(400).json({ error: 'Vai trò không hợp lệ.' });
     return;
   }
 
-  // If ADMIN and a passcode is configured via env or claimed hash, verify if provided (optional override check)
+  // If ADMIN and a passcode is configured via env or claimed hash, verify
   if (role === 'ADMIN') {
     const db = loadDb();
     const envPasscode = process.env.ADMIN_PASSCODE?.trim();
@@ -205,11 +262,39 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
     photoURL: verified.photoURL,
     role,
     linkedStudentId: role === 'STUDENT' || role === 'PARENT' ? 'st-01' : undefined,
+    linkedStudentIds: role === 'STUDENT' || role === 'PARENT' ? ['st-01'] : undefined,
     authProvider: 'GOOGLE_FIREBASE' as const,
   };
 
   const token = signSessionToken(user);
   res.json({ token, user });
+});
+
+app.post('/api/v1/auth/link-student', requireAuth(), (req: AuthedRequest, res) => {
+  const code = String(req.body?.linkCode || '').trim().toUpperCase();
+  if (!code || code.length < 4) {
+    res.status(400).json({ error: 'Vui lòng nhập Mã liên kết Phụ huynh hợp lệ (VD: NT7A1T).' });
+    return;
+  }
+  const db = loadDb();
+  const student = db.students.find(
+    (s) =>
+      (s.parentLinkCode && s.parentLinkCode.toUpperCase() === code) ||
+      s.code.toUpperCase() === code,
+  );
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy học sinh khớp với mã liên kết này.' });
+    return;
+  }
+  const currentUser = req.user!;
+  const mergedIds = Array.from(new Set([...getAllowedStudentIds(currentUser), student.id]));
+  const updatedUser = {
+    ...currentUser,
+    linkedStudentId: currentUser.linkedStudentId || student.id,
+    linkedStudentIds: mergedIds,
+  };
+  const token = signSessionToken(updatedUser);
+  res.json({ token, user: updatedUser, student });
 });
 
 app.get('/api/v1/auth/me', requireAuth(), (req: AuthedRequest, res) => {
@@ -225,26 +310,32 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
   const user = req.user!;
   const isAdminUser = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
   const isStaff = isAdminUser || user.role === 'TEACHER';
+  const allowedStudentIds = new Set(getAllowedStudentIds(user));
 
   const students = isStaff
     ? db.students
-    : db.students.filter((s) => s.id === user.linkedStudentId);
+    : db.students.filter((s) => allowedStudentIds.has(s.id));
 
   const scores = isStaff
     ? db.scores
-    : db.scores.filter((sc) => sc.studentId === user.linkedStudentId);
+    : db.scores.filter((sc) => allowedStudentIds.has(sc.studentId));
 
   const attendance = isStaff
     ? db.attendance
-    : db.attendance.filter((a) => a.studentId === user.linkedStudentId);
+    : db.attendance.filter((a) => allowedStudentIds.has(a.studentId));
 
   const tuition = isStaff
     ? db.tuition
-    : db.tuition.filter((t) => t.studentId === user.linkedStudentId);
+    : db.tuition.filter((t) => allowedStudentIds.has(t.studentId));
 
   const tickets = isStaff
     ? db.tickets
-    : db.tickets.filter((t) => t.authorRole === user.role || t.authorName.includes('Hòa'));
+    : db.tickets.filter(
+        (t) =>
+          t.authorUid === user.id ||
+          t.authorName === user.name ||
+          (t.authorRole === user.role && students.some((st) => t.authorName.includes(st.fullName.split(' ').slice(-1)[0]))),
+      );
 
   const notifications = db.notifications.filter(
     (n) => n.targetRole === 'ALL' || n.targetRole === user.role || isAdminUser,
@@ -252,7 +343,9 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
 
   res.json({
     user,
-    teachers: db.teachers,
+    teachers: isStaff
+      ? db.teachers
+      : db.teachers.map(({ phone: _omit, ...pub }) => ({ ...pub, phone: '' })),
     students,
     timetable: db.timetable,
     scores,
@@ -270,6 +363,11 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
 // ============================================================
 
 app.post('/api/v1/enrollments', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'enroll', 10, 60_000)) {
+    res.status(429).json({ error: 'Bạn thao tác quá nhanh. Vui lòng thử lại sau 1 phút.' });
+    return;
+  }
   const {
     studentName,
     parentName,
@@ -324,6 +422,7 @@ app.post('/api/v1/enrollments', (req, res) => {
   const newStudent: Student = {
     id: newStudentId,
     code: `NT-${numericGrade}-${String(db.students.length + 1).padStart(2, '0')}`,
+    parentLinkCode: generateParentLinkCode(numericGrade),
     fullName: studentName.trim(),
     grade: numericGrade,
     level: course.level,
@@ -407,6 +506,7 @@ app.post('/api/v1/students', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
   const student: Student = {
     id: `st-${Date.now()}`,
     code: `NT-${grade}-${String(db.students.length + 1).padStart(2, '0')}`,
+    parentLinkCode: generateParentLinkCode(grade),
     fullName: b.fullName.trim(),
     grade,
     level: grade <= 5 ? 'CAP_1' : grade <= 9 ? 'CAP_2' : 'CAP_3',
@@ -453,6 +553,7 @@ app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res
     const st: Student = {
       id: `st-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       code: `NT-${grade}-${String(db.students.length + imported.length + 1).padStart(2, '0')}`,
+      parentLinkCode: generateParentLinkCode(grade),
       fullName,
       grade,
       level: grade <= 5 ? 'CAP_1' : grade <= 9 ? 'CAP_2' : 'CAP_3',
@@ -682,8 +783,15 @@ app.delete('/api/v1/timetable/:id', requireAuth(['ADMIN']), (req, res) => {
   res.json({ deleted: true });
 });
 
-app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req, res) => {
+app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
+  const user = req.user!;
+  const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'TEACHER';
+  const allowedIds = new Set(getAllowedStudentIds(user));
+  if (!isStaff && !allowedIds.has(req.params.studentId)) {
+    res.status(403).json({ error: 'Bạn chỉ có thể tải lịch học của học sinh đã liên kết với tài khoản.' });
+    return;
+  }
   const student = db.students.find((s) => s.id === req.params.studentId);
   if (!student) {
     res.status(404).json({ error: 'Không tìm thấy học sinh.' });
@@ -731,10 +839,16 @@ app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req, res) =>
 
 app.post('/api/v1/scores', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
+  const user = req.user!;
+  const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'TEACHER';
   const b = req.body || {};
   const student = db.students.find((s) => s.id === b.studentId);
   if (!student) {
     res.status(400).json({ error: 'Vui lòng chọn học sinh hợp lệ.' });
+    return;
+  }
+  if (!isStaff && !getAllowedStudentIds(user).includes(student.id)) {
+    res.status(403).json({ error: 'Bạn chỉ có thể cập nhật điểm cho học sinh thuộc tài khoản của mình.' });
     return;
   }
   const numericScore = Number(b.score);
@@ -754,8 +868,8 @@ app.post('/api/v1/scores', requireAuth(), (req: AuthedRequest, res) => {
     maxScore: 10,
     date: String(b.date || todayIso()),
     school: String(b.school || student.school),
-    source: b.source || (req.user?.role === 'STUDENT' ? 'SELF_ENTRY' : 'TEACHER'),
-    verified: req.user?.role === 'ADMIN' || req.user?.role === 'TEACHER',
+    source: isStaff ? (b.source || 'TEACHER') : (b.source === 'AI_SCAN' ? 'AI_SCAN' : 'SELF_ENTRY'),
+    verified: isStaff,
     aiSummary: b.aiSummary ? String(b.aiSummary) : undefined,
     strengths: Array.isArray(b.strengths) ? b.strengths.map(String) : undefined,
     improvements: Array.isArray(b.improvements) ? b.improvements.map(String) : undefined,
@@ -821,7 +935,7 @@ app.post('/api/v1/attendance', requireAuth(['ADMIN', 'TEACHER']), (req, res) => 
 // TUITION, ONLINE PAYMENT & DEBT REMINDERS
 // ============================================================
 
-app.patch('/api/v1/tuition/:id/pay', requireAuth(), (req, res) => {
+app.patch('/api/v1/tuition/:id/pay', requireAuth(['ADMIN']), (req, res) => {
   const db = loadDb();
   const rec = db.tuition.find((t) => t.id === req.params.id);
   if (!rec) {
@@ -837,14 +951,55 @@ app.patch('/api/v1/tuition/:id/pay', requireAuth(), (req, res) => {
   db.notifications.unshift({
     id: `ntf-${Date.now()}`,
     createdAt: nowFormatted(),
-    title: `Thanh toán học phí thành công`,
-    body: `Đã ghi nhận ${rec.totalAmount.toLocaleString('vi-VN')}đ cho em ${rec.studentName} (${rec.centerClass}) qua ${method}.`,
+    title: `Xác nhận thu học phí thành công`,
+    body: `Ban Học vụ đã đối soát ${rec.totalAmount.toLocaleString('vi-VN')}đ cho em ${rec.studentName} (${rec.centerClass}) qua ${method}.`,
     channel: 'EMAIL',
     targetRole: 'ALL',
     read: false,
   });
   saveDb(db);
   res.json({ tuition: rec });
+});
+
+app.post('/api/v1/tuition/:id/confirm-transfer', requireAuth(), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  const rec = db.tuition.find((t) => t.id === req.params.id);
+  if (!rec) {
+    res.status(404).json({ error: 'Không tìm thấy phiếu học phí.' });
+    return;
+  }
+  const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'TEACHER';
+  if (!isStaff && !getAllowedStudentIds(user).includes(rec.studentId)) {
+    res.status(403).json({ error: 'Không có quyền gửi xác nhận cho phiếu học phí này.' });
+    return;
+  }
+  const method = String(req.body?.paymentMethod || 'VIETQR');
+  const note = String(req.body?.note || '').trim();
+  const remaining = Math.max(0, rec.totalAmount - rec.paidAmount);
+
+  db.tickets.unshift({
+    id: `tk-pay-${Date.now()}`,
+    authorUid: user.id,
+    createdAt: nowFormatted(),
+    authorName: user.name,
+    authorRole: user.role,
+    category: 'TUITION',
+    subject: `Báo đã chuyển khoản học phí (${method}) — ${rec.studentName}`,
+    message: `Phụ huynh báo đã chuyển ${remaining.toLocaleString('vi-VN')}đ cho kỳ ${rec.monthLabel} (${rec.centerClass}) qua ${method}.${note ? ` Ghi chú: ${note}` : ''} Vui lòng kiểm tra sao kê và xác nhận.`,
+    status: 'OPEN',
+  });
+  db.notifications.unshift({
+    id: `ntf-${Date.now()}`,
+    createdAt: nowFormatted(),
+    title: `Chờ đối soát học phí · ${rec.studentName}`,
+    body: `${user.name} vừa báo đã chuyển ${remaining.toLocaleString('vi-VN')}đ qua ${method}.`,
+    channel: 'APP',
+    targetRole: 'ADMIN',
+    read: false,
+  });
+  saveDb(db);
+  res.json({ submitted: true, message: 'Đã gửi thông báo đã chuyển khoản tới Ban Học vụ để đối soát.' });
 });
 
 app.post('/api/v1/tuition/:id/remind', requireAuth(['ADMIN']), (req, res) => {
@@ -936,6 +1091,11 @@ app.post('/api/v1/exams/:id/submit', requireAuth(), (req: AuthedRequest, res) =>
 // ============================================================
 
 app.post('/api/v1/tickets', (req: AuthedRequest, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'tickets', 15, 60_000)) {
+    res.status(429).json({ error: 'Bạn gửi quá nhiều yêu cầu. Vui lòng thử lại sau 1 phút.' });
+    return;
+  }
   const { authorName, phone, category, subject, message } = req.body || {};
   if (!authorName || !message) {
     res.status(400).json({ error: 'Vui lòng nhập họ tên và nội dung góp ý/tư vấn.' });
@@ -944,6 +1104,7 @@ app.post('/api/v1/tickets', (req: AuthedRequest, res) => {
   const db = loadDb();
   const ticket: FeedbackTicket = {
     id: `tk-${Date.now()}`,
+    authorUid: req.user?.id,
     createdAt: nowFormatted(),
     authorName: String(authorName).trim(),
     authorRole: req.user?.role || 'GUEST',
@@ -1061,11 +1222,16 @@ app.post('/api/v1/ai/import-students-image', requireAuth(['ADMIN', 'TEACHER']), 
 });
 
 app.post('/api/v1/ai/consult', async (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'ai-consult', 20, 60_000)) {
+    res.status(429).json({ error: 'Trợ lý AI đang nhận nhiều yêu cầu, vui lòng thử lại sau ít giây.' });
+    return;
+  }
   try {
     const question = typeof req.body?.question === 'string' ? req.body.question.trim() : '';
     const language = req.body?.language === 'en' ? 'en' : 'vi';
-    if (!question) {
-      res.status(400).json({ error: 'Vui lòng nhập câu hỏi cần tư vấn.' });
+    if (!question || question.length > 800) {
+      res.status(400).json({ error: 'Vui lòng nhập câu hỏi cần tư vấn (tối đa 800 ký tự).' });
       return;
     }
     const db = loadDb();
@@ -1093,6 +1259,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
+    app.use('/assets', express.static(path.join(distDir, 'assets'), { maxAge: '365d', immutable: true }));
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));

@@ -34,6 +34,7 @@ export const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
     email: 'ph.phuchoa@daythemnhantri.com',
     role: 'PARENT',
     linkedStudentId: 'st-01',
+    linkedStudentIds: ['st-01'],
   },
   STUDENT: {
     id: 'usr-student',
@@ -41,6 +42,7 @@ export const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
     email: 'hoanp.6a1@daythemnhantri.com',
     role: 'STUDENT',
     linkedStudentId: 'st-01',
+    linkedStudentIds: ['st-01'],
   },
 };
 
@@ -128,6 +130,7 @@ export function verifySessionToken(token: string): AuthUser | null {
       photoURL: parsed.photoURL,
       role: parsed.role,
       linkedStudentId: parsed.linkedStudentId,
+      linkedStudentIds: Array.isArray(parsed.linkedStudentIds) ? parsed.linkedStudentIds : undefined,
       linkedTeacherId: parsed.linkedTeacherId,
       authProvider: parsed.authProvider,
     };

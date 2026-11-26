@@ -13,6 +13,7 @@ import {
   FileBarChart2,
   GraduationCap,
   LayoutDashboard,
+  Link2,
   LogIn,
   Pencil,
   Phone,
@@ -43,6 +44,7 @@ import {
   type BootstrapPayload,
   type WorkspacePayload,
 } from '../lib/api';
+import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 import { InlineEditable } from './InlineEditable';
 
 interface FrontendPortalProps {
@@ -59,6 +61,8 @@ interface FrontendPortalProps {
   onToggleEditMode: () => void;
   onQuickSaveConfig: (patch: Partial<SiteConfig>) => Promise<void>;
   onQuickSaveCourse: (course: CoursePackage) => Promise<void>;
+  onLinkStudent?: (linkCode: string) => Promise<{ studentName: string }>;
+  onRefreshWorkspace?: () => Promise<void>;
   onSignInGmail: () => Promise<void>;
   onOpenRoleModal: () => void;
   onOpenCms: (tab?: string) => void;
@@ -109,6 +113,25 @@ const DAY_LABELS: Record<DayOfWeek, string> = {
   T7: 'Thứ 7',
 };
 
+function normalizeAssetUrl(url?: string): string {
+  const fallback = '/assets/aistudio/IMG_9559_62d21d91.webp';
+  if (!url) return fallback;
+  return url.replace(/\/assets\/aistudio\/([^/?#]+)\.jpe?g$/i, '/assets/aistudio/$1.webp');
+}
+
+function getTodayWeekday(): DayOfWeek {
+  const jsDay = new Date().getDay(); // 0=Sun, 1=Mon..6=Sat
+  const map: Record<number, DayOfWeek> = {
+    1: 'T2',
+    2: 'T3',
+    3: 'T4',
+    4: 'T5',
+    5: 'T6',
+    6: 'T7',
+  };
+  return map[jsDay] || 'T2';
+}
+
 export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   bootstrap,
   workspace,
@@ -123,6 +146,8 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   onToggleEditMode,
   onQuickSaveConfig,
   onQuickSaveCourse,
+  onLinkStudent,
+  onRefreshWorkspace,
   onSignInGmail,
   onOpenRoleModal,
   onOpenCms,
@@ -173,8 +198,11 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const [calcBoarding, setCalcBoarding] = useState(true);
   const [calcShuttle, setCalcShuttle] = useState(false);
   const [calcAnnual, setCalcAnnual] = useState(true);
+  const [estimateCopied, setEstimateCopied] = useState(false);
 
   // --- Mode 1 (Teacher & Student) State ---
+  const todayDay = useMemo(() => getTodayWeekday(), []);
+  const [showTodayOnly, setShowTodayOnly] = useState(false);
   const [filterClass, setFilterClass] = useState<string>('ALL');
   const [filterPeriod, setFilterPeriod] = useState<'ALL' | 'SANG' | 'CHIEU' | 'TOI'>('ALL');
   const [activeExam, setActiveExam] = useState<NationalExam | null>(null);
@@ -183,6 +211,13 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
 
   // --- Mode 2 (Parent) State ---
   const [parentQuery, setParentQuery] = useState('');
+  const [selectedChildId, setSelectedChildId] = useState<string>('');
+  const [linkCodeInput, setLinkCodeInput] = useState('');
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkNotice, setLinkNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
+  const [transferNotice, setTransferNotice] = useState('');
+  const [qrCopiedField, setQrCopiedField] = useState('');
   const [zaloCopied, setZaloCopied] = useState(false);
   const [parentFeedbackSent, setParentFeedbackSent] = useState('');
   const [parentFeedbackForm, setParentFeedbackForm] = useState({
@@ -271,7 +306,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     );
   }, [workspace, parentQuery]);
 
-  const focusedStudent = parentStudents[0] || null;
+  const focusedStudent = useMemo(() => {
+    if (parentStudents.length === 0) return null;
+    if (selectedChildId) {
+      const matched = parentStudents.find((s) => s.id === selectedChildId);
+      if (matched) return matched;
+    }
+    return parentStudents[0];
+  }, [parentStudents, selectedChildId]);
   const focusedScores = useMemo(() => {
     if (!focusedStudent || !workspace) return [];
     return workspace.scores.filter((sc) => sc.studentId === focusedStudent.id);
@@ -284,6 +326,73 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     if (!focusedStudent || !workspace) return [];
     return workspace.tuition.filter((t) => t.studentId === focusedStudent.id);
   }, [focusedStudent, workspace]);
+
+  async function handleParentLinkSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!onLinkStudent || !linkCodeInput.trim()) return;
+    setLinkBusy(true);
+    setLinkNotice(null);
+    try {
+      const res = await onLinkStudent(linkCodeInput.trim().toUpperCase());
+      setLinkNotice({ ok: true, text: `Đã liên kết thành công hồ sơ em ${res.studentName}.` });
+      setLinkCodeInput('');
+    } catch (err: unknown) {
+      setLinkNotice({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Mã liên kết chưa hợp lệ.',
+      });
+    } finally {
+      setLinkBusy(false);
+    }
+  }
+
+  async function handleReportTransfer(tuitionId: string) {
+    setTransferBusyId(tuitionId);
+    setTransferNotice('');
+    try {
+      const res = await apiRequest<{ message: string }>(
+        `/api/v1/tuition/${tuitionId}/confirm-transfer`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ paymentMethod: 'VIETQR' }),
+        },
+      );
+      setTransferNotice(res.message);
+      if (onRefreshWorkspace) await onRefreshWorkspace();
+    } catch (err: unknown) {
+      setTransferNotice(
+        err instanceof Error ? err.message : 'Không thể gửi báo đã chuyển khoản ngay lúc này.',
+      );
+    } finally {
+      setTransferBusyId(null);
+    }
+  }
+
+  function handleCopyEstimateForZalo() {
+    const levelLabel =
+      calcLevel === 'CAP_1'
+        ? 'Cấp 1 (Tiểu học Lớp 3–5)'
+        : calcLevel === 'CAP_2'
+          ? 'Cấp 2 (THCS Trọn gói Lớp 6–9)'
+          : `Cấp 3 (THPT · ${calcSubjectsCount} môn)`;
+    const addons = [
+      calcLevel !== 'CAP_3' && calcBoarding ? 'Bán trú cơm nước' : null,
+      calcLevel !== 'CAP_3' && calcShuttle ? 'Đưa rước tận nơi' : null,
+      calcAnnual ? `Đóng nguyên năm (-${siteConfig.annualDiscountPercent}%)` : 'Đóng theo tháng',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const summaryText = [
+      `[DỰ TOÁN HỌC PHÍ — ${siteConfig.shortName.toUpperCase()}]`,
+      `• Cấp học: ${levelLabel}`,
+      `• Tùy chọn: ${addons}`,
+      `• Học phí thực đóng dự kiến: ${formatVnd(estimatedFee.monthlyFinal)}/tháng`,
+      `Nhờ Cô Tâm tư vấn lịch học phù hợp cho bé giúp gia đình ạ!`,
+    ].join('\n');
+    navigator.clipboard?.writeText(summaryText);
+    setEstimateCopied(true);
+    setTimeout(() => setEstimateCopied(false), 3500);
+  }
 
   function openCourseModal(course: CoursePackage) {
     const defaultGrade = course.level === 'CAP_1' ? 5 : course.level === 'CAP_2' ? 7 : 10;
@@ -446,8 +555,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   }`}
                 >
                   <img
-                    src={post.thumbnailUrl}
+                    src={normalizeAssetUrl(post.thumbnailUrl)}
                     alt={post.title}
+                    loading="lazy"
+                    decoding="async"
                     referrerPolicy="no-referrer"
                     className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
                   />
@@ -734,8 +845,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                 <div className="lg:col-span-5">
                   <div className="relative h-full min-h-[250px] rounded-xl overflow-hidden border border-slate-200 bg-slate-200">
                     <img
-                      src={siteConfig.heroImageUrl || '/assets/aistudio/IMG_9559_62d21d91.JPG'}
+                      src={normalizeAssetUrl(siteConfig.heroImageUrl)}
                       alt={siteConfig.centerName}
+                      fetchPriority="high"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
@@ -801,6 +914,31 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   ))}
                 </div>
 
+                <div className="inline-flex border border-slate-200 rounded-lg overflow-hidden text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setShowTodayOnly(true)}
+                    className={`px-3 h-9 cursor-pointer transition-colors ${
+                      showTodayOnly
+                        ? 'bg-blue-900 text-white'
+                        : 'bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    Hôm nay ({DAY_LABELS[todayDay]})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowTodayOnly(false)}
+                    className={`px-3 h-9 cursor-pointer transition-colors ${
+                      !showTodayOnly
+                        ? 'bg-blue-900 text-white'
+                        : 'bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    Cả tuần
+                  </button>
+                </div>
+
                 {currentUser && (
                   <button
                     type="button"
@@ -813,16 +951,34 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               </div>
             </div>
 
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {DAYS.map((day) => {
+            <div className={`grid gap-4 ${showTodayOnly ? 'md:grid-cols-1 max-w-2xl' : 'md:grid-cols-2 lg:grid-cols-3'}`}>
+              {(showTodayOnly ? [todayDay] : DAYS).map((day) => {
                 const daySlots = filteredTimetable.filter((s) => s.day === day);
+                const isToday = day === todayDay;
                 return (
                   <div
                     key={day}
-                    className="bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col"
+                    className={`bg-white rounded-xl overflow-hidden flex flex-col border ${
+                      isToday
+                        ? 'border-blue-900 ring-1 ring-blue-900/15'
+                        : 'border-slate-200'
+                    }`}
                   >
-                    <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-950">{DAY_LABELS[day]}</span>
+                    <div
+                      className={`px-4 py-2.5 border-b flex items-center justify-between ${
+                        isToday
+                          ? 'bg-blue-50/90 border-blue-200'
+                          : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <span className="text-xs font-bold text-slate-950 flex items-center gap-2">
+                        <span>{DAY_LABELS[day]}</span>
+                        {isToday && (
+                          <span className="text-[10px] font-semibold text-blue-900 uppercase tracking-wider">
+                            · Hôm nay
+                          </span>
+                        )}
+                      </span>
                       <span className="font-mono-num text-[11px] text-slate-500">
                         {daySlots.length} ca
                       </span>
@@ -1063,47 +1219,107 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-6">
-                  {/* Search / Student Switcher */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl p-4">
-                    <div className="flex items-center gap-3 flex-1">
-                      <input
-                        type="text"
-                        value={parentQuery}
-                        onChange={(e) => setParentQuery(e.target.value)}
-                        placeholder="Tìm theo họ tên học sinh, mã HS hoặc lớp (VD: Phúc Hòa, 6A1)..."
-                        className="w-full max-w-md h-9 px-3 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
-                      />
+                  {/* Search, Multi-Child Switcher & Parent Link Code Bar */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center gap-2.5 flex-1">
+                        <input
+                          type="text"
+                          value={parentQuery}
+                          onChange={(e) => setParentQuery(e.target.value)}
+                          placeholder="Tìm theo họ tên học sinh, mã HS hoặc lớp..."
+                          className="w-full sm:max-w-xs h-9 px-3 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
+                        />
+                        {onLinkStudent && (
+                          <form onSubmit={handleParentLinkSubmit} className="flex items-center gap-1.5">
+                            <div className="relative">
+                              <Link2 className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                              <input
+                                type="text"
+                                value={linkCodeInput}
+                                onChange={(e) => setLinkCodeInput(e.target.value.toUpperCase())}
+                                placeholder="Mã PH (VD: NT7A1T)"
+                                maxLength={10}
+                                className="h-9 pl-8 pr-2.5 w-44 text-xs font-mono-num uppercase border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
+                              />
+                            </div>
+                            <button
+                              type="submit"
+                              disabled={linkBusy || !linkCodeInput.trim()}
+                              className="h-9 px-3 text-xs font-semibold text-blue-950 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                            >
+                              {linkBusy ? 'Đang nối...' : 'Liên kết con'}
+                            </button>
+                          </form>
+                        )}
+                      </div>
+
+                      {focusedStudent && (
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              downloadStudentIcs(focusedStudent.id, `TKB-NhanTri-${focusedStudent.code}.ics`)
+                            }
+                            className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Tải Google Calendar (.ics)</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const txt = buildZaloReportText(
+                                focusedStudent,
+                                workspace.scores,
+                                workspace.timetable,
+                                workspace.attendance,
+                              );
+                              navigator.clipboard?.writeText(txt);
+                              setZaloCopied(true);
+                              setTimeout(() => setZaloCopied(false), 2500);
+                            }}
+                            className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>{zaloCopied ? 'Đã sao chép mẫu Zalo' : 'Sao chép báo cáo Zalo'}</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    {focusedStudent && (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            downloadStudentIcs(focusedStudent.id, `TKB-NhanTri-${focusedStudent.code}.ics`)
-                          }
-                          className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Tải Google Calendar (.ics)</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const txt = buildZaloReportText(
-                              focusedStudent,
-                              workspace.scores,
-                              workspace.timetable,
-                              workspace.attendance,
-                            );
-                            navigator.clipboard?.writeText(txt);
-                            setZaloCopied(true);
-                            setTimeout(() => setZaloCopied(false), 2500);
-                          }}
-                          className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>{zaloCopied ? 'Đã sao chép mẫu Zalo' : 'Sao chép báo cáo Zalo'}</span>
-                        </button>
+
+                    {linkNotice && (
+                      <p
+                        className={`text-xs font-medium ${
+                          linkNotice.ok ? 'text-emerald-700' : 'text-red-700'
+                        }`}
+                      >
+                        {linkNotice.text}
+                      </p>
+                    )}
+
+                    {parentStudents.length > 1 && (
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+                        <span className="text-[11px] font-semibold text-slate-500">
+                          Chuyển nhanh hồ sơ con ({parentStudents.length}):
+                        </span>
+                        {parentStudents.map((st) => {
+                          const active = focusedStudent?.id === st.id;
+                          return (
+                            <button
+                              key={st.id}
+                              type="button"
+                              onClick={() => setSelectedChildId(st.id)}
+                              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-blue-900 text-white border-blue-900'
+                                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {st.fullName} · {st.centerClass}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1206,35 +1422,94 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                               </button>
                             </div>
 
-                            {focusedTuition.map((t) => (
-                              <div
-                                key={t.id}
-                                className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5 text-xs"
-                              >
-                                <div className="flex justify-between">
-                                  <span className="font-semibold text-slate-800">{t.monthLabel}</span>
-                                  <span
-                                    className={`font-bold ${
-                                      t.status === 'PAID'
-                                        ? 'text-emerald-700'
+                            {focusedTuition.map((t) => {
+                              const due = Math.max(0, t.totalAmount - t.paidAmount);
+                              const memo = buildTuitionTransferMemo(t.centerClass, t.studentName);
+                              const qrSrc =
+                                due > 0
+                                  ? buildVietQrUrl({
+                                      bankName: siteConfig.bankName,
+                                      accountNo: siteConfig.bankAccount,
+                                      accountName: siteConfig.bankOwner,
+                                      amount: due,
+                                      memo,
+                                    })
+                                  : '';
+                              return (
+                                <div
+                                  key={t.id}
+                                  className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5 text-xs"
+                                >
+                                  <div className="flex justify-between">
+                                    <span className="font-semibold text-slate-800">{t.monthLabel}</span>
+                                    <span
+                                      className={`font-bold ${
+                                        t.status === 'PAID'
+                                          ? 'text-emerald-700'
+                                          : t.status === 'OVERDUE'
+                                            ? 'text-red-700'
+                                            : 'text-amber-700'
+                                      }`}
+                                    >
+                                      {t.status === 'PAID'
+                                        ? 'Đã hoàn tất'
                                         : t.status === 'OVERDUE'
-                                          ? 'text-red-700'
-                                          : 'text-amber-700'
-                                    }`}
-                                  >
-                                    {t.status === 'PAID'
-                                      ? 'Đã hoàn tất'
-                                      : t.status === 'OVERDUE'
-                                        ? 'Quá hạn'
-                                        : 'Sắp đến hạn'}
-                                  </span>
+                                          ? 'Quá hạn'
+                                          : 'Sắp đến hạn'}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between font-mono-num text-sm font-bold text-slate-950">
+                                    <span>{due > 0 ? 'Còn cần đóng:' : 'Tổng học phí:'}</span>
+                                    <span>{formatVnd(due > 0 ? due : t.totalAmount)}</span>
+                                  </div>
+
+                                  {due > 0 && qrSrc && (
+                                    <div className="pt-2 border-t border-slate-200 space-y-2.5">
+                                      <div className="w-44 mx-auto bg-white p-1.5 rounded-lg border border-slate-200">
+                                        <img
+                                          src={qrSrc}
+                                          alt={`Mã VietQR đóng học phí ${t.studentName}`}
+                                          loading="lazy"
+                                          className="w-full h-auto rounded"
+                                        />
+                                      </div>
+                                      <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2.5 py-1.5">
+                                        <span className="font-mono-num text-[11px] font-semibold text-blue-950 truncate">
+                                          {memo}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            navigator.clipboard?.writeText(memo);
+                                            setQrCopiedField(t.id);
+                                            setTimeout(() => setQrCopiedField(''), 2000);
+                                          }}
+                                          className="text-[11px] font-semibold text-blue-900 hover:underline shrink-0 cursor-pointer"
+                                        >
+                                          {qrCopiedField === t.id ? 'Đã chép' : 'Chép ND'}
+                                        </button>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        disabled={transferBusyId === t.id}
+                                        onClick={() => handleReportTransfer(t.id)}
+                                        className="w-full py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-50 rounded-lg cursor-pointer"
+                                      >
+                                        {transferBusyId === t.id
+                                          ? 'Đang gửi thông báo...'
+                                          : 'Tôi đã chuyển khoản — Báo Ban Học vụ đối soát'}
+                                      </button>
+                                    </div>
+                                  )}
                                 </div>
-                                <div className="flex justify-between font-mono-num text-sm font-bold text-slate-950">
-                                  <span>Tổng học phí:</span>
-                                  <span>{formatVnd(t.totalAmount)}</span>
-                                </div>
-                              </div>
-                            ))}
+                              );
+                            })}
+
+                            {transferNotice && (
+                              <p className="text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2.5">
+                                {transferNotice}
+                              </p>
+                            )}
 
                             <div className="p-3.5 bg-blue-50/60 border border-blue-100 rounded-lg text-xs space-y-1 text-slate-700">
                               <p className="font-bold text-blue-950">Thông tin chuyển khoản chính thức</p>
@@ -1381,8 +1656,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                 <div className="lg:col-span-6">
                   <div className="relative h-full min-h-[320px] rounded-xl overflow-hidden border border-slate-200 bg-slate-200">
                     <img
-                      src={siteConfig.heroImageUrl || '/assets/aistudio/IMG_9559_62d21d91.JPG'}
+                      src={normalizeAssetUrl(siteConfig.heroImageUrl)}
                       alt={siteConfig.centerName}
+                      fetchPriority="high"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
@@ -1454,8 +1731,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   <div>
                     <div className="aspect-[16/10] bg-slate-100 overflow-hidden border-b border-slate-100">
                       <img
-                        src={course.imageUrl}
+                        src={normalizeAssetUrl(course.imageUrl)}
                         alt={course.title}
+                        loading="lazy"
+                        decoding="async"
                         referrerPolicy="no-referrer"
                         className="w-full h-full object-cover"
                       />
@@ -1582,8 +1861,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   <figure key={photo.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                     <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
                       <img
-                        src={photo.url}
+                        src={normalizeAssetUrl(photo.url)}
                         alt={photo.title}
+                        loading="lazy"
+                        decoding="async"
                         referrerPolicy="no-referrer"
                         className="w-full h-full object-cover"
                       />
@@ -1743,23 +2024,33 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-3 pt-2">
+                  <div className="flex flex-wrap gap-2.5 pt-2">
                     <button
                       type="button"
                       onClick={() => {
                         const c = courses.find((x) => x.level === calcLevel) || courses[0];
                         if (c) openCourseModal(c);
                       }}
-                      className="flex-1 py-2.5 px-4 bg-white text-slate-950 font-semibold text-sm rounded-lg hover:bg-slate-100 cursor-pointer"
+                      className="flex-1 py-2.5 px-4 bg-white text-slate-950 font-semibold text-sm rounded-lg hover:bg-slate-100 cursor-pointer whitespace-nowrap"
                     >
                       Đăng ký giữ chỗ ngay
                     </button>
+                    <button
+                      type="button"
+                      onClick={handleCopyEstimateForZalo}
+                      className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 bg-blue-700 hover:bg-blue-600 text-white text-sm font-semibold rounded-lg cursor-pointer whitespace-nowrap"
+                    >
+                      {estimateCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      <span>{estimateCopied ? 'Đã chép dự toán' : 'Chép gửi Zalo Cô Tâm'}</span>
+                    </button>
                     <a
-                      href={`tel:${hotlineDigits}`}
-                      className="inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-700"
+                      href={siteConfig.zaloUrl || `https://zalo.me/${hotlineDigits}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-700 whitespace-nowrap"
                     >
                       <Phone className="w-4 h-4" />
-                      <span>Gọi / Zalo: {siteConfig.hotlineZalo}</span>
+                      <span>Mở Zalo {siteConfig.hotlineZalo}</span>
                     </a>
                   </div>
                 </div>

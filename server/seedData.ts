@@ -13,7 +13,7 @@ export const FANPAGE_POSTS_FEED: FanpagePost[] = [
     summary:
       'Ghi nhận hàng loạt điểm 9, điểm 10 ấn tượng của các em học sinh Trung tâm Nhân Trí ngay sau đợt kiểm tra thường xuyên lần 1 đầu năm học.',
     url: 'https://www.facebook.com/reel/1148279630974761/',
-    thumbnailUrl: '/assets/aistudio/IMG_9542_4ffccfa4.JPG',
+    thumbnailUrl: '/assets/aistudio/IMG_9542_4ffccfa4.webp',
   },
   {
     id: 'fp-02',
@@ -24,7 +24,7 @@ export const FANPAGE_POSTS_FEED: FanpagePost[] = [
     summary:
       'Đội ngũ giáo viên Nhân Trí ráo riết biên soạn và cập nhật trọn bộ bài giảng, phiếu bài tập theo chương trình sách giáo khoa GDPT 2018 mới nhất.',
     url: 'https://www.facebook.com/reel/3583112625174413/',
-    thumbnailUrl: '/assets/aistudio/IMG_9568_3d65bd83.JPG',
+    thumbnailUrl: '/assets/aistudio/IMG_9568_3d65bd83.webp',
   },
   {
     id: 'fp-03',
@@ -36,7 +36,7 @@ export const FANPAGE_POSTS_FEED: FanpagePost[] = [
       '3 lý do quan trọng cần nỗ lực sớm từ Lớp 8: giữ nền tảng vững chắc, chống học lệch môn Khoa học Tự nhiên để tự do chọn tổ hợp môn Cấp 3.',
     viewsLabel: '589 lượt xem',
     url: 'https://www.facebook.com/reel/1029839073018130/',
-    thumbnailUrl: '/assets/aistudio/IMG_9559_62d21d91.JPG',
+    thumbnailUrl: '/assets/aistudio/IMG_9559_62d21d91.webp',
   },
   {
     id: 'fp-04',
@@ -47,7 +47,7 @@ export const FANPAGE_POSTS_FEED: FanpagePost[] = [
     summary:
       'Cam kết phụ đạo bù bài MIỄN PHÍ khi học sinh chưa theo kịp bài hoặc lỡ buổi học cùng gia đình; lớp nhóm nhỏ tích hợp Toán – Tiếng Anh – Tiếng Việt cho lớp 4 & 5. Liên hệ Cô Tâm: 0947 376 444.',
     url: OFFICIAL_FANPAGE_URL,
-    thumbnailUrl: '/assets/aistudio/IMG_9566_d1cc9d74.JPG',
+    thumbnailUrl: '/assets/aistudio/IMG_9566_d1cc9d74.webp',
   },
   {
     id: 'fp-05',
@@ -58,44 +58,44 @@ export const FANPAGE_POSTS_FEED: FanpagePost[] = [
     summary:
       'Chiêu sinh thường xuyên đủ 6 môn Toán, Văn, Anh, Lý, Hóa, Sinh kết hợp định hướng tổ hợp môn sớm và luyện thi ĐGNL (V-ACT, V-SAT, Bộ Công an, HCMUE).',
     url: OFFICIAL_FANPAGE_URL,
-    thumbnailUrl: '/assets/aistudio/IMG_9567_b3861143.JPG',
+    thumbnailUrl: '/assets/aistudio/IMG_9567_b3861143.webp',
   },
 ];
 
 export const REAL_CENTER_GALLERY = [
   {
     id: 'img-hero',
-    url: '/assets/aistudio/IMG_9559_62d21d91.JPG',
+    url: '/assets/aistudio/IMG_9559_62d21d91.webp',
     title: 'Thầy cô và học sinh Trung Tâm Nhân Trí 2',
     caption: 'Cơ sở 2 — Không gian học tập thân thiện, gắn kết thầy trò tại Long Xuyên.',
   },
   {
     id: 'img-slogan',
-    url: '/assets/aistudio/IMG_9568_3d65bd83.JPG',
+    url: '/assets/aistudio/IMG_9568_3d65bd83.webp',
     title: 'Triết lý giáo dục: Trao tri thức – Gửi yêu thương',
     caption: 'Đội ngũ giáo viên tận tâm, tận lực, tận tình đồng hành cùng từng học sinh.',
   },
   {
     id: 'img-team',
-    url: '/assets/aistudio/IMG_9561_5011e394.JPG',
+    url: '/assets/aistudio/IMG_9561_5011e394.webp',
     title: 'Tập thể giáo viên và học viên Cơ sở 2',
     caption: 'Kỷ niệm ngày Nhà giáo Việt Nam 20/11 cùng phụ huynh và học sinh các khối lớp.',
   },
   {
     id: 'img-room-1',
-    url: '/assets/aistudio/IMG_9566_d1cc9d74.JPG',
+    url: '/assets/aistudio/IMG_9566_d1cc9d74.webp',
     title: 'Phòng học máy lạnh tiêu chuẩn (Phòng 2)',
     caption: 'Bàn ghế gỗ sáng, ánh sáng tự nhiên, sĩ số giới hạn để giáo viên kèm sát từng em.',
   },
   {
     id: 'img-room-2',
-    url: '/assets/aistudio/IMG_9567_b3861143.JPG',
+    url: '/assets/aistudio/IMG_9567_b3861143.webp',
     title: 'Phòng học chuyên đề và Trả bài (Phòng 3)',
     caption: 'Trang bị bảng lớn, không gian yên tĩnh cho giờ soạn bài, trả bài và luyện đề.',
   },
   {
     id: 'img-signage',
-    url: '/assets/aistudio/IMG_9551_61755866.JPG',
+    url: '/assets/aistudio/IMG_9551_61755866.webp',
     title: 'Sảnh đón học sinh Cơ sở 1',
     caption: 'Khu vực tiếp đón phụ huynh, điểm danh và hỗ trợ học tập mỗi ngày.',
   },
@@ -130,7 +130,7 @@ export const INITIAL_DB: DatabaseState = {
         'FREE makeup tutoring sessions if students fall behind or miss class with family',
         'Weekly parent progress updates via Zalo and Online Report Card',
       ],
-      imageUrl: '/assets/aistudio/IMG_9566_d1cc9d74.JPG',
+      imageUrl: '/assets/aistudio/IMG_9566_d1cc9d74.webp',
     },
     {
       id: 'course-cap2',
@@ -162,7 +162,7 @@ export const INITIAL_DB: DatabaseState = {
         'Optional full-day boarding meals, safe shuttle & automatic 17:30–19:00 PE makeup slots',
         'Full core subjects plus daily guided review & homework checks',
       ],
-      imageUrl: '/assets/aistudio/IMG_9559_62d21d91.JPG',
+      imageUrl: '/assets/aistudio/IMG_9559_62d21d91.webp',
     },
     {
       id: 'course-cap3',
@@ -191,7 +191,7 @@ export const INITIAL_DB: DatabaseState = {
         'Flexible per-subject registration across Math, Literature, English, Physics, Chemistry & Biology',
         'Evening shifts (17:30–19:00 & 19:00–20:30) synced cleanly with high school schedules',
       ],
-      imageUrl: '/assets/aistudio/IMG_9567_b3861143.JPG',
+      imageUrl: '/assets/aistudio/IMG_9567_b3861143.webp',
     },
   ],
 
@@ -215,6 +215,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-01',
       code: 'NT-6A1-01',
+      parentLinkCode: 'NT6A1H',
       fullName: 'Nguyễn Phúc Hòa',
       grade: 6,
       level: 'CAP_2',
@@ -239,6 +240,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-02',
       code: 'NT-7A1-01',
+      parentLinkCode: 'NT7A1T',
       fullName: 'Chung Cẩm Thy',
       grade: 7,
       level: 'CAP_2',
@@ -263,6 +265,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-03',
       code: 'NT-7A1-02',
+      parentLinkCode: 'NT7A1M',
       fullName: 'Nguyễn Thị Minh Thư',
       grade: 7,
       level: 'CAP_2',
@@ -284,6 +287,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-04',
       code: 'NT-7A1-03',
+      parentLinkCode: 'NT7A1N',
       fullName: 'Trần Võ Thảo Nguyên',
       grade: 7,
       level: 'CAP_2',
@@ -305,6 +309,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-05',
       code: 'NT-7A1-08',
+      parentLinkCode: 'NT7A1Q',
       fullName: 'Quách Xuân Quang',
       grade: 7,
       level: 'CAP_2',
@@ -329,6 +334,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-06',
       code: 'NT-7A1-10',
+      parentLinkCode: 'NT7A1P',
       fullName: 'Phan Nguyễn Tấn Phong',
       grade: 7,
       level: 'CAP_2',
@@ -350,6 +356,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-07',
       code: 'NT-8A1-01',
+      parentLinkCode: 'NT8A1G',
       fullName: 'Võ Ngọc Gia Hân',
       grade: 8,
       level: 'CAP_2',
@@ -371,6 +378,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-08',
       code: 'NT-9A1-01',
+      parentLinkCode: 'NT9A1N',
       fullName: 'Nguyễn Cao Nhật Nam',
       grade: 9,
       level: 'CAP_2',
@@ -392,6 +400,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-09',
       code: 'NT-10A-01',
+      parentLinkCode: 'NT10KV',
       fullName: 'Lê Trần Khánh Vy',
       grade: 10,
       level: 'CAP_3',
@@ -413,6 +422,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-10',
       code: 'NT-11A-01',
+      parentLinkCode: 'NT11PN',
       fullName: 'Huỳnh Phúc Nguyên',
       grade: 11,
       level: 'CAP_3',
@@ -434,6 +444,7 @@ export const INITIAL_DB: DatabaseState = {
     {
       id: 'st-11',
       code: 'NT-5A-01',
+      parentLinkCode: 'NT5AQA',
       fullName: 'Trương Quế Anh',
       grade: 5,
       level: 'CAP_1',
@@ -521,7 +532,7 @@ export const INITIAL_DB: DatabaseState = {
       aiSummary: 'Nắm vững kiến thức tập hợp, tính chất phân phối và lũy thừa. Nhầm nhẹ phép cộng ở Bài 2a và 2b (mỗi câu trừ 0.5đ).',
       strengths: ['Viết tập hợp và ký hiệu thuộc/không thuộc chính xác tuyệt đối (3/3đ)', 'Vận dụng tính chất phân phối và thứ tự thực hiện phép tính tốt'],
       improvements: ['Kiểm tra lại bước cộng nhẩm: 476 + 224 = 700 (viết nhầm 690) và 374 + 526 = 900 (viết nhầm 890)'],
-      imageUrl: '/assets/aistudio/IMG_9542_4ffccfa4.JPG',
+      imageUrl: '/assets/aistudio/IMG_9542_4ffccfa4.webp',
     },
     {
       id: 'sc-02',

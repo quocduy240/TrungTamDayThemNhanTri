@@ -20,8 +20,10 @@ import type { BootstrapPayload } from './api';
 import type {
   AuthUser,
   CoursePackage,
+  NationalExam,
   RoleInviteDoc,
   SiteConfig,
+  TimetableSlot,
   UserProfileDoc,
   UserRole,
 } from '../types';
@@ -55,7 +57,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   heroTitleCustomer: 'Trung Tâm Dạy Thêm Nhân Trí — Trao tri thức, Gửi yêu thương',
   heroSubtitleCustomer:
     'Hệ thống giáo dục chuẩn mực từ Lớp 3 đến Lớp 12 tại 35 Lý Thường Kiệt, TP. Long Xuyên: Dạy kèm Cấp 1 (phụ đạo bù bài miễn phí), Trọn gói Cấp 2 luyện thi Lớp 10 và Chuyên sâu 6 môn THPT & ĐGNL.',
-  heroImageUrl: '/assets/aistudio/IMG_9559_62d21d91.JPG',
+  heroImageUrl: '/assets/aistudio/IMG_9559_62d21d91.webp',
   heroCaption: 'Thầy cô và học sinh Trung Tâm Dạy Thêm Học Thêm Nhân Trí tại TP. Long Xuyên, An Giang.',
   annualDiscountPercent: 10,
   bankName: 'Vietcombank CN An Giang',
@@ -200,6 +202,12 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
         photoURL: fbUser.photoURL || existingData.photoURL,
         role: effectiveRole,
         linkedStudentId: existingData.linkedStudentId || linkedStudentId,
+        linkedStudentIds:
+          existingData.linkedStudentIds && existingData.linkedStudentIds.length > 0
+            ? existingData.linkedStudentIds
+            : existingData.linkedStudentId || linkedStudentId
+              ? [existingData.linkedStudentId || linkedStudentId!]
+              : undefined,
         linkedTeacherId: existingData.linkedTeacherId || linkedTeacherId,
         authProvider: 'GOOGLE_FIREBASE',
       };
@@ -273,6 +281,48 @@ export function subscribeCourses(
     (error) => {
       console.warn('Courses listener fallback to defaults:', error.message);
       onChange(fallbackCourses);
+    },
+  );
+}
+
+export function subscribePublicTimetable(
+  fallbackSlots: TimetableSlot[],
+  onChange: (slots: TimetableSlot[]) => void,
+): () => void {
+  const colRef = collection(db, 'public_timetable');
+  return onSnapshot(
+    colRef,
+    (snap) => {
+      if (snap.empty) {
+        onChange(fallbackSlots);
+        return;
+      }
+      onChange(snap.docs.map((d) => d.data() as TimetableSlot));
+    },
+    (error) => {
+      console.warn('Timetable listener fallback to defaults:', error.message);
+      onChange(fallbackSlots);
+    },
+  );
+}
+
+export function subscribePublicExams(
+  fallbackExams: NationalExam[],
+  onChange: (exams: NationalExam[]) => void,
+): () => void {
+  const colRef = collection(db, 'exams');
+  return onSnapshot(
+    colRef,
+    (snap) => {
+      if (snap.empty) {
+        onChange(fallbackExams);
+        return;
+      }
+      onChange(snap.docs.map((d) => d.data() as NationalExam));
+    },
+    (error) => {
+      console.warn('Exams listener fallback to defaults:', error.message);
+      onChange(fallbackExams);
     },
   );
 }
@@ -434,7 +484,12 @@ export async function syncInitialSeedToFirestore(
   bootstrap: BootstrapPayload,
   currentConfig: SiteConfig,
   userEmail: string,
-): Promise<{ coursesSynced: number; teachersSynced: number }> {
+): Promise<{
+  coursesSynced: number;
+  teachersSynced: number;
+  timetableSynced: number;
+  examsSynced: number;
+}> {
   // 1. Seed site_config/main
   const safeCfg = sanitizeSiteConfig({
     ...currentConfig,
@@ -470,7 +525,53 @@ export async function syncInitialSeedToFirestore(
     }
   }
 
-  // 4. Ensure bootstrapped lethituman2021@gmail.com invite exists if SuperAdmin triggered sync
+  // 4. Seed public_timetable
+  const slots = bootstrap.timetable || [];
+  for (const slot of slots) {
+    try {
+      await setDoc(doc(db, 'public_timetable', slot.id), {
+        id: slot.id,
+        weekLabel: clampStr(slot.weekLabel, 80),
+        period: slot.period,
+        shift: slot.shift,
+        timeRange: clampStr(slot.timeRange, 40),
+        day: slot.day,
+        centerClass: clampStr(slot.centerClass, 60),
+        subject: clampStr(slot.subject, 100),
+        teacherId: clampStr(slot.teacherId, 128),
+        teacherName: clampStr(slot.teacherName, 80),
+        room: clampStr(slot.room, 60),
+        slotType: slot.slotType,
+        status: slot.status,
+        ...(slot.note ? { note: clampStr(slot.note, 300) } : {}),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `public_timetable/${slot.id}`);
+    }
+  }
+
+  // 5. Seed national GDPT 2018 exams
+  const exams = bootstrap.exams || [];
+  for (const exam of exams) {
+    try {
+      await setDoc(doc(db, 'exams', exam.id), {
+        id: exam.id,
+        title: clampStr(exam.title, 200),
+        level: exam.level,
+        grade: exam.grade,
+        subject: clampStr(exam.subject, 80),
+        durationMinutes: exam.durationMinutes,
+        curriculumStandard: clampStr(exam.curriculumStandard, 160),
+        difficulty: exam.difficulty,
+        attemptsCount: exam.attemptsCount,
+        questions: exam.questions.slice(0, 50),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `exams/${exam.id}`);
+    }
+  }
+
+  // 6. Ensure bootstrapped lethituman2021@gmail.com invite exists if SuperAdmin triggered sync
   if (userEmail.toLowerCase() === SUPER_ADMIN_EMAIL) {
     try {
       await upsertRoleInvite({
@@ -487,5 +588,7 @@ export async function syncInitialSeedToFirestore(
   return {
     coursesSynced: bootstrap.courses.length,
     teachersSynced: bootstrap.teachers.length,
+    timetableSynced: slots.length,
+    examsSynced: exams.length,
   };
 }

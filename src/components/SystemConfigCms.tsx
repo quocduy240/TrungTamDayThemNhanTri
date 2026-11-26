@@ -164,7 +164,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
     try {
       const res = await syncInitialSeedToFirestore(bootstrap, form, currentUser.email);
       setStatusMsg(
-        `Đã khởi tạo & đồng bộ dữ liệu chuẩn lên Firestore (${res.coursesSynced} khóa học, ${res.teachersSynced} giáo viên, cấu hình daythemnhantri.com).`,
+        `Đã đồng bộ dữ liệu chuẩn lên Firestore (${res.coursesSynced} khóa học, ${res.teachersSynced} giáo viên, ${res.timetableSynced} ca TKB, ${res.examsSynced} bộ đề chuẩn, cấu hình daythemnhantri.com).`,
       );
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Đồng bộ Firestore thất bại.');

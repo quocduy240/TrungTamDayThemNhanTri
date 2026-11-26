@@ -19,6 +19,7 @@ export interface AuthUser {
   photoURL?: string;
   role: UserRole;
   linkedStudentId?: string;
+  linkedStudentIds?: string[];
   linkedTeacherId?: string;
   authProvider?: 'GOOGLE_FIREBASE' | 'LOCAL_SESSION';
 }
@@ -69,6 +70,7 @@ export interface UserProfileDoc {
   phone?: string;
   preferredView?: FrontendMode;
   linkedStudentId?: string;
+  linkedStudentIds?: string[];
   linkedTeacherId?: string;
   active: boolean;
   createdAt?: string;
@@ -118,6 +120,7 @@ export interface Student {
   id: string;
   ownerUid?: string;
   code: string;
+  parentLinkCode?: string;
   fullName: string;
   grade: number;
   level: EducationLevel;
