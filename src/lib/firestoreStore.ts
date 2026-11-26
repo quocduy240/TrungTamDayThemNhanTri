@@ -17,7 +17,9 @@ import {
   SUPER_ADMIN_EMAIL,
 } from './firebase';
 import type { BootstrapPayload } from './api';
+import { DEFAULT_AUTH_POLICY } from './identityPolicy';
 import type {
+  AuthPolicy,
   AuthUser,
   CoursePackage,
   NationalExam,
@@ -47,7 +49,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   announcementBanner:
     '🎉 Chiêu sinh thường xuyên năm học 2026–2027 (Tiểu học Lớp 3–5 · THCS Trọn gói Lớp 6–9 · Luyện thi vào Lớp 10 & THPT Toán - Văn - Anh - Lý - Hóa - Sinh) · Phụ đạo bù bài MIỄN PHÍ · Liên hệ Cô Tâm: 0947 376 444.',
   showAnnouncement: true,
-  defaultFrontendMode: 'TEACHER_STUDENT',
+  defaultFrontendMode: 'NEW_CUSTOMER',
   heroTitleTeacherStudent: 'Cổng Học Tập & Giảng Dạy Nhân Trí',
   heroSubtitleTeacherStudent:
     'Tra cứu thời khóa biểu Sáng · Chiều · Tối theo thời gian thực, luyện ngân hàng đề chuẩn GDPT 2018 và tải ảnh bài kiểm tra để AI phân tích điểm số ngay lập tức.',
@@ -67,6 +69,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   enableAiAdvisor: true,
   enableOnlineExams: true,
   enableOnlinePayment: true,
+  authPolicy: { ...DEFAULT_AUTH_POLICY },
 };
 
 const ADMIN_ALLOWED_CONFIG_KEYS = new Set<keyof SiteConfig>([
@@ -101,6 +104,23 @@ function clampStr(val: unknown, maxLen: number, fallback = ''): string {
   return s.slice(0, maxLen);
 }
 
+function sanitizeAuthPolicy(policy?: Partial<AuthPolicy>): AuthPolicy {
+  const src = { ...DEFAULT_AUTH_POLICY, ...(policy || {}) };
+  return {
+    allowParentPhoneLogin: Boolean(src.allowParentPhoneLogin),
+    requireParentPinOrCode: Boolean(src.requireParentPinOrCode),
+    allowParentGmailLogin: Boolean(src.allowParentGmailLogin),
+    allowStudentCodeLogin: Boolean(src.allowStudentCodeLogin),
+    requirePhoneLast4ForStudentCode: Boolean(src.requirePhoneLast4ForStudentCode),
+    allowStudentParentPhoneLogin: Boolean(src.allowStudentParentPhoneLogin),
+    allowStudentParentGmailLogin: Boolean(src.allowStudentParentGmailLogin),
+    allowStudentPersonalGmail: Boolean(src.allowStudentPersonalGmail),
+    minGradeForPersonalGmail: Math.min(12, Math.max(6, Math.round(Number(src.minGradeForPersonalGmail) || 8))),
+    requireAuthForClassroom: Boolean(src.requireAuthForClassroom),
+    allowDemoPreview: Boolean(src.allowDemoPreview),
+  };
+}
+
 function sanitizeSiteConfig(cfg: SiteConfig): SiteConfig {
   return {
     domain: clampStr(cfg.domain, 120, OFFICIAL_DOMAIN) || OFFICIAL_DOMAIN,
@@ -120,7 +140,7 @@ function sanitizeSiteConfig(cfg: SiteConfig): SiteConfig {
     showAnnouncement: Boolean(cfg.showAnnouncement),
     defaultFrontendMode: ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER'].includes(cfg.defaultFrontendMode)
       ? cfg.defaultFrontendMode
-      : 'TEACHER_STUDENT',
+      : 'NEW_CUSTOMER',
     heroTitleTeacherStudent:
       clampStr(cfg.heroTitleTeacherStudent, 180, DEFAULT_SITE_CONFIG.heroTitleTeacherStudent) ||
       DEFAULT_SITE_CONFIG.heroTitleTeacherStudent,
@@ -147,6 +167,7 @@ function sanitizeSiteConfig(cfg: SiteConfig): SiteConfig {
     enableAiAdvisor: Boolean(cfg.enableAiAdvisor),
     enableOnlineExams: Boolean(cfg.enableOnlineExams),
     enableOnlinePayment: Boolean(cfg.enableOnlinePayment),
+    authPolicy: sanitizeAuthPolicy(cfg.authPolicy),
     updatedBy: clampStr(cfg.updatedBy, 128, 'system'),
     updatedAt: clampStr(cfg.updatedAt, 60, new Date().toISOString()),
   };
@@ -157,7 +178,7 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
   const userRef = doc(db, 'users', fbUser.uid);
 
   let resolvedRole: UserRole = 'STUDENT';
-  let linkedStudentId: string | undefined = 'st-01';
+  let linkedStudentId: string | undefined;
   let linkedTeacherId: string | undefined;
 
   if (email === SUPER_ADMIN_EMAIL) {
@@ -249,7 +270,12 @@ export function subscribeSiteConfig(onChange: (config: SiteConfig) => void): () 
     ref,
     (snap) => {
       if (snap.exists()) {
-        onChange({ ...DEFAULT_SITE_CONFIG, ...(snap.data() as Partial<SiteConfig>) });
+        const data = snap.data() as Partial<SiteConfig>;
+        onChange({
+          ...DEFAULT_SITE_CONFIG,
+          ...data,
+          authPolicy: sanitizeAuthPolicy(data.authPolicy),
+        });
       } else {
         onChange(DEFAULT_SITE_CONFIG);
       }
@@ -475,6 +501,17 @@ export async function updateUserProfileRole(
       payload.linkedStudentId = clampStr(linkedStudentId, 128);
     }
     await updateDoc(doc(db, 'users', uid), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
+  }
+}
+
+export async function updateUserActiveStatus(uid: string, active: boolean): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'users', uid), {
+      active: Boolean(active),
+      updatedAt: new Date().toISOString(),
+    });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
   }

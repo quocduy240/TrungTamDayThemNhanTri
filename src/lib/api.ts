@@ -1,6 +1,8 @@
 import type {
+  AccessAuditLog,
   AppNotification,
   AttendanceRecord,
+  AuthPolicy,
   AuthUser,
   CoursePackage,
   ExpenseRecord,
@@ -97,6 +99,7 @@ export interface BootstrapPayload {
     adminPasscodeConfigured: boolean;
     usingEnvPasscode: boolean;
   };
+  authPolicy?: AuthPolicy;
 }
 
 export interface WorkspacePayload {
@@ -111,6 +114,8 @@ export interface WorkspacePayload {
   exams: NationalExam[];
   tickets: FeedbackTicket[];
   notifications: AppNotification[];
+  authPolicy?: AuthPolicy;
+  auditLogs?: AccessAuditLog[];
 }
 
 export function formatVnd(amount: number): string {

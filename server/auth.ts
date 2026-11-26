@@ -30,11 +30,11 @@ export const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
   },
   PARENT: {
     id: 'usr-parent',
-    name: 'Anh Nguyễn Văn Phúc (PH em Hòa)',
-    email: 'ph.phuchoa@daythemnhantri.com',
+    name: 'Anh Nguyễn Văn Phúc (PH em Hòa & Quế Anh)',
+    email: 'ph.phuchoa@gmail.com',
     role: 'PARENT',
     linkedStudentId: 'st-01',
-    linkedStudentIds: ['st-01'],
+    linkedStudentIds: ['st-01', 'st-11'],
   },
   STUDENT: {
     id: 'usr-student',
@@ -133,6 +133,7 @@ export function verifySessionToken(token: string): AuthUser | null {
       linkedStudentIds: Array.isArray(parsed.linkedStudentIds) ? parsed.linkedStudentIds : undefined,
       linkedTeacherId: parsed.linkedTeacherId,
       authProvider: parsed.authProvider,
+      loginChannel: parsed.loginChannel,
     };
   } catch {
     return null;

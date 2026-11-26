@@ -22,8 +22,19 @@ import {
   askNhanTriAdvisor,
   extractStudentsFromRosterImage,
 } from './server/gemini.ts';
+import {
+  canStudentUsePersonalGmail,
+  DEFAULT_AUTH_POLICY,
+  generateAccessPin,
+  maskPhoneVN,
+  normalizePhoneVN,
+} from './src/lib/identityPolicy.ts';
 import type {
+  AccessAuditLog,
   AttendanceRecord,
+  AuthPolicy,
+  AuthUser,
+  DatabaseState,
   DayOfWeek,
   FeedbackTicket,
   ScoreRecord,
@@ -110,6 +121,78 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function getPolicy(db: DatabaseState): AuthPolicy {
+  return { ...DEFAULT_AUTH_POLICY, ...(db.authPolicy || {}) };
+}
+
+function sanitizePolicyPatch(current: AuthPolicy, patch: Record<string, unknown>): AuthPolicy {
+  const pickBool = (k: keyof AuthPolicy): boolean =>
+    typeof patch[k] === 'boolean' ? (patch[k] as boolean) : Boolean(current[k]);
+  const rawMinGrade =
+    typeof patch.minGradeForPersonalGmail === 'number' || typeof patch.minGradeForPersonalGmail === 'string'
+      ? Number(patch.minGradeForPersonalGmail)
+      : current.minGradeForPersonalGmail;
+  return {
+    allowParentPhoneLogin: pickBool('allowParentPhoneLogin'),
+    requireParentPinOrCode: pickBool('requireParentPinOrCode'),
+    allowParentGmailLogin: pickBool('allowParentGmailLogin'),
+    allowStudentCodeLogin: pickBool('allowStudentCodeLogin'),
+    requirePhoneLast4ForStudentCode: pickBool('requirePhoneLast4ForStudentCode'),
+    allowStudentParentPhoneLogin: pickBool('allowStudentParentPhoneLogin'),
+    allowStudentParentGmailLogin: pickBool('allowStudentParentGmailLogin'),
+    allowStudentPersonalGmail: pickBool('allowStudentPersonalGmail'),
+    minGradeForPersonalGmail: Math.min(12, Math.max(6, Math.round(rawMinGrade || 8))),
+    requireAuthForClassroom: pickBool('requireAuthForClassroom'),
+    allowDemoPreview: pickBool('allowDemoPreview'),
+  };
+}
+
+function appendAuditLog(
+  db: DatabaseState,
+  entry: Omit<AccessAuditLog, 'id' | 'createdAt'>,
+): void {
+  if (!Array.isArray(db.auditLogs)) db.auditLogs = [];
+  db.auditLogs.unshift({
+    id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    createdAt: nowFormatted(),
+    ...entry,
+  });
+  if (db.auditLogs.length > 100) {
+    db.auditLogs = db.auditLogs.slice(0, 100);
+  }
+}
+
+function studentMatchesPhone(student: Student, normalizedPhone: string): boolean {
+  if (!normalizedPhone || normalizedPhone.length < 8) return false;
+  return (
+    normalizePhoneVN(student.parentPhone) === normalizedPhone ||
+    normalizePhoneVN(student.parentZalo) === normalizedPhone ||
+    normalizePhoneVN(student.parentSecondaryPhone) === normalizedPhone
+  );
+}
+
+function studentMatchesSecret(student: Student, rawSecret: string): boolean {
+  const sec = rawSecret.trim().toUpperCase();
+  if (!sec || sec.length < 4) return false;
+  return (
+    Boolean(student.accessPin && student.accessPin.trim().toUpperCase() === sec) ||
+    Boolean(student.parentLinkCode && student.parentLinkCode.trim().toUpperCase() === sec) ||
+    student.code.trim().toUpperCase() === sec
+  );
+}
+
+function sanitizeEmailList(raw: unknown): string[] {
+  const arr = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(/[,;\n]/)
+      : [];
+  const cleaned = arr
+    .map((v) => String(v || '').trim().toLowerCase())
+    .filter((v) => v.length >= 5 && v.length <= 160 && v.includes('@'));
+  return Array.from(new Set(cleaned)).slice(0, 5);
+}
+
 // ============================================================
 // PUBLIC & BOOTSTRAP ROUTES
 // ============================================================
@@ -163,6 +246,7 @@ app.get('/api/v1/bootstrap', (_req, res) => {
       adminPasscodeConfigured: hasEnvAdminPasscode || Boolean(db.adminPasscodeHash),
       usingEnvPasscode: hasEnvAdminPasscode,
     },
+    authPolicy: getPolicy(db),
   });
 });
 
@@ -171,9 +255,11 @@ app.get('/api/v1/bootstrap', (_req, res) => {
 // ============================================================
 
 app.post('/api/v1/auth/role-session', (req, res) => {
-  if (process.env.ALLOW_DEMO_LOGIN === 'false') {
+  const db = loadDb();
+  const policy = getPolicy(db);
+  if (process.env.ALLOW_DEMO_LOGIN === 'false' || !policy.allowDemoPreview) {
     res.status(403).json({
-      error: 'Chế độ đăng nhập dùng thử đã tắt trên môi trường sản xuất. Vui lòng đăng nhập bằng Gmail.',
+      error: 'Chế độ xem thử nhanh hiện đang tắt theo Chính sách Định danh. Vui lòng đăng nhập bằng SĐT / Mã HS hoặc Gmail.',
     });
     return;
   }
@@ -190,7 +276,6 @@ app.post('/api/v1/auth/role-session', (req, res) => {
 
   // If ADMIN and a passcode is configured via env or claimed hash, verify
   if (role === 'ADMIN') {
-    const db = loadDb();
     const envPasscode = process.env.ADMIN_PASSCODE?.trim();
     const submittedPasscode = typeof req.body?.passcode === 'string' ? req.body.passcode : '';
     if (envPasscode) {
@@ -212,8 +297,247 @@ app.post('/api/v1/auth/role-session', (req, res) => {
     }
   }
 
-  const token = signSessionToken(account);
-  res.json({ token, user: account });
+  const token = signSessionToken({ ...account, loginChannel: 'DEMO' });
+  res.json({ token, user: { ...account, loginChannel: 'DEMO' } });
+});
+
+app.post('/api/v1/auth/parent-login', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'parent-login', 8, 5 * 60_000)) {
+    res.status(429).json({ error: 'Bạn đã thử đăng nhập quá nhiều lần. Vui lòng thử lại sau 5 phút.' });
+    return;
+  }
+  const db = loadDb();
+  const policy = getPolicy(db);
+  if (!policy.allowParentPhoneLogin) {
+    res.status(403).json({
+      error: 'Đăng nhập Phụ huynh bằng Số điện thoại hiện đang tạm tắt. Vui lòng đăng nhập bằng Gmail đã đăng ký.',
+    });
+    return;
+  }
+
+  const normPhone = normalizePhoneVN(typeof req.body?.phone === 'string' ? req.body.phone : '');
+  const secret = typeof req.body?.secret === 'string' ? req.body.secret.trim() : '';
+  if (normPhone.length < 8) {
+    res.status(400).json({ error: 'Vui lòng nhập số điện thoại Phụ huynh hợp lệ (10 chữ số).' });
+    return;
+  }
+  if (policy.requireParentPinOrCode && secret.length < 4) {
+    res.status(400).json({ error: 'Vui lòng nhập Mã PIN gia đình hoặc Mã số học sinh của con.' });
+    return;
+  }
+
+  const matched = db.students.filter(
+    (s) => s.accessStatus !== 'LOCKED' && studentMatchesPhone(s, normPhone),
+  );
+  const secretOk =
+    matched.length > 0 &&
+    (!policy.requireParentPinOrCode || matched.some((s) => studentMatchesSecret(s, secret)));
+
+  if (!secretOk) {
+    appendAuditLog(db, {
+      actorEmail: maskPhoneVN(normPhone),
+      actorRole: 'GUEST',
+      action: 'LOGIN_DENIED',
+      targetLabel: `Cổng Phụ huynh (${maskPhoneVN(normPhone)})`,
+      detail: 'Sai SĐT / Mã PIN hoặc hồ sơ học sinh đang tạm khóa.',
+    });
+    saveDb(db);
+    res.status(401).json({
+      error: 'Số điện thoại hoặc Mã PIN / Mã học sinh chưa chính xác, hoặc hồ sơ đang tạm khóa. Liên hệ Cô Tâm: 0947 376 444.',
+    });
+    return;
+  }
+
+  const primary = matched[0];
+  const nowStr = nowFormatted();
+  matched.forEach((s) => {
+    s.lastLoginAt = nowStr;
+  });
+
+  const parentUser: AuthUser = {
+    id: `par-${normPhone}`,
+    name: primary.parentName || `Phụ huynh (${maskPhoneVN(normPhone)})`,
+    email: primary.parentEmails?.[0] || `${maskPhoneVN(normPhone)} · Zalo`,
+    role: 'PARENT',
+    linkedStudentId: primary.id,
+    linkedStudentIds: matched.map((s) => s.id),
+    loginChannel: 'PARENT_PHONE',
+  };
+
+  appendAuditLog(db, {
+    actorEmail: maskPhoneVN(normPhone),
+    actorRole: 'PARENT',
+    action: 'LOGIN_SUCCESS',
+    targetLabel: `${parentUser.name} (${matched.length} học sinh)`,
+    detail: `Đăng nhập Cổng Phụ huynh bằng SĐT + ${policy.requireParentPinOrCode ? 'PIN/Mã HS' : 'SĐT'}.`,
+  });
+  saveDb(db);
+
+  const token = signSessionToken(parentUser);
+  res.json({ token, user: parentUser, matchedCount: matched.length });
+});
+
+app.post('/api/v1/auth/student-login', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'student-login', 10, 5 * 60_000)) {
+    res.status(429).json({ error: 'Bạn đã thử vào lớp quá nhiều lần. Vui lòng thử lại sau 5 phút.' });
+    return;
+  }
+  const db = loadDb();
+  const policy = getPolicy(db);
+  const method = String(req.body?.method || 'STUDENT_CODE').toUpperCase();
+
+  if (method === 'STUDENT_CODE') {
+    if (!policy.allowStudentCodeLogin) {
+      res.status(403).json({
+        error: 'Đăng nhập bằng Mã số học sinh hiện đang tạm tắt. Vui lòng chọn phương thức khác.',
+      });
+      return;
+    }
+    const code = String(req.body?.studentCode || '').trim().toUpperCase();
+    const phoneLast4 = String(req.body?.phoneLast4 || '').replace(/\D/g, '');
+    if (code.length < 4) {
+      res.status(400).json({ error: 'Vui lòng nhập Mã số học sinh hợp lệ (VD: NT-6A1-01 hoặc NT6A1H).' });
+      return;
+    }
+    const student = db.students.find(
+      (s) =>
+        s.code.trim().toUpperCase() === code ||
+        (s.parentLinkCode && s.parentLinkCode.trim().toUpperCase() === code),
+    );
+    if (!student || student.accessStatus === 'LOCKED') {
+      appendAuditLog(db, {
+        actorEmail: code,
+        actorRole: 'GUEST',
+        action: 'LOGIN_DENIED',
+        targetLabel: `Vào lớp bằng Mã HS (${code})`,
+        detail: 'Không tìm thấy Mã HS hoặc tài khoản học sinh đang bị khóa.',
+      });
+      saveDb(db);
+      res.status(401).json({
+        error: 'Mã số học sinh chưa chính xác hoặc hồ sơ đang tạm khóa. Vui lòng hỏi Giáo viên hoặc Cô Tâm (0947 376 444).',
+      });
+      return;
+    }
+    if (policy.requirePhoneLast4ForStudentCode) {
+      const p1 = normalizePhoneVN(student.parentPhone);
+      const p2 = normalizePhoneVN(student.parentSecondaryPhone);
+      const last4Match =
+        phoneLast4.length === 4 && (p1.endsWith(phoneLast4) || (p2.length >= 4 && p2.endsWith(phoneLast4)));
+      if (!last4Match) {
+        res.status(401).json({
+          error: 'Vui lòng nhập đúng 4 số cuối điện thoại Phụ huynh để xác nhận vào lớp.',
+          requiresPhoneLast4: true,
+        });
+        return;
+      }
+    }
+
+    student.lastLoginAt = nowFormatted();
+    const studentUser: AuthUser = {
+      id: `stu-${student.id}`,
+      name: `${student.fullName} (${student.centerClass})`,
+      email: student.studentEmail || `${student.code.toLowerCase()}@student.daythemnhantri.com`,
+      role: 'STUDENT',
+      linkedStudentId: student.id,
+      linkedStudentIds: [student.id],
+      loginChannel: 'STUDENT_CODE',
+    };
+    appendAuditLog(db, {
+      actorEmail: student.code,
+      actorRole: 'STUDENT',
+      action: 'LOGIN_SUCCESS',
+      targetLabel: `${student.fullName} (${student.centerClass})`,
+      detail: 'Học sinh vào lớp bằng Mã số học sinh.',
+    });
+    saveDb(db);
+    const token = signSessionToken(studentUser);
+    res.json({ token, user: studentUser, student });
+    return;
+  }
+
+  if (method === 'PARENT_PHONE') {
+    if (!policy.allowStudentParentPhoneLogin) {
+      res.status(403).json({
+        error: 'Vào lớp bằng SĐT Phụ huynh hiện đang tạm tắt. Em hãy dùng Mã số học sinh hoặc Gmail.',
+      });
+      return;
+    }
+    const normPhone = normalizePhoneVN(typeof req.body?.phone === 'string' ? req.body.phone : '');
+    const secret = typeof req.body?.secret === 'string' ? req.body.secret.trim() : '';
+    const requestedStudentId = typeof req.body?.studentId === 'string' ? req.body.studentId.trim() : '';
+
+    if (normPhone.length < 8) {
+      res.status(400).json({ error: 'Vui lòng nhập số điện thoại Phụ huynh hợp lệ (10 chữ số).' });
+      return;
+    }
+    if (policy.requireParentPinOrCode && secret.length < 4) {
+      res.status(400).json({ error: 'Vui lòng nhập Mã PIN gia đình hoặc Mã số học sinh.' });
+      return;
+    }
+
+    const matched = db.students.filter(
+      (s) => s.accessStatus !== 'LOCKED' && studentMatchesPhone(s, normPhone),
+    );
+    const secretOk =
+      matched.length > 0 &&
+      (!policy.requireParentPinOrCode || matched.some((s) => studentMatchesSecret(s, secret)));
+
+    if (!secretOk) {
+      res.status(401).json({
+        error: 'SĐT Phụ huynh hoặc Mã PIN chưa chính xác, hoặc tài khoản học sinh đang tạm khóa.',
+      });
+      return;
+    }
+
+    if (matched.length > 1 && !requestedStudentId) {
+      res.json({
+        requiresChildSelection: true,
+        candidates: matched.map((s) => ({
+          id: s.id,
+          code: s.code,
+          fullName: s.fullName,
+          centerClass: s.centerClass,
+          grade: s.grade,
+          school: s.school,
+        })),
+      });
+      return;
+    }
+
+    const chosen = requestedStudentId
+      ? matched.find((s) => s.id === requestedStudentId)
+      : matched[0];
+    if (!chosen) {
+      res.status(400).json({ error: 'Học sinh được chọn không khớp với SĐT phụ huynh này.' });
+      return;
+    }
+
+    chosen.lastLoginAt = nowFormatted();
+    const studentUser: AuthUser = {
+      id: `stu-${chosen.id}`,
+      name: `${chosen.fullName} (${chosen.centerClass})`,
+      email: chosen.studentEmail || `${chosen.code.toLowerCase()}@student.daythemnhantri.com`,
+      role: 'STUDENT',
+      linkedStudentId: chosen.id,
+      linkedStudentIds: [chosen.id],
+      loginChannel: 'PARENT_PHONE',
+    };
+    appendAuditLog(db, {
+      actorEmail: maskPhoneVN(normPhone),
+      actorRole: 'STUDENT',
+      action: 'LOGIN_SUCCESS',
+      targetLabel: `${chosen.fullName} (${chosen.centerClass})`,
+      detail: 'Học sinh vào lớp bằng SĐT Phụ huynh đã xác thực.',
+    });
+    saveDb(db);
+    const token = signSessionToken(studentUser);
+    res.json({ token, user: studentUser, student: chosen });
+    return;
+  }
+
+  res.status(400).json({ error: 'Phương thức vào lớp không hợp lệ.' });
 });
 
 app.post('/api/v1/auth/admin-claim', (req, res) => {
@@ -246,26 +570,222 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
     return;
   }
 
-  let role: UserRole = 'STUDENT';
-  if (verified.email === SUPER_ADMIN_EMAIL) {
-    role = 'SUPER_ADMIN';
-  } else if (verified.email === ADMIN_EMAIL) {
-    role = 'ADMIN';
-  } else if (req.body?.requestedRole === 'PARENT' || req.body?.requestedRole === 'STUDENT') {
-    role = req.body.requestedRole;
+  const db = loadDb();
+  const policy = getPolicy(db);
+  const email = verified.email.toLowerCase();
+  const portalIntent = String(req.body?.portalIntent || 'AUTO').toUpperCase();
+  const requestedStudentId = typeof req.body?.studentId === 'string' ? req.body.studentId.trim() : '';
+
+  if (email === SUPER_ADMIN_EMAIL || email === ADMIN_EMAIL) {
+    const role: UserRole = email === SUPER_ADMIN_EMAIL ? 'SUPER_ADMIN' : 'ADMIN';
+    const user: AuthUser = {
+      id: verified.uid,
+      name: verified.displayName,
+      email,
+      photoURL: verified.photoURL,
+      role,
+      authProvider: 'GOOGLE_FIREBASE',
+      loginChannel: 'STAFF_GMAIL',
+    };
+    const token = signSessionToken(user);
+    res.json({ token, user });
+    return;
   }
 
-  const user = {
+  const parentMatches = db.students.filter(
+    (s) =>
+      s.accessStatus !== 'LOCKED' &&
+      Array.isArray(s.parentEmails) &&
+      s.parentEmails.some((e) => e.toLowerCase() === email),
+  );
+  const studentMatch = db.students.find(
+    (s) => s.studentEmail && s.studentEmail.toLowerCase() === email,
+  );
+
+  // Explicit Parent Portal intent
+  if (portalIntent === 'PARENT') {
+    if (!policy.allowParentGmailLogin) {
+      res.status(403).json({
+        error: 'Đăng nhập Phụ huynh bằng Gmail đang tạm tắt bởi SuperAdmin. Vui lòng dùng SĐT + Mã PIN.',
+      });
+      return;
+    }
+    if (parentMatches.length === 0) {
+      res.status(403).json({
+        error: `Gmail ${email} chưa được đăng ký trong hồ sơ Phụ huynh tại Nhân Trí. Vui lòng nhắn Zalo Cô Tâm (0947 376 444) để gắn Gmail vào hồ sơ con.`,
+      });
+      return;
+    }
+    const nowStr = nowFormatted();
+    parentMatches.forEach((s) => {
+      s.lastLoginAt = nowStr;
+    });
+    const user: AuthUser = {
+      id: verified.uid,
+      name: parentMatches[0].parentName || verified.displayName,
+      email,
+      photoURL: verified.photoURL,
+      role: 'PARENT',
+      linkedStudentId: parentMatches[0].id,
+      linkedStudentIds: parentMatches.map((s) => s.id),
+      authProvider: 'GOOGLE_FIREBASE',
+      loginChannel: 'PARENT_GMAIL',
+    };
+    appendAuditLog(db, {
+      actorEmail: email,
+      actorRole: 'PARENT',
+      action: 'LOGIN_SUCCESS',
+      targetLabel: `${user.name} (${parentMatches.length} học sinh)`,
+      detail: 'Phụ huynh đăng nhập bằng Gmail đã đăng ký.',
+    });
+    saveDb(db);
+    const token = signSessionToken(user);
+    res.json({ token, user });
+    return;
+  }
+
+  // Explicit Student Classroom intent
+  if (portalIntent === 'STUDENT') {
+    if (studentMatch) {
+      if (studentMatch.accessStatus === 'LOCKED') {
+        res.status(403).json({ error: 'Tài khoản học sinh này đang bị tạm khóa. Vui lòng liên hệ Cô Tâm (0947 376 444).' });
+        return;
+      }
+      if (!canStudentUsePersonalGmail(studentMatch, policy)) {
+        res.status(403).json({
+          error: `Học sinh Lớp ${studentMatch.grade} chưa đủ ngưỡng dùng Gmail cá nhân (áp dụng từ Lớp ${policy.minGradeForPersonalGmail} trở lên). Em hãy vào lớp bằng Mã số học sinh, SĐT/Gmail Phụ huynh, hoặc nhờ Quản trị viên bật ngoại lệ.`,
+        });
+        return;
+      }
+      studentMatch.lastLoginAt = nowFormatted();
+      const user: AuthUser = {
+        id: verified.uid,
+        name: `${studentMatch.fullName} (${studentMatch.centerClass})`,
+        email,
+        photoURL: verified.photoURL,
+        role: 'STUDENT',
+        linkedStudentId: studentMatch.id,
+        linkedStudentIds: [studentMatch.id],
+        authProvider: 'GOOGLE_FIREBASE',
+        loginChannel: 'STUDENT_GMAIL',
+      };
+      appendAuditLog(db, {
+        actorEmail: email,
+        actorRole: 'STUDENT',
+        action: 'LOGIN_SUCCESS',
+        targetLabel: `${studentMatch.fullName} (${studentMatch.centerClass})`,
+        detail: `Học sinh vào lớp bằng Gmail cá nhân (Lớp ${studentMatch.grade}).`,
+      });
+      saveDb(db);
+      const token = signSessionToken(user);
+      res.json({ token, user });
+      return;
+    }
+
+    if (parentMatches.length > 0) {
+      if (!policy.allowStudentParentGmailLogin) {
+        res.status(403).json({
+          error: 'Vào lớp bằng Gmail Phụ huynh đang tạm tắt. Em hãy dùng Mã số học sinh.',
+        });
+        return;
+      }
+      if (parentMatches.length > 1 && !requestedStudentId) {
+        res.json({
+          requiresChildSelection: true,
+          candidates: parentMatches.map((s) => ({
+            id: s.id,
+            code: s.code,
+            fullName: s.fullName,
+            centerClass: s.centerClass,
+            grade: s.grade,
+            school: s.school,
+          })),
+        });
+        return;
+      }
+      const chosen = requestedStudentId
+        ? parentMatches.find((s) => s.id === requestedStudentId) || parentMatches[0]
+        : parentMatches[0];
+      chosen.lastLoginAt = nowFormatted();
+      const user: AuthUser = {
+        id: verified.uid,
+        name: `${chosen.fullName} (${chosen.centerClass})`,
+        email,
+        photoURL: verified.photoURL,
+        role: 'STUDENT',
+        linkedStudentId: chosen.id,
+        linkedStudentIds: [chosen.id],
+        authProvider: 'GOOGLE_FIREBASE',
+        loginChannel: 'PARENT_GMAIL',
+      };
+      appendAuditLog(db, {
+        actorEmail: email,
+        actorRole: 'STUDENT',
+        action: 'LOGIN_SUCCESS',
+        targetLabel: `${chosen.fullName} (${chosen.centerClass})`,
+        detail: 'Học sinh vào lớp thông qua Gmail Phụ huynh đã đăng ký.',
+      });
+      saveDb(db);
+      const token = signSessionToken(user);
+      res.json({ token, user });
+      return;
+    }
+
+    res.status(403).json({
+      error: `Gmail ${email} chưa được liên kết với hồ sơ Học sinh hoặc Phụ huynh tại Nhân Trí. Vui lòng liên hệ Cô Tâm (0947 376 444).`,
+    });
+    return;
+  }
+
+  // AUTO / Teacher / Firestore-invited role fallback
+  if (parentMatches.length > 0) {
+    const user: AuthUser = {
+      id: verified.uid,
+      name: parentMatches[0].parentName || verified.displayName,
+      email,
+      photoURL: verified.photoURL,
+      role: 'PARENT',
+      linkedStudentId: parentMatches[0].id,
+      linkedStudentIds: parentMatches.map((s) => s.id),
+      authProvider: 'GOOGLE_FIREBASE',
+      loginChannel: 'PARENT_GMAIL',
+    };
+    const token = signSessionToken(user);
+    res.json({ token, user });
+    return;
+  }
+
+  if (studentMatch && studentMatch.accessStatus !== 'LOCKED' && canStudentUsePersonalGmail(studentMatch, policy)) {
+    const user: AuthUser = {
+      id: verified.uid,
+      name: `${studentMatch.fullName} (${studentMatch.centerClass})`,
+      email,
+      photoURL: verified.photoURL,
+      role: 'STUDENT',
+      linkedStudentId: studentMatch.id,
+      linkedStudentIds: [studentMatch.id],
+      authProvider: 'GOOGLE_FIREBASE',
+      loginChannel: 'STUDENT_GMAIL',
+    };
+    const token = signSessionToken(user);
+    res.json({ token, user });
+    return;
+  }
+
+  const requestedRole = req.body?.requestedRole;
+  const fallbackRole: UserRole =
+    requestedRole === 'TEACHER' || requestedRole === 'PARENT' || requestedRole === 'STUDENT'
+      ? requestedRole
+      : 'STUDENT';
+  const user: AuthUser = {
     id: verified.uid,
     name: verified.displayName,
-    email: verified.email,
+    email,
     photoURL: verified.photoURL,
-    role,
-    linkedStudentId: role === 'STUDENT' || role === 'PARENT' ? 'st-01' : undefined,
-    linkedStudentIds: role === 'STUDENT' || role === 'PARENT' ? ['st-01'] : undefined,
-    authProvider: 'GOOGLE_FIREBASE' as const,
+    role: fallbackRole,
+    authProvider: 'GOOGLE_FIREBASE',
+    loginChannel: fallbackRole === 'TEACHER' ? 'STAFF_GMAIL' : 'STUDENT_GMAIL',
   };
-
   const token = signSessionToken(user);
   res.json({ token, user });
 });
@@ -355,6 +875,8 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     exams: db.exams,
     tickets,
     notifications,
+    authPolicy: getPolicy(db),
+    auditLogs: isAdminUser ? (db.auditLogs || []) : [],
   });
 });
 
@@ -432,8 +954,10 @@ app.post('/api/v1/enrollments', (req, res) => {
     homeroomTeacher: numericGrade <= 5 ? 'Cô Tâm' : numericGrade <= 9 ? 'Cô Nghi' : 'Cô Mẫn',
     room: numericGrade <= 5 ? 'Phòng 1' : 'Phòng 2',
     parentName: typeof parentName === 'string' && parentName.trim() ? parentName.trim() : 'Phụ huynh mới',
-    parentPhone: parentPhone.trim(),
-    parentZalo: parentPhone.trim(),
+    parentPhone: normalizePhoneVN(parentPhone) || parentPhone.trim(),
+    parentZalo: normalizePhoneVN(parentPhone) || parentPhone.trim(),
+    accessPin: generateAccessPin(),
+    accessStatus: 'ACTIVE',
     packageType: course.billingModel,
     hasBoarding: Boolean(hasBoarding),
     hasShuttle: Boolean(hasShuttle),
@@ -516,8 +1040,10 @@ app.post('/api/v1/students', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
     homeroomTeacher: String(b.homeroomTeacher || 'Cô Nghi'),
     room: String(b.room || 'Phòng 2'),
     parentName: String(b.parentName || 'Phụ huynh'),
-    parentPhone: String(b.parentPhone || '0918 *** 000'),
-    parentZalo: String(b.parentPhone || '0918 *** 000'),
+    parentPhone: normalizePhoneVN(String(b.parentPhone || '')) || String(b.parentPhone || '0918000000'),
+    parentZalo: normalizePhoneVN(String(b.parentPhone || '')) || String(b.parentPhone || '0918000000'),
+    accessPin: generateAccessPin(),
+    accessStatus: 'ACTIVE',
     packageType: grade <= 5 ? 'TUTORING' : grade <= 9 ? 'ALL_IN_ONE' : 'PER_SUBJECT',
     hasBoarding: Boolean(b.hasBoarding),
     hasShuttle: Boolean(b.hasShuttle),
@@ -536,6 +1062,66 @@ app.post('/api/v1/students', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
   res.status(201).json({ student });
 });
 
+app.patch('/api/v1/students/:id/access', requireAuth(['ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = db.students.find((s) => s.id === req.params.id);
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy học sinh.' });
+    return;
+  }
+  const b = req.body || {};
+  const prevStatus = student.accessStatus || 'ACTIVE';
+
+  if (typeof b.parentPhone === 'string' && b.parentPhone.trim().length >= 8) {
+    student.parentPhone = normalizePhoneVN(b.parentPhone) || b.parentPhone.trim();
+  }
+  if (typeof b.parentZalo === 'string') {
+    student.parentZalo = normalizePhoneVN(b.parentZalo) || b.parentZalo.trim();
+  }
+  if (typeof b.parentSecondaryPhone === 'string') {
+    const normSec = normalizePhoneVN(b.parentSecondaryPhone);
+    student.parentSecondaryPhone = normSec || undefined;
+  }
+  if (b.parentEmails !== undefined) {
+    student.parentEmails = sanitizeEmailList(b.parentEmails);
+  }
+  if (typeof b.studentEmail === 'string') {
+    const cleaned = b.studentEmail.trim().toLowerCase();
+    student.studentEmail = cleaned && cleaned.includes('@') ? cleaned.slice(0, 160) : undefined;
+  }
+  if (typeof b.allowPersonalGmailOverride === 'boolean') {
+    student.allowPersonalGmailOverride = b.allowPersonalGmailOverride;
+  }
+  if (typeof b.accessPin === 'string' && b.accessPin.trim()) {
+    const cleanPin = b.accessPin.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
+    if (cleanPin.length < 4) {
+      res.status(400).json({ error: 'Mã PIN cần tối thiểu 4 ký tự.' });
+      return;
+    }
+    student.accessPin = cleanPin;
+  }
+  if (typeof b.parentLinkCode === 'string' && b.parentLinkCode.trim().length >= 4) {
+    student.parentLinkCode = b.parentLinkCode.trim().toUpperCase().slice(0, 16);
+  }
+  if (b.accessStatus === 'ACTIVE' || b.accessStatus === 'PENDING_VERIFY' || b.accessStatus === 'LOCKED') {
+    student.accessStatus = b.accessStatus;
+  }
+  if (typeof b.accessNote === 'string') {
+    student.accessNote = b.accessNote.trim().slice(0, 260) || undefined;
+  }
+
+  const actor = req.user!;
+  appendAuditLog(db, {
+    actorEmail: actor.email,
+    actorRole: actor.role,
+    action: student.accessStatus === 'LOCKED' && prevStatus !== 'LOCKED' ? 'ACCESS_LOCK' : 'ACCESS_UPDATE',
+    targetLabel: `${student.fullName} (${student.code})`,
+    detail: `Cập nhật định danh: SĐT ${maskPhoneVN(student.parentPhone)}, trạng thái ${student.accessStatus || 'ACTIVE'}${student.allowPersonalGmailOverride ? ', bật ngoại lệ Gmail cá nhân' : ''}.`,
+  });
+  saveDb(db);
+  res.json({ student });
+});
+
 app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
   const rows = Array.isArray(req.body?.students) ? req.body.students : [];
   if (rows.length === 0) {
@@ -550,6 +1136,7 @@ app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res
     const centerClass = String(row.centerClass || 'Lớp 7A1').trim();
     const gradeMatch = centerClass.match(/\d+/);
     const grade = gradeMatch ? Math.min(12, Math.max(3, Number(gradeMatch[0]))) : 7;
+    const rawPhone = String(row.parentPhone || '0918000000').trim();
     const st: Student = {
       id: `st-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       code: `NT-${grade}-${String(db.students.length + imported.length + 1).padStart(2, '0')}`,
@@ -563,8 +1150,10 @@ app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res
       homeroomTeacher: String(row.homeroomTeacher || 'Cô Nghi').trim(),
       room: String(row.room || 'Phòng 2').trim(),
       parentName: String(row.parentName || `PH em ${fullName.split(' ').slice(-1)[0]}`).trim(),
-      parentPhone: String(row.parentPhone || '0918 *** 000').trim(),
-      parentZalo: String(row.parentPhone || '0918 *** 000').trim(),
+      parentPhone: normalizePhoneVN(rawPhone) || rawPhone,
+      parentZalo: normalizePhoneVN(rawPhone) || rawPhone,
+      accessPin: generateAccessPin(),
+      accessStatus: 'ACTIVE',
       packageType: grade <= 5 ? 'TUTORING' : grade <= 9 ? 'ALL_IN_ONE' : 'PER_SUBJECT',
       hasBoarding: false,
       hasShuttle: false,
@@ -1155,6 +1744,32 @@ app.get('/api/v1/system/cloudflare-schema', requireAuth(['ADMIN']), (_req, res) 
     sql: CLOUDFLARE_D1_SCHEMA_SQL,
     workerNotes:
       'REST API v1 được thiết kế phi trạng thái (stateless HMAC Bearer Auth + chuẩn JSON REST), sẵn sàng chuyển đổi sang Cloudflare Workers + D1 SQLite chỉ bằng cách gắn env.DB.prepare(...) vào các handler /api/v1/*.',
+  });
+});
+
+app.get('/api/v1/system/auth-policy', requireAuth(['ADMIN']), (_req, res) => {
+  const db = loadDb();
+  res.json({
+    authPolicy: getPolicy(db),
+    auditLogs: db.auditLogs || [],
+  });
+});
+
+app.patch('/api/v1/system/auth-policy', requireAuth(['SUPER_ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const nextPolicy = sanitizePolicyPatch(getPolicy(db), (req.body || {}) as Record<string, unknown>);
+  db.authPolicy = nextPolicy;
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'POLICY_UPDATE',
+    targetLabel: 'Chính sách Định danh & Phân quyền',
+    detail: `Ngưỡng Gmail cá nhân HS: Lớp ${nextPolicy.minGradeForPersonalGmail}+ · Yêu cầu xác thực vào lớp: ${nextPolicy.requireAuthForClassroom ? 'Bật' : 'Tắt'} · PIN Phụ huynh: ${nextPolicy.requireParentPinOrCode ? 'Bắt buộc' : 'Tùy chọn'}.`,
+  });
+  saveDb(db);
+  res.json({
+    authPolicy: nextPolicy,
+    auditLogs: db.auditLogs || [],
   });
 });
 

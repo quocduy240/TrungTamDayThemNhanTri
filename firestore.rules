@@ -101,7 +101,7 @@ service cloud.firestore {
           'heroTitleCustomer', 'heroSubtitleCustomer',
           'heroImageUrl', 'heroCaption',
           'annualDiscountPercent', 'bankName', 'bankAccount', 'bankOwner', 'momoPhone',
-          'enableAiAdvisor', 'enableOnlineExams', 'enableOnlinePayment',
+          'enableAiAdvisor', 'enableOnlineExams', 'enableOnlinePayment', 'authPolicy',
           'updatedBy', 'updatedAt'
         ])
         && isNonEmptyString(data.domain, 120)
@@ -136,6 +136,7 @@ service cloud.firestore {
         && (!('enableAiAdvisor' in data) || data.enableAiAdvisor is bool)
         && (!('enableOnlineExams' in data) || data.enableOnlineExams is bool)
         && (!('enableOnlinePayment' in data) || data.enableOnlinePayment is bool)
+        && (!('authPolicy' in data) || data.authPolicy is map)
         && isOptionalString(data, 'updatedBy', 128)
         && isOptionalString(data, 'updatedAt', 60);
     }
@@ -242,7 +243,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'ownerUid', 'code', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass',
           'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
-          'parentPhone', 'parentZalo', 'packageType', 'hasBoarding', 'hasShuttle',
+          'parentPhone', 'parentSecondaryPhone', 'parentZalo', 'parentEmails', 'studentEmail',
+          'allowPersonalGmailOverride', 'accessPin', 'accessStatus', 'accessNote', 'lastLoginAt',
+          'packageType', 'hasBoarding', 'hasShuttle',
           'annualPrepaid', 'peConflictDay', 'peConflictShift', 'eveningMakeupSlot',
           'enrolledSubjects', 'status'
         ])
@@ -260,7 +263,15 @@ service cloud.firestore {
         && isOptionalString(data, 'room', 60)
         && isNonEmptyString(data.parentName, 120)
         && isNonEmptyString(data.parentPhone, 40)
+        && isOptionalString(data, 'parentSecondaryPhone', 40)
         && isOptionalString(data, 'parentZalo', 40)
+        && (!('parentEmails' in data) || isBoundedStringList(data.parentEmails, 5))
+        && isOptionalString(data, 'studentEmail', 160)
+        && (!('allowPersonalGmailOverride' in data) || data.allowPersonalGmailOverride is bool)
+        && isOptionalString(data, 'accessPin', 16)
+        && (!('accessStatus' in data) || data.accessStatus in ['ACTIVE', 'PENDING_VERIFY', 'LOCKED'])
+        && isOptionalString(data, 'accessNote', 300)
+        && isOptionalString(data, 'lastLoginAt', 60)
         && data.packageType in ['TUTORING', 'ALL_IN_ONE', 'PER_SUBJECT']
         && (!('hasBoarding' in data) || data.hasBoarding is bool)
         && (!('hasShuttle' in data) || data.hasShuttle is bool)
@@ -452,23 +463,41 @@ service cloud.firestore {
       allow update: if isValidId(uid) && isVerified() && isValidUserProfile(incoming()) && (
         isSuperAdmin() ||
         (
+          isAdmin() &&
+          existing().role in ['TEACHER', 'PARENT', 'STUDENT'] &&
+          incoming().role in ['TEACHER', 'PARENT', 'STUDENT'] &&
+          incoming().uid == existing().uid &&
+          incoming().email == existing().email &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'active', 'linkedStudentId', 'linkedStudentIds', 'linkedTeacherId', 'updatedAt'])
+        ) ||
+        (
           request.auth.uid == uid &&
           incoming().uid == existing().uid &&
           incoming().email == existing().email &&
           incoming().role == existing().role &&
+          incoming().active == existing().active &&
           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'preferredView', 'updatedAt'])
         )
       );
       allow delete: if isValidId(uid) && isSuperAdmin();
     }
 
-    // 3. SuperAdmin Pre-Assigned Role Invites (keyed by verified Gmail address)
+    // 3. Pre-Assigned Role Invites (SuperAdmin: all roles; Admin: TEACHER / PARENT / STUDENT only)
     match /role_invites/{inviteEmail} {
-      allow get: if isValidEmailId(inviteEmail) && isVerified() && (isSuperAdmin() || inviteEmail == request.auth.token.email);
-      allow list: if isVerified() && (isSuperAdmin() || existing().email == request.auth.token.email);
-      allow create: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && isSuperAdmin();
-      allow update: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && isSuperAdmin();
-      allow delete: if isValidEmailId(inviteEmail) && isSuperAdmin();
+      allow get: if isValidEmailId(inviteEmail) && isVerified() && (isSuperAdmin() || isAdmin() || inviteEmail == request.auth.token.email);
+      allow list: if isVerified() && (isSuperAdmin() || isAdmin() || existing().email == request.auth.token.email);
+      allow create: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && (
+        isSuperAdmin() ||
+        (isAdmin() && incoming().role in ['TEACHER', 'PARENT', 'STUDENT'])
+      );
+      allow update: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && (
+        isSuperAdmin() ||
+        (isAdmin() && existing().role in ['TEACHER', 'PARENT', 'STUDENT'] && incoming().role in ['TEACHER', 'PARENT', 'STUDENT'])
+      );
+      allow delete: if isValidEmailId(inviteEmail) && (
+        isSuperAdmin() ||
+        (isAdmin() && existing().role in ['TEACHER', 'PARENT', 'STUDENT'])
+      );
     }
 
     // 4. Public Course Packages (1-Click Editable by Admin & SuperAdmin)

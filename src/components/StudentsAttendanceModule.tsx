@@ -1,16 +1,26 @@
 import React, { useMemo, useState } from 'react';
 import {
   Check,
+  Copy,
   Download,
   FileSpreadsheet,
   Image as ImageIcon,
+  KeyRound,
+  RefreshCw,
   Search,
+  ShieldCheck,
   Sparkles,
   UserCheck,
   UserPlus,
   X,
 } from 'lucide-react';
+import type { StudentAccessStatus, StudentRecord } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
+import {
+  buildZaloAccessCardText,
+  DEFAULT_AUTH_POLICY,
+  generateAccessPin,
+} from '../lib/identityPolicy';
 import { compressImageFile } from '../lib/imageOptimizer';
 
 interface StudentsAttendanceModuleProps {
@@ -75,12 +85,33 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
     workspace.user.role === 'SUPER_ADMIN' ||
     workspace.user.role === 'ADMIN' ||
     workspace.user.role === 'TEACHER';
+  const isAdmin =
+    workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
+  const minGradeForGmail =
+    workspace.authPolicy?.minGradeForPersonalGmail ??
+    DEFAULT_AUTH_POLICY.minGradeForPersonalGmail;
 
   const [search, setSearch] = useState('');
   const [gradeFilter, setGradeFilter] = useState<'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3'>('ALL');
   const [shiftLabel, setShiftLabel] = useState('Chiều Ca 2 (15:15–16:45)');
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Per-Student Identity & Access Binding Modal (Admin / SuperAdmin)
+  const [editingAccessStudent, setEditingAccessStudent] = useState<StudentRecord | null>(null);
+  const [accessForm, setAccessForm] = useState({
+    parentPhone: '',
+    parentSecondaryPhone: '',
+    parentEmailsText: '',
+    studentEmail: '',
+    allowPersonalGmailOverride: false,
+    accessPin: '',
+    parentLinkCode: '',
+    accessStatus: 'ACTIVE' as StudentAccessStatus,
+    accessNote: '',
+  });
+  const [savingAccess, setSavingAccess] = useState(false);
+  const [copiedCard, setCopiedCard] = useState(false);
 
   // Smart Import State (CSV/Excel + Image OCR)
   const [showImport, setShowImport] = useState(false);
@@ -227,6 +258,80 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
     } finally {
       setImporting(false);
     }
+  }
+
+  function openAccessModal(st: StudentRecord) {
+    setEditingAccessStudent(st);
+    setCopiedCard(false);
+    setAccessForm({
+      parentPhone: st.parentPhone || '',
+      parentSecondaryPhone: st.parentSecondaryPhone || '',
+      parentEmailsText: (st.parentEmails || []).join(', '),
+      studentEmail: st.studentEmail || '',
+      allowPersonalGmailOverride: Boolean(st.allowPersonalGmailOverride),
+      accessPin: st.accessPin || generateAccessPin(),
+      parentLinkCode: st.parentLinkCode || '',
+      accessStatus: st.accessStatus || 'ACTIVE',
+      accessNote: st.accessNote || '',
+    });
+  }
+
+  async function handleSaveStudentAccess(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingAccessStudent) return;
+    setSavingAccess(true);
+    setErrorMsg('');
+    try {
+      const parentEmails = accessForm.parentEmailsText
+        .split(/[\s,;]+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => x.includes('@'));
+      const res = await apiRequest<{ student: StudentRecord }>(
+        `/api/v1/students/${editingAccessStudent.id}/access`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            parentPhone: accessForm.parentPhone.trim(),
+            parentSecondaryPhone: accessForm.parentSecondaryPhone.trim(),
+            parentEmails,
+            studentEmail: accessForm.studentEmail.trim().toLowerCase(),
+            allowPersonalGmailOverride: accessForm.allowPersonalGmailOverride,
+            accessPin: accessForm.accessPin.trim(),
+            parentLinkCode: accessForm.parentLinkCode.trim().toUpperCase(),
+            accessStatus: accessForm.accessStatus,
+            accessNote: accessForm.accessNote.trim(),
+          }),
+        },
+      );
+      setEditingAccessStudent(res.student);
+      await onRefresh();
+      setFeedbackMsg(
+        `Đã cập nhật quyền định danh & Mã PIN cho học sinh ${res.student.fullName} (${res.student.code}).`,
+      );
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể lưu quyền định danh.');
+    } finally {
+      setSavingAccess(false);
+    }
+  }
+
+  function handleCopyZaloAccessCard() {
+    if (!editingAccessStudent) return;
+    const previewStudent: StudentRecord = {
+      ...editingAccessStudent,
+      parentPhone: accessForm.parentPhone.trim(),
+      parentEmails: accessForm.parentEmailsText
+        .split(/[\s,;]+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => x.includes('@')),
+      studentEmail: accessForm.studentEmail.trim().toLowerCase() || undefined,
+      accessPin: accessForm.accessPin.trim(),
+      parentLinkCode: accessForm.parentLinkCode.trim().toUpperCase(),
+    };
+    const cardText = buildZaloAccessCardText(previewStudent);
+    navigator.clipboard?.writeText(cardText);
+    setCopiedCard(true);
+    setTimeout(() => setCopiedCard(false), 3000);
   }
 
   async function handleCreateStudent(e: React.FormEvent) {
@@ -581,10 +686,36 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                 <td className="py-3 px-4 text-xs">
                   <p className="font-medium text-slate-800">{st.parentName}</p>
                   <p className="font-mono-num text-slate-500">{st.parentPhone}</p>
+                  <p
+                    className={`text-[11px] font-semibold mt-0.5 ${
+                      st.accessStatus === 'LOCKED'
+                        ? 'text-red-700'
+                        : st.accessStatus === 'PENDING_VERIFY'
+                          ? 'text-amber-700'
+                          : 'text-emerald-700'
+                    }`}
+                  >
+                    {st.accessStatus === 'LOCKED'
+                      ? 'Định danh: Tạm khóa'
+                      : st.accessStatus === 'PENDING_VERIFY'
+                        ? 'Định danh: Chờ xác minh'
+                        : 'Định danh: Đang mở'}
+                    {isAdmin && st.accessPin ? ` · PIN ${st.accessPin}` : ''}
+                  </p>
                 </td>
                 {isStaff && (
                   <td className="py-3 px-4 text-right whitespace-nowrap">
                     <div className="inline-flex items-center gap-1.5">
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          onClick={() => openAccessModal(st)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
+                        >
+                          <KeyRound className="w-3 h-3 text-blue-900" />
+                          <span>Quyền &amp; PIN</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleQuickAttendance(st.id, 'PRESENT')}
@@ -614,6 +745,219 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           </tbody>
         </table>
       </div>
+
+      {/* Per-Student Identity Binding & PIN Governance Modal (Admin & SuperAdmin) */}
+      {editingAccessStudent && isAdmin && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSaveStudentAccess}
+            className="bg-white border border-slate-200 rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5"
+          >
+            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200">
+              <div>
+                <p className="text-xs font-semibold text-blue-900 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>
+                    Cấp quyền Định danh &amp; Mã PIN · {editingAccessStudent.code} ({editingAccessStudent.centerClass})
+                  </span>
+                </p>
+                <h2 className="text-lg font-bold text-slate-950 mt-0.5">
+                  {editingAccessStudent.fullName} — Khối {editingAccessStudent.grade}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingAccessStudent(null)}
+                className="text-slate-400 hover:text-slate-900 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  SĐT Phụ huynh chính (Zalo) *
+                </label>
+                <input
+                  type="tel"
+                  required
+                  value={accessForm.parentPhone}
+                  onChange={(e) => setAccessForm({ ...accessForm, parentPhone: e.target.value })}
+                  className="w-full h-9 px-3 text-sm font-mono-num border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  SĐT Phụ huynh phụ (Bố/Mẹ thứ 2)
+                </label>
+                <input
+                  type="tel"
+                  value={accessForm.parentSecondaryPhone}
+                  onChange={(e) =>
+                    setAccessForm({ ...accessForm, parentSecondaryPhone: e.target.value })
+                  }
+                  placeholder="Tùy chọn"
+                  className="w-full h-9 px-3 text-sm font-mono-num border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Gmail Phụ huynh (cách nhau bằng dấu phẩy nếu cả Bố và Mẹ)
+                </label>
+                <input
+                  type="text"
+                  value={accessForm.parentEmailsText}
+                  onChange={(e) =>
+                    setAccessForm({ ...accessForm, parentEmailsText: e.target.value })
+                  }
+                  placeholder="phuhuynh1@gmail.com, phuhuynh2@gmail.com"
+                  className="w-full h-9 px-3 text-sm font-mono-num border border-slate-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Mã PIN gia đình (6 số)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={accessForm.accessPin}
+                    onChange={(e) => setAccessForm({ ...accessForm, accessPin: e.target.value })}
+                    className="flex-1 h-9 px-3 text-sm font-mono-num border border-slate-300 rounded-lg"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAccessForm({ ...accessForm, accessPin: generateAccessPin() })
+                    }
+                    className="inline-flex items-center gap-1 h-9 px-3 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Tạo PIN</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Mã liên kết nhanh (Parent Link Code)
+                </label>
+                <input
+                  type="text"
+                  value={accessForm.parentLinkCode}
+                  onChange={(e) =>
+                    setAccessForm({
+                      ...accessForm,
+                      parentLinkCode: e.target.value.toUpperCase(),
+                    })
+                  }
+                  className="w-full h-9 px-3 text-sm font-mono-num uppercase border border-slate-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Gmail cá nhân Học sinh (Áp dụng từ Lớp {minGradeForGmail}+)
+                </label>
+                <input
+                  type="email"
+                  value={accessForm.studentEmail}
+                  onChange={(e) => setAccessForm({ ...accessForm, studentEmail: e.target.value })}
+                  placeholder="hocsinh@gmail.com"
+                  className="w-full h-9 px-3 text-sm font-mono-num border border-slate-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Trạng thái quyền truy cập
+                </label>
+                <select
+                  value={accessForm.accessStatus}
+                  onChange={(e) =>
+                    setAccessForm({
+                      ...accessForm,
+                      accessStatus: e.target.value as StudentAccessStatus,
+                    })
+                  }
+                  className="w-full h-9 px-3 text-sm border border-slate-300 rounded-lg bg-white"
+                >
+                  <option value="ACTIVE">Đang mở (ACTIVE)</option>
+                  <option value="PENDING_VERIFY">Chờ xác minh (PENDING_VERIFY)</option>
+                  <option value="LOCKED">Tạm khóa (LOCKED — chặn đăng nhập)</option>
+                </select>
+              </div>
+            </div>
+
+            <label className="flex items-start gap-2.5 p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={accessForm.allowPersonalGmailOverride}
+                onChange={(e) =>
+                  setAccessForm({
+                    ...accessForm,
+                    allowPersonalGmailOverride: e.target.checked,
+                  })
+                }
+                className="mt-0.5"
+              />
+              <span className="text-slate-700 leading-relaxed">
+                <strong className="text-slate-950">
+                  Cấp ngoại lệ Gmail cá nhân (vượt ngưỡng Lớp {minGradeForGmail})
+                </strong>{' '}
+                — Cho phép học sinh Khối {editingAccessStudent.grade} dùng Gmail cá nhân vào lớp khi có xác nhận từ Phụ huynh.
+              </span>
+            </label>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Ghi chú học vụ / xác minh (nội bộ)
+              </label>
+              <input
+                type="text"
+                value={accessForm.accessNote}
+                onChange={(e) => setAccessForm({ ...accessForm, accessNote: e.target.value })}
+                placeholder="VD: Phụ huynh đã xác nhận qua Zalo ngày 26/11"
+                className="w-full h-9 px-3 text-xs border border-slate-300 rounded-lg"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={handleCopyZaloAccessCard}
+                className="inline-flex items-center gap-1.5 px-3.5 h-9 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>
+                  {copiedCard ? 'Đã chép Thẻ Đăng nhập!' : 'Chép Thẻ Đăng nhập gửi Zalo'}
+                </span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingAccessStudent(null)}
+                  className="px-4 h-9 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingAccess}
+                  className="inline-flex items-center gap-1.5 px-4 h-9 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-60 rounded-lg cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{savingAccess ? 'Đang lưu...' : 'Lưu quyền định danh'}</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

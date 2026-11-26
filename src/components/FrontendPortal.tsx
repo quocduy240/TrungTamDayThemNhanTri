@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   Link2,
   LogIn,
+  LogOut,
   Pencil,
   Phone,
   Play,
@@ -25,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  AuthPolicy,
   AuthUser,
   CoursePackage,
   DayOfWeek,
@@ -33,6 +35,7 @@ import type {
   NationalExam,
   SiteConfig,
   TimetableSlot,
+  UserRole,
 } from '../types';
 import {
   apiRequest,
@@ -46,11 +49,17 @@ import {
 } from '../lib/api';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 import { InlineEditable } from './InlineEditable';
+import {
+  ClassroomAuthGate,
+  ParentAuthGate,
+  type StudentLoginResult,
+} from './PortalAuthGates';
 
 interface FrontendPortalProps {
   bootstrap: BootstrapPayload;
   workspace: WorkspacePayload | null;
   siteConfig: SiteConfig;
+  authPolicy: AuthPolicy;
   courses: CoursePackage[];
   currentUser: AuthUser | null;
   frontendMode: FrontendMode;
@@ -63,7 +72,21 @@ interface FrontendPortalProps {
   onQuickSaveCourse: (course: CoursePackage) => Promise<void>;
   onLinkStudent?: (linkCode: string) => Promise<{ studentName: string }>;
   onRefreshWorkspace?: () => Promise<void>;
-  onSignInGmail: () => Promise<void>;
+  onParentPhoneLogin: (phone: string, secret: string) => Promise<void>;
+  onStudentLogin: (payload: {
+    method: 'STUDENT_CODE' | 'PARENT_PHONE';
+    studentCode?: string;
+    phoneLast4?: string;
+    phone?: string;
+    secret?: string;
+    studentId?: string;
+  }) => Promise<StudentLoginResult>;
+  onSignInGmail: (
+    intent?: 'PARENT' | 'STUDENT' | 'TEACHER' | 'AUTO',
+    studentId?: string,
+  ) => Promise<StudentLoginResult | void>;
+  onQuickPreviewRole?: (role: UserRole) => Promise<void>;
+  onLogout: () => Promise<void>;
   onOpenRoleModal: () => void;
   onOpenCms: (tab?: string) => void;
   authBusy: boolean;
@@ -78,28 +101,28 @@ const MODE_OPTIONS: {
   icon: React.ReactNode;
 }[] = [
   {
-    id: 'TEACHER_STUDENT',
-    labelVi: 'Giáo viên & Học sinh',
-    labelEn: 'Teachers & Students',
-    descVi: 'Mặc định · Lịch học tuần, Kho đề GDPT 2018 & Quét bài AI',
-    shortVi: 'GV & Học sinh',
-    icon: <GraduationCap className="w-3.5 h-3.5" />,
+    id: 'NEW_CUSTOMER',
+    labelVi: 'Khách hàng mới',
+    labelEn: 'New Families',
+    descVi: 'Mặc định · Khóa học Cấp 1–2–3, Dự toán học phí, Ảnh cơ sở & Tư vấn 24/7',
+    shortVi: 'Khách hàng mới',
+    icon: <Sparkles className="w-3.5 h-3.5" />,
   },
   {
     id: 'PARENT',
     labelVi: 'Phụ huynh',
     labelEn: 'Parents',
-    descVi: 'Học bạ Online, Điểm danh, Lịch bù Thể dục & Đóng học phí QR',
+    descVi: 'Xác thực SĐT/Gmail · Học bạ Online, Điểm danh, Bù Thể dục & Học phí QR',
     shortVi: 'Phụ huynh',
     icon: <Users className="w-3.5 h-3.5" />,
   },
   {
-    id: 'NEW_CUSTOMER',
-    labelVi: 'Khách hàng mới',
-    labelEn: 'New Families',
-    descVi: 'Khóa học Cấp 1–2–3, Dự toán học phí, Ảnh cơ sở & Tư vấn 24/7',
-    shortVi: 'Khách hàng mới',
-    icon: <Sparkles className="w-3.5 h-3.5" />,
+    id: 'TEACHER_STUDENT',
+    labelVi: 'Giáo viên & Học sinh',
+    labelEn: 'Teachers & Students',
+    descVi: 'Xác thực vào lớp · Thời khóa biểu tuần, Kho đề GDPT 2018 & Quét bài AI',
+    shortVi: 'Vào lớp: GV & HS',
+    icon: <GraduationCap className="w-3.5 h-3.5" />,
   },
 ];
 
@@ -136,6 +159,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   bootstrap,
   workspace,
   siteConfig,
+  authPolicy,
   courses,
   currentUser,
   frontendMode,
@@ -148,7 +172,11 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   onQuickSaveCourse,
   onLinkStudent,
   onRefreshWorkspace,
+  onParentPhoneLogin,
+  onStudentLogin,
   onSignInGmail,
+  onQuickPreviewRole,
+  onLogout,
   onOpenRoleModal,
   onOpenCms,
   authBusy,
@@ -208,6 +236,15 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const [activeExam, setActiveExam] = useState<NationalExam | null>(null);
   const [examAnswers, setExamAnswers] = useState<Record<number, number>>({});
   const [examResult, setExamResult] = useState<{ correct: number; total: number; score: number } | null>(null);
+
+  // Auto-filter timetable to the authenticated student's center class
+  useEffect(() => {
+    if (currentUser?.role === 'STUDENT' && workspace?.students?.[0]?.centerClass) {
+      setFilterClass(workspace.students[0].centerClass);
+    } else if (!currentUser) {
+      setFilterClass('ALL');
+    }
+  }, [currentUser, workspace]);
 
   // --- Mode 2 (Parent) State ---
   const [parentQuery, setParentQuery] = useState('');
@@ -723,7 +760,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
             </button>
 
             {currentUser ? (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => onOpenCms('overview')}
@@ -732,25 +769,38 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   <LayoutDashboard className="w-3.5 h-3.5" />
                   <span>{isAdminOrSuper(currentUser.role) ? 'Backend CMS' : 'Cổng CMS'}</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => onLogout()}
+                  title="Đăng xuất"
+                  className="inline-flex items-center gap-1 h-9 px-2.5 text-xs font-medium text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Đăng xuất</span>
+                </button>
               </div>
             ) : (
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   disabled={authBusy}
-                  onClick={onSignInGmail}
+                  onClick={() => {
+                    onSignInGmail('AUTO').catch(() => {});
+                  }}
                   className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs sm:text-sm font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
                   <LogIn className="w-3.5 h-3.5" />
                   <span>{authBusy ? 'Đang kết nối...' : 'Đăng nhập Gmail'}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={onOpenRoleModal}
-                  className="hidden md:inline-flex items-center h-9 px-3 text-xs font-medium text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
-                >
-                  Dùng thử vai trò
-                </button>
+                {authPolicy.allowDemoPreview && (
+                  <button
+                    type="button"
+                    onClick={onOpenRoleModal}
+                    className="hidden md:inline-flex items-center h-9 px-3 text-xs font-medium text-slate-700 border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    Dùng thử vai trò
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -758,26 +808,66 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
       </header>
 
       {/* ===================================================================== */}
-      {/* MODE 1 (DEFAULT): GIÁO VIÊN & HỌC SINH                                */}
+      {/* MODE 1: GIÁO VIÊN & HỌC SINH (VÀO LỚP — CÓ CỔNG XÁC THỰC)             */}
       {/* ===================================================================== */}
       {frontendMode === 'TEACHER_STUDENT' && (
         <main>
-          {/* Compact Academic Hero */}
-          <section className="bg-slate-50 border-b border-slate-200">
-            <div className="max-w-7xl mx-auto px-6 py-10 lg:py-12">
-              <div className="grid lg:grid-cols-12 gap-8 items-stretch">
-                <div className="lg:col-span-7 flex flex-col justify-between space-y-5">
-                  <div className="space-y-3">
-                    <p className="text-xs font-semibold text-blue-900 flex items-center gap-2">
-                      <span>Cổng Giáo viên &amp; Học sinh (Mặc định)</span>
-                      <span aria-hidden="true" className="text-slate-300">·</span>
-                      <InlineEditable
-                        value={siteConfig.slogan}
-                        editMode={isEditingActive}
-                        onSave={(val) => onQuickSaveConfig({ slogan: val })}
-                        className="text-slate-500 font-medium"
-                      />
-                    </p>
+          {authPolicy.requireAuthForClassroom && !currentUser ? (
+            <ClassroomAuthGate
+              policy={authPolicy}
+              siteConfig={siteConfig}
+              authBusy={authBusy}
+              onStudentLogin={onStudentLogin}
+              onSignInGmail={onSignInGmail}
+              onQuickPreviewRole={onQuickPreviewRole}
+            />
+          ) : (
+            <>
+              {currentUser && (
+                <div className="bg-blue-50/70 border-b border-blue-200/80">
+                  <div className="max-w-7xl mx-auto px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2 text-slate-800">
+                      <ShieldCheck className="w-4 h-4 text-blue-900 shrink-0" />
+                      <span>
+                        Đang vào lớp: <strong>{currentUser.name}</strong> ·{' '}
+                        <span className="font-semibold text-blue-900">
+                          {roleLabel(currentUser.role, lang)}
+                        </span>
+                      </span>
+                      {currentUser.role === 'STUDENT' && workspace?.students?.[0] && (
+                        <span className="font-mono-num text-slate-600">
+                          · {workspace.students[0].code} ({workspace.students[0].centerClass})
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onLogout()}
+                      className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Đổi tài khoản / Đăng xuất</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Compact Academic Hero */}
+              <section className="bg-slate-50 border-b border-slate-200">
+                <div className="max-w-7xl mx-auto px-6 py-10 lg:py-12">
+                  <div className="grid lg:grid-cols-12 gap-8 items-stretch">
+                    <div className="lg:col-span-7 flex flex-col justify-between space-y-5">
+                      <div className="space-y-3">
+                        <p className="text-xs font-semibold text-blue-900 flex items-center gap-2">
+                          <span>Cổng Vào Lớp · Giáo viên &amp; Học sinh</span>
+                          <span aria-hidden="true" className="text-slate-300">·</span>
+                          <InlineEditable
+                            value={siteConfig.slogan}
+                            editMode={isEditingActive}
+                            onSave={(val) => onQuickSaveConfig({ slogan: val })}
+                            className="text-slate-500 font-medium"
+                          />
+                        </p>
                     <InlineEditable
                       as="h1"
                       value={siteConfig.heroTitleTeacherStudent}
@@ -812,7 +902,13 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     </a>
                     <button
                       type="button"
-                      onClick={() => (currentUser ? onOpenCms('scores') : onSignInGmail())}
+                      onClick={() => {
+                        if (currentUser) {
+                          onOpenCms('scores');
+                        } else {
+                          onSignInGmail('AUTO').catch(() => {});
+                        }
+                      }}
                       className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-red-700 bg-white border border-red-200 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                     >
                       <Sparkles className="w-4 h-4" />
@@ -1157,12 +1253,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
             </section>
           )}
 
-          {fanpageFeedSection}
+              {fanpageFeedSection}
+            </>
+          )}
         </main>
       )}
 
       {/* ===================================================================== */}
-      {/* MODE 2: PHỤ HUYNH (PARENT PORTAL)                                     */}
+      {/* MODE 2: PHỤ HUYNH (PARENT PORTAL — XÁC THỰC SĐT + PIN HOẶC GMAIL)     */}
       {/* ===================================================================== */}
       {frontendMode === 'PARENT' && (
         <main>
@@ -1189,36 +1287,39 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                 />
               </div>
 
-              {!workspace ? (
-                <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-bold text-slate-950 flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-blue-900" />
-                      <span>Bảo mật hồ sơ học tập &amp; học phí của con em</span>
-                    </p>
-                    <p className="text-xs text-slate-600">
-                      Vui lòng đăng nhập bằng Gmail Phụ huynh (hoặc chọn dùng thử vai trò Phụ huynh) để xem Học bạ Online, điểm danh, tải TKB Google Calendar và thanh toán học phí.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={onSignInGmail}
-                      className="px-4 py-2.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
-                    >
-                      Đăng nhập Gmail Phụ huynh
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onOpenRoleModal}
-                      className="px-4 py-2.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
-                    >
-                      Xem mẫu Học bạ Phụ huynh
-                    </button>
-                  </div>
-                </div>
+              {!workspace || !currentUser || currentUser.role === 'STUDENT' ? (
+                <ParentAuthGate
+                  policy={authPolicy}
+                  siteConfig={siteConfig}
+                  authBusy={authBusy}
+                  onParentPhoneLogin={onParentPhoneLogin}
+                  onSignInGmail={onSignInGmail}
+                  onOpenRoleModal={onOpenRoleModal}
+                  onQuickPreviewRole={onQuickPreviewRole}
+                />
               ) : (
                 <div className="space-y-6">
+                  {/* Signed-in Parent Session Strip */}
+                  <div className="bg-blue-50/70 border border-blue-200/80 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2 text-slate-800">
+                      <ShieldCheck className="w-4 h-4 text-blue-900 shrink-0" />
+                      <span>
+                        Phiên Cổng Phụ huynh: <strong>{currentUser.name}</strong> ·{' '}
+                        <span className="font-semibold text-blue-900">
+                          {roleLabel(currentUser.role, lang)}
+                        </span>
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onLogout()}
+                      className="inline-flex items-center gap-1 font-semibold text-red-700 hover:underline cursor-pointer whitespace-nowrap"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Đăng xuất</span>
+                    </button>
+                  </div>
+
                   {/* Search, Multi-Child Switcher & Parent Link Code Bar */}
                   <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">

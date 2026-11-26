@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  AuthPolicy,
   AuthUser,
   CoursePackage,
   FrontendMode,
@@ -46,6 +47,7 @@ import {
   subscribePublicTimetable,
   subscribeSiteConfig,
 } from './lib/firestoreStore';
+import { DEFAULT_AUTH_POLICY } from './lib/identityPolicy';
 import {
   apiRequest,
   isAdminOrSuper,
@@ -56,6 +58,7 @@ import {
   type WorkspacePayload,
 } from './lib/api';
 import { FrontendPortal } from './components/FrontendPortal';
+import type { StudentLoginResult } from './components/PortalAuthGates';
 
 const CmsOverview = lazy(() =>
   import('./components/CmsOverview').then((m) => ({ default: m.CmsOverview })),
@@ -102,8 +105,8 @@ export default function App() {
   const [liveTimetable, setLiveTimetable] = useState<TimetableSlot[]>([]);
   const [liveExams, setLiveExams] = useState<NationalExam[]>([]);
 
-  // Default Frontend Display Mode: Teacher & Student (user confirmed)
-  const [frontendMode, setFrontendMode] = useState<FrontendMode>('TEACHER_STUDENT');
+  // Default Frontend Display Mode: New Customer (Khách hàng mới)
+  const [frontendMode, setFrontendMode] = useState<FrontendMode>('NEW_CUSTOMER');
   const [modeInitializedFromConfig, setModeInitializedFromConfig] = useState(false);
 
   const [viewShell, setViewShell] = useState<'FRONTEND' | 'CMS'>('FRONTEND');
@@ -186,7 +189,16 @@ export default function App() {
     };
   }, [bootstrap, liveCourses, liveTimetable, liveExams]);
 
-  // Subscribe to Firebase Auth state (Gmail login)
+  const activeAuthPolicy = useMemo<AuthPolicy>(
+    () =>
+      siteConfig.authPolicy ||
+      workspace?.authPolicy ||
+      bootstrap?.authPolicy ||
+      DEFAULT_AUTH_POLICY,
+    [siteConfig.authPolicy, workspace?.authPolicy, bootstrap?.authPolicy],
+  );
+
+  // Subscribe to Firebase Auth state (Gmail login auto-restore)
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) {
@@ -195,18 +207,30 @@ export default function App() {
       setAuthBusy(true);
       try {
         const profile = await ensureUserProfileFromGmail(fbUser);
-        setCurrentUser(profile);
         const idToken = await fbUser.getIdToken();
-        const bridged = await apiRequest<{ token: string; user: AuthUser }>(
-          '/api/v1/auth/firebase-bridge',
-          {
-            method: 'POST',
-            body: JSON.stringify({ idToken, requestedRole: profile.role }),
-          },
-        );
-        setAuthToken(bridged.token);
-        const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
-        setWorkspace({ ...ws, user: profile });
+        const bridged = await apiRequest<{
+          token?: string;
+          user?: AuthUser;
+          requiresChildSelection?: boolean;
+        }>('/api/v1/auth/firebase-bridge', {
+          method: 'POST',
+          body: JSON.stringify({
+            idToken,
+            requestedRole: profile.role,
+            portalIntent: 'AUTO',
+          }),
+        });
+        if (bridged.token && bridged.user) {
+          const resolvedUser: AuthUser = {
+            ...bridged.user,
+            photoURL: fbUser.photoURL || profile.photoURL,
+            authProvider: 'GOOGLE_FIREBASE',
+          };
+          setAuthToken(bridged.token);
+          setCurrentUser(resolvedUser);
+          const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+          setWorkspace({ ...ws, user: resolvedUser });
+        }
       } catch (err) {
         console.error('Firebase auth sync error:', err);
       } finally {
@@ -216,34 +240,167 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  async function handleSignInGmail() {
+  async function handleSignInGmail(
+    portalIntent: 'PARENT' | 'STUDENT' | 'TEACHER' | 'AUTO' = 'AUTO',
+    studentId?: string,
+  ): Promise<StudentLoginResult | void> {
     setAuthBusy(true);
     setAuthError('');
     try {
-      const cred = await signInWithGmailPopup();
-      const profile = await ensureUserProfileFromGmail(cred.user);
-      setCurrentUser(profile);
-      const idToken = await cred.user.getIdToken();
-      const bridged = await apiRequest<{ token: string; user: AuthUser }>(
-        '/api/v1/auth/firebase-bridge',
-        {
-          method: 'POST',
-          body: JSON.stringify({ idToken, requestedRole: profile.role }),
-        },
-      );
+      const fbUser =
+        studentId && auth.currentUser ? auth.currentUser : (await signInWithGmailPopup()).user;
+      const profile = await ensureUserProfileFromGmail(fbUser);
+      const idToken = await fbUser.getIdToken();
+      const bridged = await apiRequest<{
+        token?: string;
+        user?: AuthUser;
+        requiresChildSelection?: boolean;
+        candidates?: StudentLoginResult['candidates'];
+      }>('/api/v1/auth/firebase-bridge', {
+        method: 'POST',
+        body: JSON.stringify({
+          idToken,
+          requestedRole: profile.role,
+          portalIntent,
+          studentId,
+        }),
+      });
+
+      if (bridged.requiresChildSelection && bridged.candidates) {
+        return {
+          requiresChildSelection: true,
+          candidates: bridged.candidates,
+        };
+      }
+
+      if (!bridged.token || !bridged.user) {
+        throw new Error('Không thể khởi tạo phiên đăng nhập Gmail.');
+      }
+
+      const resolvedUser: AuthUser = {
+        ...bridged.user,
+        photoURL: fbUser.photoURL || profile.photoURL,
+        authProvider: 'GOOGLE_FIREBASE',
+      };
       setAuthToken(bridged.token);
+      setCurrentUser(resolvedUser);
       const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
-      setWorkspace({ ...ws, user: profile });
+      setWorkspace({ ...ws, user: resolvedUser });
       setShowRoleModal(false);
-      showToast(`Chào mừng ${profile.name} (${roleLabel(profile.role, 'vi')})`);
+
+      if (portalIntent === 'PARENT') {
+        setFrontendMode('PARENT');
+        setViewShell('FRONTEND');
+      } else if (portalIntent === 'STUDENT' || portalIntent === 'TEACHER') {
+        setFrontendMode('TEACHER_STUDENT');
+        setViewShell('FRONTEND');
+      }
+      showToast(`Chào mừng ${resolvedUser.name} (${roleLabel(resolvedUser.role, 'vi')})`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Đăng nhập Gmail chưa thành công.';
       if (!msg.includes('popup-closed-by-user')) {
         setAuthError(msg);
       }
+      throw err;
     } finally {
       setAuthBusy(false);
     }
+  }
+
+  async function handleParentPhoneLogin(phone: string, secret: string): Promise<void> {
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const res = await apiRequest<{
+        token: string;
+        user: AuthUser;
+        matchedCount: number;
+      }>('/api/v1/auth/parent-login', {
+        method: 'POST',
+        body: JSON.stringify({ phone, secret }),
+      });
+      setAuthToken(res.token);
+      const localUser: AuthUser = { ...res.user, authProvider: 'LOCAL_SESSION' };
+      setCurrentUser(localUser);
+      const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace({ ...ws, user: localUser });
+      setFrontendMode('PARENT');
+      setViewShell('FRONTEND');
+      showToast(`Xác thực Phụ huynh thành công (${res.matchedCount} hồ sơ con).`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleStudentLogin(payload: {
+    method: 'STUDENT_CODE' | 'PARENT_PHONE';
+    studentCode?: string;
+    phoneLast4?: string;
+    phone?: string;
+    secret?: string;
+    studentId?: string;
+  }): Promise<StudentLoginResult> {
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const res = await apiRequest<{
+        token?: string;
+        user?: AuthUser;
+        requiresChildSelection?: boolean;
+        candidates?: StudentLoginResult['candidates'];
+      }>('/api/v1/auth/student-login', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      if (res.requiresChildSelection && res.candidates) {
+        return {
+          requiresChildSelection: true,
+          candidates: res.candidates,
+        };
+      }
+
+      if (!res.token || !res.user) {
+        throw new Error('Không thể khởi tạo phiên vào lớp.');
+      }
+
+      setAuthToken(res.token);
+      const localUser: AuthUser = { ...res.user, authProvider: 'LOCAL_SESSION' };
+      setCurrentUser(localUser);
+      const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace({ ...ws, user: localUser });
+      setFrontendMode('TEACHER_STUDENT');
+      setViewShell('FRONTEND');
+      showToast(`Chào mừng em ${localUser.name} đã vào lớp!`);
+      return {};
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleUpdateAuthPolicy(nextPolicy: AuthPolicy): Promise<void> {
+    const res = await apiRequest<{ authPolicy: AuthPolicy }>('/api/v1/system/auth-policy', {
+      method: 'PATCH',
+      body: JSON.stringify(nextPolicy),
+    });
+    if (currentUser?.authProvider === 'GOOGLE_FIREBASE' && isSuperAdminRole(currentUser.role)) {
+      try {
+        const saved = await saveSiteConfigPatch(
+          siteConfig,
+          { authPolicy: res.authPolicy },
+          currentUser.email,
+          true,
+        );
+        setSiteConfig(saved);
+      } catch {
+        setSiteConfig((prev) => ({ ...prev, authPolicy: res.authPolicy }));
+      }
+    } else {
+      setSiteConfig((prev) => ({ ...prev, authPolicy: res.authPolicy }));
+    }
+    setBootstrap((prev) => (prev ? { ...prev, authPolicy: res.authPolicy } : prev));
+    await refreshWorkspace();
+    showToast('Đã lưu Chính sách Định danh & Xác thực toàn hệ thống.');
   }
 
   async function signInPreviewRole(role: UserRole) {
@@ -262,6 +419,9 @@ export default function App() {
       setShowRoleModal(false);
       if (role === 'PARENT') {
         setFrontendMode('PARENT');
+        setViewShell('FRONTEND');
+      } else if (role === 'STUDENT') {
+        setFrontendMode('TEACHER_STUDENT');
         setViewShell('FRONTEND');
       } else {
         setViewShell('CMS');
@@ -420,6 +580,7 @@ export default function App() {
           bootstrap={mergedBootstrap || bootstrap}
           workspace={workspace}
           siteConfig={siteConfig}
+          authPolicy={activeAuthPolicy}
           courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
           currentUser={currentUser}
           frontendMode={frontendMode}
@@ -432,7 +593,11 @@ export default function App() {
           onQuickSaveCourse={handleQuickSaveCourse}
           onLinkStudent={handleLinkStudent}
           onRefreshWorkspace={refreshWorkspace}
+          onParentPhoneLogin={handleParentPhoneLogin}
+          onStudentLogin={handleStudentLogin}
           onSignInGmail={handleSignInGmail}
+          onQuickPreviewRole={activeAuthPolicy.allowDemoPreview ? signInPreviewRole : undefined}
+          onLogout={handleLogout}
           onOpenRoleModal={() => setShowRoleModal(true)}
           onOpenCms={(tab) => {
             if (tab) setActiveTab(tab as CmsTab);
@@ -634,12 +799,15 @@ export default function App() {
                   <SystemConfigCms
                     currentUser={currentUser}
                     siteConfig={siteConfig}
+                    authPolicy={activeAuthPolicy}
+                    auditLogs={workspace.auditLogs || []}
                     courses={liveCourses.length > 0 ? liveCourses : bootstrap.courses}
                     bootstrap={mergedBootstrap || bootstrap}
                     onConfigSaved={(next) => {
                       setSiteConfig(next);
                       showToast('Đã đồng bộ cấu hình hệ thống.');
                     }}
+                    onUpdateAuthPolicy={handleUpdateAuthPolicy}
                     onJumpToInlineEdit={() => {
                       setEditMode(true);
                       setViewShell('FRONTEND');
@@ -716,7 +884,9 @@ export default function App() {
               <button
                 type="button"
                 disabled={authBusy}
-                onClick={handleSignInGmail}
+                onClick={() => {
+                  handleSignInGmail('AUTO').catch(() => {});
+                }}
                 className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 text-sm font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-60 rounded-lg cursor-pointer"
               >
                 <LogIn className="w-4 h-4" />
@@ -724,29 +894,31 @@ export default function App() {
               </button>
             </div>
 
-            <div className="space-y-2.5 pt-2 border-t border-slate-200">
-              <p className="text-xs font-semibold text-slate-500">
-                Hoặc trải nghiệm nhanh giao diện theo vai trò (chế độ xem thử):
-              </p>
-              <div className="grid sm:grid-cols-3 gap-2.5">
-                {[
-                  { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Điểm danh & TKB' },
-                  { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'Học bạ & Học phí' },
-                  { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'Đề thi & AI chấm' },
-                ].map((item) => (
-                  <button
-                    key={item.role}
-                    type="button"
-                    disabled={authBusy}
-                    onClick={() => signInPreviewRole(item.role)}
-                    className="text-left p-3 border border-slate-200 hover:border-blue-900 hover:bg-blue-50/40 rounded-lg cursor-pointer"
-                  >
-                    <p className="text-xs font-bold text-slate-950">{item.label}</p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">{item.desc}</p>
-                  </button>
-                ))}
+            {activeAuthPolicy.allowDemoPreview && (
+              <div className="space-y-2.5 pt-2 border-t border-slate-200">
+                <p className="text-xs font-semibold text-slate-500">
+                  Hoặc trải nghiệm nhanh giao diện theo vai trò (chế độ xem thử):
+                </p>
+                <div className="grid sm:grid-cols-3 gap-2.5">
+                  {[
+                    { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Điểm danh & TKB' },
+                    { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'Học bạ & Học phí' },
+                    { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'Đề thi & AI chấm' },
+                  ].map((item) => (
+                    <button
+                      key={item.role}
+                      type="button"
+                      disabled={authBusy}
+                      onClick={() => signInPreviewRole(item.role)}
+                      className="text-left p-3 border border-slate-200 hover:border-blue-900 hover:bg-blue-50/40 rounded-lg cursor-pointer"
+                    >
+                      <p className="text-xs font-bold text-slate-950">{item.label}</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">{item.desc}</p>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}

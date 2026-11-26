@@ -22,6 +22,40 @@ export interface AuthUser {
   linkedStudentIds?: string[];
   linkedTeacherId?: string;
   authProvider?: 'GOOGLE_FIREBASE' | 'LOCAL_SESSION';
+  loginChannel?:
+    | 'GMAIL'
+    | 'STAFF_GMAIL'
+    | 'PARENT_GMAIL'
+    | 'STUDENT_GMAIL'
+    | 'PARENT_PHONE'
+    | 'STUDENT_CODE'
+    | 'DEMO';
+}
+
+export interface AuthPolicy {
+  allowParentPhoneLogin: boolean;
+  requireParentPinOrCode: boolean;
+  allowParentGmailLogin: boolean;
+  allowStudentCodeLogin: boolean;
+  requirePhoneLast4ForStudentCode: boolean;
+  allowStudentParentPhoneLogin: boolean;
+  allowStudentParentGmailLogin: boolean;
+  allowStudentPersonalGmail: boolean;
+  minGradeForPersonalGmail: number;
+  requireAuthForClassroom: boolean;
+  allowDemoPreview: boolean;
+}
+
+export interface AccessAuditLog {
+  id: string;
+  createdAt: string;
+  actorEmail: string;
+  actorRole: UserRole | 'GUEST';
+  action: string;
+  target?: string;
+  targetLabel?: string;
+  detail: string;
+  status?: 'SUCCESS' | 'DENIED' | 'UPDATED';
 }
 
 export interface SiteConfig {
@@ -57,6 +91,7 @@ export interface SiteConfig {
   enableAiAdvisor: boolean;
   enableOnlineExams: boolean;
   enableOnlinePayment: boolean;
+  authPolicy?: AuthPolicy;
   updatedBy?: string;
   updatedAt?: string;
 }
@@ -116,6 +151,8 @@ export interface Teacher {
   status: 'ACTIVE' | 'ON_LEAVE';
 }
 
+export type StudentAccessStatus = 'ACTIVE' | 'PENDING_VERIFY' | 'LOCKED';
+
 export interface Student {
   id: string;
   ownerUid?: string;
@@ -131,7 +168,15 @@ export interface Student {
   room: string;
   parentName: string;
   parentPhone: string;
+  parentSecondaryPhone?: string;
   parentZalo: string;
+  parentEmails?: string[];
+  studentEmail?: string;
+  allowPersonalGmailOverride?: boolean;
+  accessPin?: string;
+  accessStatus?: StudentAccessStatus;
+  accessNote?: string;
+  lastLoginAt?: string;
   packageType: 'TUTORING' | 'ALL_IN_ONE' | 'PER_SUBJECT';
   hasBoarding: boolean;
   hasShuttle: boolean;
@@ -142,6 +187,8 @@ export interface Student {
   enrolledSubjects: string[];
   status: 'ACTIVE' | 'PAUSED';
 }
+
+export type StudentRecord = Student;
 
 export interface TimetableSlot {
   id: string;
@@ -292,5 +339,7 @@ export interface DatabaseState {
   exams: NationalExam[];
   tickets: FeedbackTicket[];
   notifications: AppNotification[];
+  authPolicy?: AuthPolicy;
+  auditLogs?: AccessAuditLog[];
   adminPasscodeHash?: string;
 }

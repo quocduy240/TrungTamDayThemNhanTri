@@ -3,6 +3,7 @@ import {
   Check,
   Database,
   Globe,
+  History,
   Lock,
   Pencil,
   Save,
@@ -13,6 +14,8 @@ import {
   Users,
 } from 'lucide-react';
 import type {
+  AccessAuditLog,
+  AuthPolicy,
   AuthUser,
   CoursePackage,
   FrontendMode,
@@ -29,6 +32,7 @@ import {
   subscribeRoleInvites,
   subscribeUsersList,
   syncInitialSeedToFirestore,
+  updateUserActiveStatus,
   updateUserProfileRole,
   upsertRoleInvite,
 } from '../lib/firestoreStore';
@@ -37,26 +41,35 @@ import { formatVnd, isSuperAdminRole, roleLabel, type BootstrapPayload } from '.
 interface SystemConfigCmsProps {
   currentUser: AuthUser;
   siteConfig: SiteConfig;
+  authPolicy: AuthPolicy;
+  auditLogs: AccessAuditLog[];
   courses: CoursePackage[];
   bootstrap: BootstrapPayload;
   onConfigSaved: (next: SiteConfig) => void;
+  onUpdateAuthPolicy: (next: AuthPolicy) => Promise<void>;
   onJumpToInlineEdit: () => void;
 }
 
 export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
   currentUser,
   siteConfig,
+  authPolicy,
+  auditLogs,
   courses,
   bootstrap,
   onConfigSaved,
+  onUpdateAuthPolicy,
   onJumpToInlineEdit,
 }) => {
   const isSuperAdmin = isSuperAdminRole(currentUser.role);
+  const canManageOperationalRbac = isSuperAdmin || currentUser.role === 'ADMIN';
   const [subTab, setSubTab] = useState<'content' | 'system' | 'rbac'>('content');
 
   // Local editable form state synced with Firestore SiteConfig
   const [form, setForm] = useState<SiteConfig>(siteConfig);
+  const [policyDraft, setPolicyDraft] = useState<AuthPolicy>(authPolicy);
   const [saving, setSaving] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -80,19 +93,22 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
   }, [siteConfig]);
 
   useEffect(() => {
+    setPolicyDraft(authPolicy);
+  }, [authPolicy]);
+
+  useEffect(() => {
     setCourseDrafts(courses);
   }, [courses]);
 
   useEffect(() => {
     if (currentUser.authProvider !== 'GOOGLE_FIREBASE') return;
-    const canReadUsers = currentUser.role === 'SUPER_ADMIN' || currentUser.role === 'ADMIN';
-    const unsubUsers = subscribeUsersList(canReadUsers, setUsersList);
-    const unsubInvites = subscribeRoleInvites(isSuperAdmin, setInvitesList);
+    const unsubUsers = subscribeUsersList(canManageOperationalRbac, setUsersList);
+    const unsubInvites = subscribeRoleInvites(canManageOperationalRbac, setInvitesList);
     return () => {
       unsubUsers();
       unsubInvites();
     };
-  }, [currentUser.authProvider, currentUser.role, isSuperAdmin]);
+  }, [currentUser.authProvider, canManageOperationalRbac]);
 
   async function handleSaveConfig(e: React.FormEvent) {
     e.preventDefault();
@@ -133,9 +149,29 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
     }
   }
 
+  async function handleSaveAuthPolicy(e: React.FormEvent) {
+    e.preventDefault();
+    if (!isSuperAdmin) return;
+    setSavingPolicy(true);
+    setStatusMsg('');
+    setErrorMsg('');
+    try {
+      await onUpdateAuthPolicy(policyDraft);
+      setStatusMsg('Đã cập nhật Chính sách Định danh & Xác thực toàn hệ thống.');
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể lưu chính sách định danh.');
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
+
   async function handleCreateInvite(e: React.FormEvent) {
     e.preventDefault();
-    if (!isSuperAdmin || !newInvite.email.trim()) return;
+    if (!canManageOperationalRbac || !newInvite.email.trim()) return;
+    if (!isSuperAdmin && newInvite.role === 'ADMIN') {
+      setErrorMsg('Chỉ SuperAdmin mới được cấp quyền Admin Vận hành.');
+      return;
+    }
     setErrorMsg('');
     setStatusMsg('');
     try {
@@ -146,7 +182,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
         linkedStudentId: newInvite.linkedStudentId.trim() || undefined,
         createdBy: currentUser.email,
       });
-      setStatusMsg(`Đã cấp quyền ${newInvite.role} cho Gmail ${newInvite.email.trim().toLowerCase()}.`);
+      setStatusMsg(`Đã cấp quyền ${roleLabel(newInvite.role, 'vi')} cho Gmail ${newInvite.email.trim().toLowerCase()}.`);
       setNewInvite({ email: '', role: 'TEACHER', displayName: '', linkedStudentId: '' });
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể cấp quyền Gmail.');
@@ -202,7 +238,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
         {[
           { id: 'content', label: 'Nội dung 3 giao diện & Khóa học', icon: <Sliders className="w-4 h-4" /> },
           { id: 'system', label: 'Tên miền, SEO & Thanh toán (SuperAdmin)', icon: <Globe className="w-4 h-4" /> },
-          { id: 'rbac', label: 'Phân quyền Gmail RBAC (SuperAdmin)', icon: <ShieldCheck className="w-4 h-4" /> },
+          { id: 'rbac', label: 'Chính sách Định danh & Phân quyền RBAC', icon: <ShieldCheck className="w-4 h-4" /> },
         ].map((t) => (
           <button
             key={t.id}
@@ -270,9 +306,9 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                   onChange={(e) => setForm({ ...form, defaultFrontendMode: e.target.value as FrontendMode })}
                   className="w-full h-9 px-3 text-sm border border-slate-300 rounded-lg"
                 >
-                  <option value="TEACHER_STUDENT">Giáo viên &amp; Học sinh (Mặc định khuyến nghị)</option>
-                  <option value="PARENT">Phụ huynh</option>
-                  <option value="NEW_CUSTOMER">Khách hàng mới</option>
+                  <option value="NEW_CUSTOMER">Khách hàng mới (Mặc định khuyến nghị)</option>
+                  <option value="PARENT">Phụ huynh (Yêu cầu xác thực SĐT / Gmail)</option>
+                  <option value="TEACHER_STUDENT">Giáo viên &amp; Học sinh (Cổng vào lớp)</option>
                 </select>
               </div>
               <div>
@@ -653,7 +689,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
         </div>
       )}
 
-      {/* TAB 3: GMAIL RBAC MANAGEMENT (SuperAdmin ONLY) */}
+      {/* TAB 3: IDENTITY POLICY MATRIX, SCOPED RBAC & AUDIT LOGS */}
       {subTab === 'rbac' && (
         <div className="space-y-6">
           <div className="grid md:grid-cols-2 gap-4">
@@ -661,25 +697,174 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
               <p className="text-xs font-bold text-red-700 uppercase tracking-wider">SuperAdmin Hệ thống (Gốc)</p>
               <p className="font-mono-num text-sm font-bold text-slate-950">{SUPER_ADMIN_EMAIL}</p>
               <p className="text-xs text-slate-600">
-                Toàn quyền tên miền daythemnhantri.com, SEO, tài khoản ngân hàng, cấp/thu hồi quyền và chỉnh sửa CMS 1-Click.
+                Giữ toàn bộ công tắc Chính sách Định danh (ngưỡng lớp dùng Gmail cá nhân, PIN, chế độ xem thử), cấp/gỡ Admin và kiểm soát Nhật ký hệ thống.
               </p>
             </div>
             <div className="p-5 bg-white border border-slate-200 rounded-xl space-y-1.5">
               <p className="text-xs font-bold text-blue-900 uppercase tracking-wider">Admin Vận hành (Gốc)</p>
               <p className="font-mono-num text-sm font-bold text-slate-950">{ADMIN_EMAIL}</p>
               <p className="text-xs text-slate-600">
-                Quản lý vận hành học vụ, khóa học, thời khóa biểu, học sinh, điểm số, thu chi và sửa nội dung 1-Click.
+                Cấp/khóa tài khoản Giáo viên, Phụ huynh, Học sinh; gắn SĐT/Gmail &amp; cấp lại Mã PIN cho từng hồ sơ học sinh trong mục Học sinh &amp; Điểm danh.
               </p>
             </div>
           </div>
 
-          {isSuperAdmin && currentUser.authProvider === 'GOOGLE_FIREBASE' ? (
-            <>
-              <form onSubmit={handleCreateInvite} className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-                <h2 className="text-sm font-bold text-slate-950 flex items-center gap-2">
-                  <UserPlus className="w-4 h-4 text-blue-900" />
-                  <span>Cấp quyền trước theo địa chỉ Gmail (Role Invite)</span>
+          {/* SECTION 1: AUTH POLICY MATRIX (SUPER_ADMIN EDITABLE, ADMIN READ-ONLY) */}
+          <form
+            onSubmit={handleSaveAuthPolicy}
+            className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div>
+                <h2 className="text-base font-bold text-slate-950">
+                  Bảng Chính sách Định danh &amp; Kiểm soát Truy cập (Auth Policy)
                 </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Kiểm soát trực tiếp Cổng Phụ huynh, Cổng Vào lớp Học sinh và quy tắc độ tuổi dùng Gmail cá nhân.
+                </p>
+              </div>
+              {isSuperAdmin ? (
+                <button
+                  type="submit"
+                  disabled={savingPolicy}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{savingPolicy ? 'Đang lưu...' : 'Lưu chính sách định danh'}</span>
+                </button>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800">
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Chỉ SuperAdmin được thay đổi chính sách gốc</span>
+                </span>
+              )}
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-3 text-xs">
+              {[
+                {
+                  key: 'allowParentPhoneLogin' as const,
+                  label: 'Cho phép Phụ huynh đăng nhập bằng SĐT đã đăng ký',
+                  desc: 'Áp dụng cho Cổng Phụ huynh (Học bạ & Học phí QR).',
+                },
+                {
+                  key: 'requireParentPinOrCode' as const,
+                  label: 'Bắt buộc kèm Mã PIN gia đình hoặc Mã HS con khi nhập SĐT',
+                  desc: 'Ngăn người lạ dò số điện thoại xem trộm học bạ.',
+                },
+                {
+                  key: 'allowParentGmailLogin' as const,
+                  label: 'Cho phép Phụ huynh đăng nhập bằng Gmail (Google Auth)',
+                  desc: 'Tự động nhận diện toàn bộ con gắn cùng Gmail Phụ huynh.',
+                },
+                {
+                  key: 'requireAuthForClassroom' as const,
+                  label: 'Yêu cầu xác thực khi vào giao diện Giáo viên & Học sinh',
+                  desc: 'Hiển thị Cổng Xác thực Vào lớp trước khi mở TKB & Kho đề.',
+                },
+                {
+                  key: 'allowStudentCodeLogin' as const,
+                  label: 'Cho phép Học sinh vào lớp bằng Mã số học sinh',
+                  desc: 'VD: NT-6A1-01 hoặc Mã liên kết nhanh NT6A1H.',
+                },
+                {
+                  key: 'requirePhoneLast4ForStudentCode' as const,
+                  label: 'Bắt buộc thêm 4 số cuối SĐT Phụ huynh khi nhập Mã HS',
+                  desc: 'Tăng thêm 1 lớp xác minh phụ nếu cần bảo mật cao hơn.',
+                },
+                {
+                  key: 'allowStudentParentPhoneLogin' as const,
+                  label: 'Cho phép Học sinh vào lớp bằng SĐT Phụ huynh',
+                  desc: 'Tự hiện danh sách chọn tên nếu gia đình có từ 2 con trở lên.',
+                },
+                {
+                  key: 'allowStudentParentGmailLogin' as const,
+                  label: 'Cho phép Học sinh vào lớp bằng Gmail Phụ huynh',
+                  desc: 'Áp dụng cho mọi khối lớp (đặc biệt Tiểu học & Lớp 6–7).',
+                },
+                {
+                  key: 'allowStudentPersonalGmail' as const,
+                  label: 'Cho phép Học sinh đủ lớp dùng Gmail cá nhân vào lớp',
+                  desc: 'Áp dụng theo ngưỡng lớp bên dưới hoặc ngoại lệ do Admin cấp.',
+                },
+                {
+                  key: 'allowDemoPreview' as const,
+                  label: 'Bật nút Xem thử vai trò / Điền mẫu thử trên giao diện',
+                  desc: 'Nên tắt khi vận hành chính thức năm học để khóa tài khoản mẫu.',
+                },
+              ].map((item) => (
+                <label
+                  key={item.key}
+                  className={`flex items-start gap-2.5 p-3.5 border rounded-lg ${
+                    isSuperAdmin
+                      ? 'border-slate-200 hover:bg-slate-50 cursor-pointer'
+                      : 'border-slate-200 bg-slate-50/60 cursor-not-allowed'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    disabled={!isSuperAdmin}
+                    checked={Boolean(policyDraft[item.key])}
+                    onChange={(e) =>
+                      setPolicyDraft({ ...policyDraft, [item.key]: e.target.checked })
+                    }
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <p className="font-semibold text-slate-900">{item.label}</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">{item.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
+              <div className="text-xs">
+                <p className="font-bold text-slate-950">
+                  Ngưỡng khối lớp tối thiểu để Học sinh được dùng Gmail cá nhân
+                </p>
+                <p className="text-slate-500 mt-0.5">
+                  Học sinh nhỏ hơn lớp này cần vào bằng Mã HS, SĐT/Gmail Phụ huynh hoặc có ngoại lệ từ Admin.
+                </p>
+              </div>
+              <select
+                disabled={!isSuperAdmin}
+                value={policyDraft.minGradeForPersonalGmail}
+                onChange={(e) =>
+                  setPolicyDraft({
+                    ...policyDraft,
+                    minGradeForPersonalGmail: Number(e.target.value),
+                  })
+                }
+                className="h-9 px-3 text-xs font-semibold border border-slate-300 rounded-lg bg-white disabled:bg-slate-100"
+              >
+                {[6, 7, 8, 9, 10, 11, 12].map((g) => (
+                  <option key={g} value={g}>
+                    Từ Lớp {g} trở lên {g === 8 ? '(Khuyến nghị)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </form>
+
+          {/* SECTION 2: GMAIL RBAC INVITES & USERS (SUPERADMIN: ALL ROLES, ADMIN: TEACHER/PARENT/STUDENT) */}
+          {canManageOperationalRbac && currentUser.authProvider === 'GOOGLE_FIREBASE' ? (
+            <>
+              <form
+                onSubmit={handleCreateInvite}
+                className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-bold text-slate-950 flex items-center gap-2">
+                    <UserPlus className="w-4 h-4 text-blue-900" />
+                    <span>Cấp quyền trước theo địa chỉ Gmail (Role Invite)</span>
+                  </h2>
+                  {!isSuperAdmin && (
+                    <span className="text-[11px] text-slate-500">
+                      Phạm vi Admin: Cấp &amp; thu hồi Giáo viên, Phụ huynh, Học sinh
+                    </span>
+                  )}
+                </div>
                 <div className="grid sm:grid-cols-4 gap-3">
                   <input
                     required
@@ -692,11 +877,14 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                   <select
                     value={newInvite.role}
                     onChange={(e) =>
-                      setNewInvite({ ...newInvite, role: e.target.value as Exclude<UserRole, 'SUPER_ADMIN'> })
+                      setNewInvite({
+                        ...newInvite,
+                        role: e.target.value as Exclude<UserRole, 'SUPER_ADMIN'>,
+                      })
                     }
-                    className="h-9 px-3 text-xs border border-slate-300 rounded-lg"
+                    className="h-9 px-3 text-xs border border-slate-300 rounded-lg bg-white"
                   >
-                    <option value="ADMIN">Admin Vận hành</option>
+                    {isSuperAdmin && <option value="ADMIN">Admin Vận hành</option>}
                     <option value="TEACHER">Giáo viên</option>
                     <option value="PARENT">Phụ huynh</option>
                     <option value="STUDENT">Học sinh</option>
@@ -718,23 +906,37 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
 
                 {invitesList.length > 0 && (
                   <div className="pt-3 border-t border-slate-100 divide-y divide-slate-100">
-                    {invitesList.map((inv) => (
-                      <div key={inv.email} className="py-2.5 flex items-center justify-between gap-4 text-xs">
-                        <div>
-                          <span className="font-mono-num font-semibold text-slate-950">{inv.email}</span>
-                          <span className="ml-2 text-blue-900 font-semibold">{roleLabel(inv.role, 'vi')}</span>
-                          {inv.displayName && <span className="ml-2 text-slate-500">· {inv.displayName}</span>}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => deleteRoleInvite(inv.email)}
-                          className="text-red-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                    {invitesList.map((inv) => {
+                      const canRevoke = isSuperAdmin || inv.role !== 'ADMIN';
+                      return (
+                        <div
+                          key={inv.email}
+                          className="py-2.5 flex items-center justify-between gap-4 text-xs"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Thu hồi</span>
-                        </button>
-                      </div>
-                    ))}
+                          <div>
+                            <span className="font-mono-num font-semibold text-slate-950">
+                              {inv.email}
+                            </span>
+                            <span className="ml-2 text-blue-900 font-semibold">
+                              {roleLabel(inv.role, 'vi')}
+                            </span>
+                            {inv.displayName && (
+                              <span className="ml-2 text-slate-500">· {inv.displayName}</span>
+                            )}
+                          </div>
+                          {canRevoke && (
+                            <button
+                              type="button"
+                              onClick={() => deleteRoleInvite(inv.email)}
+                              className="text-red-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Thu hồi</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </form>
@@ -751,29 +953,62 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                         <th className="py-2 pr-4 font-semibold">Gmail</th>
                         <th className="py-2 pr-4 font-semibold">Họ tên</th>
                         <th className="py-2 pr-4 font-semibold">Vai trò hiện tại</th>
+                        <th className="py-2 pr-4 font-semibold text-right">Trạng thái</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {usersList.map((u) => (
-                        <tr key={u.uid}>
-                          <td className="py-2.5 pr-4 font-mono-num text-slate-900">{u.email}</td>
-                          <td className="py-2.5 pr-4 font-medium text-slate-800">{u.displayName}</td>
-                          <td className="py-2.5 pr-4">
-                            <select
-                              disabled={u.email === SUPER_ADMIN_EMAIL}
-                              value={u.role}
-                              onChange={(e) => updateUserProfileRole(u.uid, e.target.value as UserRole)}
-                              className="h-8 px-2.5 text-xs border border-slate-300 rounded-lg bg-white disabled:bg-slate-100"
-                            >
-                              <option value="SUPER_ADMIN">SuperAdmin</option>
-                              <option value="ADMIN">Admin Vận hành</option>
-                              <option value="TEACHER">Giáo viên</option>
-                              <option value="PARENT">Phụ huynh</option>
-                              <option value="STUDENT">Học sinh</option>
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
+                      {usersList.map((u) => {
+                        const isProtectedRoot = u.email === SUPER_ADMIN_EMAIL;
+                        const canEditRow =
+                          !isProtectedRoot &&
+                          (isSuperAdmin ||
+                            (u.role !== 'SUPER_ADMIN' && u.role !== 'ADMIN'));
+                        return (
+                          <tr key={u.uid}>
+                            <td className="py-2.5 pr-4 font-mono-num text-slate-900">{u.email}</td>
+                            <td className="py-2.5 pr-4 font-medium text-slate-800">
+                              {u.displayName}
+                            </td>
+                            <td className="py-2.5 pr-4">
+                              <select
+                                disabled={!canEditRow}
+                                value={u.role}
+                                onChange={(e) =>
+                                  updateUserProfileRole(u.uid, e.target.value as UserRole)
+                                }
+                                className="h-8 px-2.5 text-xs border border-slate-300 rounded-lg bg-white disabled:bg-slate-100"
+                              >
+                                {isSuperAdmin && <option value="SUPER_ADMIN">SuperAdmin</option>}
+                                {(isSuperAdmin || u.role === 'ADMIN') && (
+                                  <option value="ADMIN">Admin Vận hành</option>
+                                )}
+                                <option value="TEACHER">Giáo viên</option>
+                                <option value="PARENT">Phụ huynh</option>
+                                <option value="STUDENT">Học sinh</option>
+                              </select>
+                            </td>
+                            <td className="py-2.5 pr-4 text-right whitespace-nowrap">
+                              {canEditRow ? (
+                                <button
+                                  type="button"
+                                  onClick={() => updateUserActiveStatus(u.uid, !u.active)}
+                                  className={`px-2.5 py-1 text-xs font-semibold rounded-md cursor-pointer ${
+                                    u.active
+                                      ? 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100'
+                                      : 'text-red-800 bg-red-50 hover:bg-red-100'
+                                  }`}
+                                >
+                                  {u.active ? 'Đang mở · Khóa' : 'Đang khóa · Mở lại'}
+                                </button>
+                              ) : (
+                                <span className="text-slate-500 font-medium">
+                                  {u.active ? 'Hoạt động' : 'Đã khóa'}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -781,9 +1016,59 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
             </>
           ) : (
             <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600">
-              Đăng nhập bằng tài khoản Gmail <strong>{SUPER_ADMIN_EMAIL}</strong> để quản lý danh sách người dùng và cấp quyền trực tiếp trên Cloud Firestore.
+              Đăng nhập bằng Gmail <strong>{SUPER_ADMIN_EMAIL}</strong> hoặc{' '}
+              <strong>{ADMIN_EMAIL}</strong> để cấp/khóa lời mời Gmail trực tiếp trên Cloud Firestore.
             </div>
           )}
+
+          {/* SECTION 3: ACCESS AUDIT LOGS */}
+          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-slate-950 flex items-center gap-2">
+                <History className="w-4 h-4 text-blue-900" />
+                <span>Nhật ký Định danh &amp; Thay đổi Quyền (Audit Log)</span>
+              </h2>
+              <span className="font-mono-num text-[11px] text-slate-500">
+                {auditLogs.length} bản ghi gần nhất
+              </span>
+            </div>
+            {auditLogs.length === 0 ? (
+              <p className="text-xs text-slate-400">Chưa có sự kiện định danh nào được ghi nhận.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500">
+                      <th className="py-2 pr-3 font-semibold">Thời gian</th>
+                      <th className="py-2 pr-3 font-semibold">Tác nhân</th>
+                      <th className="py-2 pr-3 font-semibold">Hành động</th>
+                      <th className="py-2 pr-3 font-semibold">Đối tượng</th>
+                      <th className="py-2 pr-3 font-semibold">Chi tiết</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {auditLogs.slice(0, 20).map((log) => (
+                      <tr key={log.id}>
+                        <td className="py-2.5 pr-3 font-mono-num text-slate-500 whitespace-nowrap">
+                          {log.createdAt.slice(0, 16).replace('T', ' ')}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono-num text-slate-800 whitespace-nowrap">
+                          {log.actorEmail}
+                        </td>
+                        <td className="py-2.5 pr-3 font-semibold text-blue-900 whitespace-nowrap">
+                          {log.action}
+                        </td>
+                        <td className="py-2.5 pr-3 font-medium text-slate-900 whitespace-nowrap">
+                          {log.targetLabel || log.target || '—'}
+                        </td>
+                        <td className="py-2.5 pr-3 text-slate-600">{log.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
