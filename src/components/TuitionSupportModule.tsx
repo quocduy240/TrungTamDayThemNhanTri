@@ -7,15 +7,20 @@ import {
   CreditCard,
   Database,
   MessageSquare,
+  Percent,
+  Plus,
   QrCode,
+  Save,
   Send,
   Shield,
   Sparkles,
+  Users,
   X,
 } from 'lucide-react';
-import type { SiteConfig, TuitionRecord } from '../types';
+import type { BillingCycle, FamilyProfile, SiteConfig, TuitionRecord } from '../types';
 import { apiRequest, formatVnd, type WorkspacePayload } from '../lib/api';
 import { DEFAULT_SITE_CONFIG } from '../lib/firestoreStore';
+import { getStudentsInFamily } from '../lib/tuitionCalculator';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 
 interface TuitionViewProps {
@@ -36,6 +41,92 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string>('');
   const [notice, setNotice] = useState('');
+
+  // Family multi-child discount drafts (Admin/SuperAdmin only)
+  const [familyDrafts, setFamilyDrafts] = useState<
+    Record<string, { siblingDiscountPercent: number; defaultBillingCycle: BillingCycle }>
+  >({});
+  const [savingFamilyId, setSavingFamilyId] = useState<string | null>(null);
+  const [showAddFamily, setShowAddFamily] = useState(false);
+  const [newFamily, setNewFamily] = useState({
+    parentName: '',
+    parentPhone: '',
+    parentEmail: '',
+    siblingDiscountPercent: 5,
+    defaultBillingCycle: 'MONTHLY' as BillingCycle,
+    note: '',
+  });
+
+  function getFamilyDraft(fam: FamilyProfile) {
+    return (
+      familyDrafts[fam.id] || {
+        siblingDiscountPercent: fam.siblingDiscountPercent,
+        defaultBillingCycle: fam.defaultBillingCycle,
+      }
+    );
+  }
+
+  async function handleSaveFamilyDiscount(fam: FamilyProfile, recalculateInvoices: boolean) {
+    const draft = getFamilyDraft(fam);
+    setSavingFamilyId(fam.id);
+    setNotice('');
+    try {
+      const res = await apiRequest<{ updatedInvoices: TuitionRecord[] }>(`/api/v1/families/${fam.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          siblingDiscountPercent: draft.siblingDiscountPercent,
+          defaultBillingCycle: draft.defaultBillingCycle,
+          recalculateInvoices,
+          applyDefaultCycle: recalculateInvoices,
+        }),
+      });
+      await onRefresh();
+      const updatedCount = Array.isArray(res.updatedInvoices) ? res.updatedInvoices.length : 0;
+      setNotice(
+        `Đã lưu ưu đãi gia đình ${fam.parentName} (-${draft.siblingDiscountPercent}% nhiều con, kỳ ${
+          draft.defaultBillingCycle === 'ANNUAL_12M' ? 'Nguyên năm 12 tháng' : 'Theo tháng'
+        })${recalculateInvoices ? ` và tính lại ${updatedCount} phiếu chưa đóng.` : '.'}`,
+      );
+    } catch (err: unknown) {
+      setNotice(err instanceof Error ? err.message : 'Không thể cập nhật chính sách gia đình.');
+    } finally {
+      setSavingFamilyId(null);
+    }
+  }
+
+  async function handleCreateFamily(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingFamilyId('NEW');
+    setNotice('');
+    try {
+      await apiRequest('/api/v1/families', {
+        method: 'POST',
+        body: JSON.stringify({
+          parentName: newFamily.parentName,
+          parentPhone: newFamily.parentPhone,
+          parentEmails: newFamily.parentEmail ? [newFamily.parentEmail] : [],
+          siblingDiscountPercent: newFamily.siblingDiscountPercent,
+          defaultBillingCycle: newFamily.defaultBillingCycle,
+          note: newFamily.note,
+        }),
+      });
+      setNewFamily({
+        parentName: '',
+        parentPhone: '',
+        parentEmail: '',
+        siblingDiscountPercent: 5,
+        defaultBillingCycle: 'MONTHLY',
+        note: '',
+      });
+      setShowAddFamily(false);
+      await onRefresh();
+      setNotice('Đã tạo hồ sơ gia đình nhiều con mới.');
+    } catch (err: unknown) {
+      setNotice(err instanceof Error ? err.message : 'Không thể tạo hồ sơ gia đình.');
+    } finally {
+      setSavingFamilyId(null);
+    }
+  }
 
   const summary = useMemo(() => {
     const totalExpected = workspace.tuition.reduce((a, b) => a + b.totalAmount, 0);
@@ -111,7 +202,7 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
           Quản lý Học phí, Công nợ &amp; Đối soát Thu Chi
         </h1>
         <p className="text-sm text-slate-600 mt-1">
-          Theo dõi đóng học phí, ưu đãi đóng nguyên năm (-10%), thanh toán trực tuyến VietQR / MoMo / ZaloPay và gửi nhắc nợ tự động.
+          Theo dõi đóng học phí, ưu đãi nhiều con &amp; đóng nguyên năm 12 tháng (-{siteConfig.annualDiscountPercent ?? 10}% cộng dồn trên học phí chính), thanh toán VietQR và nhắc nợ tự động.
         </p>
       </div>
 
@@ -153,6 +244,209 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Family Multi-Child & 12-Month Discount Management (Admin / SuperAdmin only) */}
+      {isAdmin && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-slate-950 flex items-center gap-2">
+                <Users className="w-4 h-4 text-blue-900" />
+                <span>Hồ sơ Gia đình nhiều con &amp; Ưu đãi học phí ({workspace.families?.length || 0})</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Quy tắc chuẩn: Cộng dồn % nhiều con + % đóng nguyên năm 12 tháng (tối đa 40%),{' '}
+                <strong className="text-slate-700">chỉ giảm trên học phí chính</strong> — không giảm tiền bán trú hoặc đưa rước.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAddFamily((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{showAddFamily ? 'Đóng biểu mẫu' : 'Thêm hồ sơ gia đình'}</span>
+            </button>
+          </div>
+
+          {showAddFamily && (
+            <form
+              onSubmit={handleCreateFamily}
+              className="p-4 bg-slate-50 border border-slate-200 rounded-lg grid sm:grid-cols-2 lg:grid-cols-6 gap-2.5 items-end"
+            >
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Tên phụ huynh *</label>
+                <input
+                  required
+                  value={newFamily.parentName}
+                  onChange={(e) => setNewFamily({ ...newFamily, parentName: e.target.value })}
+                  placeholder="Nguyễn Văn A"
+                  className="w-full h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">SĐT chung *</label>
+                <input
+                  required
+                  value={newFamily.parentPhone}
+                  onChange={(e) => setNewFamily({ ...newFamily, parentPhone: e.target.value })}
+                  placeholder="0918..."
+                  className="w-full h-9 px-2.5 text-xs font-mono-num bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Gmail phụ huynh</label>
+                <input
+                  type="email"
+                  value={newFamily.parentEmail}
+                  onChange={(e) => setNewFamily({ ...newFamily, parentEmail: e.target.value })}
+                  placeholder="phuhuynh@gmail.com"
+                  className="w-full h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Giảm nhiều con (%)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={newFamily.siblingDiscountPercent}
+                  onChange={(e) =>
+                    setNewFamily({ ...newFamily, siblingDiscountPercent: Number(e.target.value) })
+                  }
+                  className="w-full h-9 px-2.5 text-xs font-mono-num bg-white border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 mb-1">Kỳ đóng mặc định</label>
+                <select
+                  value={newFamily.defaultBillingCycle}
+                  onChange={(e) =>
+                    setNewFamily({ ...newFamily, defaultBillingCycle: e.target.value as BillingCycle })
+                  }
+                  className="w-full h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-lg"
+                >
+                  <option value="MONTHLY">Theo tháng (1T)</option>
+                  <option value="ANNUAL_12M">Nguyên năm (12T · -10%)</option>
+                </select>
+              </div>
+              <button
+                type="submit"
+                disabled={savingFamilyId === 'NEW'}
+                className="h-9 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-600 rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                {savingFamilyId === 'NEW' ? 'Đang lưu...' : 'Tạo hồ sơ'}
+              </button>
+            </form>
+          )}
+
+          {(workspace.families || []).length > 0 && (
+            <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
+              {(workspace.families || []).map((fam) => {
+                const children = getStudentsInFamily(fam, workspace.students);
+                const draft = getFamilyDraft(fam);
+                const famInvoices = workspace.tuition.filter((t) =>
+                  children.some((c) => c.id === t.studentId),
+                );
+                const famDebt = famInvoices.reduce(
+                  (acc, t) => acc + Math.max(0, t.totalAmount - t.paidAmount),
+                  0,
+                );
+                const annualPct = draft.defaultBillingCycle === 'ANNUAL_12M'
+                  ? siteConfig.annualDiscountPercent ?? 10
+                  : 0;
+                const combinedPct = Math.min(40, draft.siblingDiscountPercent + annualPct);
+                return (
+                  <div
+                    key={fam.id}
+                    className="p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-bold text-slate-950">{fam.parentName}</span>
+                        <span className="font-mono-num text-slate-600">{fam.parentPhone}</span>
+                        {fam.parentEmails?.[0] && (
+                          <span className="font-mono-num text-slate-500">· {fam.parentEmails[0]}</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-600">
+                        Học sinh liên kết ({children.length}):{' '}
+                        <span className="font-semibold text-slate-900">
+                          {children.length > 0
+                            ? children.map((c) => `${c.fullName} (${c.centerClass})`).join(', ')
+                            : 'Chưa có học sinh khớp SĐT/Email'}
+                        </span>
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        Công nợ cả gia đình:{' '}
+                        <span className={`font-mono-num font-bold ${famDebt > 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                          {formatVnd(famDebt)}
+                        </span>
+                        {' · '}
+                        Tổng % giảm dự kiến trên học phí chính:{' '}
+                        <span className="font-mono-num font-bold text-blue-900">-{combinedPct}%</span>
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <label className="inline-flex items-center gap-1.5 text-xs text-slate-600">
+                        <Percent className="w-3.5 h-3.5 text-blue-900" />
+                        <span>Nhiều con:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={30}
+                          value={draft.siblingDiscountPercent}
+                          onChange={(e) =>
+                            setFamilyDrafts((prev) => ({
+                              ...prev,
+                              [fam.id]: {
+                                ...draft,
+                                siblingDiscountPercent: Math.max(0, Math.min(30, Number(e.target.value) || 0)),
+                              },
+                            }))
+                          }
+                          className="w-16 h-8 px-2 text-xs font-mono-num font-semibold border border-slate-300 rounded-lg bg-white text-right"
+                        />
+                        <span>%</span>
+                      </label>
+
+                      <select
+                        value={draft.defaultBillingCycle}
+                        onChange={(e) =>
+                          setFamilyDrafts((prev) => ({
+                            ...prev,
+                            [fam.id]: {
+                              ...draft,
+                              defaultBillingCycle: e.target.value as BillingCycle,
+                            },
+                          }))
+                        }
+                        className="h-8 px-2.5 text-xs border border-slate-300 rounded-lg bg-white"
+                      >
+                        <option value="MONTHLY">Đóng tháng (1T)</option>
+                        <option value="ANNUAL_12M">Nguyên năm (12T · -10%)</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        disabled={savingFamilyId === fam.id}
+                        onClick={() => handleSaveFamilyDiscount(fam, true)}
+                        className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>
+                          {savingFamilyId === fam.id ? 'Đang tính...' : 'Lưu & Tính lại phiếu chưa đóng'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="inline-flex items-center p-1 bg-slate-100 rounded-lg">
@@ -201,10 +495,29 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
                       {t.monthLabel} · Hạn {t.dueDate}
                     </p>
                   </td>
-                  <td className="py-3 px-4 text-right font-mono-num text-xs">
+                  <td className="py-3 px-4 text-right font-mono-num text-xs space-y-0.5">
                     <p className="font-semibold text-slate-900">{formatVnd(t.totalAmount)}</p>
+                    <p className="text-[11px] text-slate-500">
+                      HP chính ({t.monthsCount || 1}T): {formatVnd(t.baseAmount)}
+                      {t.boardingAmount + t.shuttleAmount > 0
+                        ? ` + DV ${formatVnd(t.boardingAmount + t.shuttleAmount)}`
+                        : ''}
+                    </p>
                     {t.discountAmount > 0 && (
-                      <p className="text-emerald-700">Giảm năm: -{formatVnd(t.discountAmount)}</p>
+                      <p className="text-[11px] text-emerald-700">
+                        Giảm{' '}
+                        {[
+                          t.siblingDiscountPercent ? `${t.siblingDiscountPercent}% nhiều con` : null,
+                          t.annualDiscountPercent
+                            ? `${t.annualDiscountPercent}% năm 12T`
+                            : t.billingCycle === 'ANNUAL_12M'
+                              ? '10% năm 12T'
+                              : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' + ')}
+                        : -{formatVnd(t.discountAmount)}
+                      </p>
                     )}
                   </td>
                   <td className="py-3 px-4 text-right font-mono-num text-xs text-emerald-700 font-semibold">
@@ -618,7 +931,11 @@ export const SupportSystemModule: React.FC<SupportSystemModuleProps> = ({
                   <strong>Phản hồi Nhân Trí:</strong> {tk.reply}
                 </p>
               )}
-              {(workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN' || workspace.user.role === 'TEACHER') && !tk.reply && (
+              {(workspace.user.role === 'SUPER_ADMIN' ||
+                workspace.user.role === 'ADMIN' ||
+                workspace.user.role === 'MANAGER' ||
+                workspace.user.role === 'TEACHER') &&
+                !tk.reply && (
                 <div className="flex gap-2 pt-1">
                   <input
                     type="text"
@@ -646,7 +963,7 @@ export const SupportSystemModule: React.FC<SupportSystemModuleProps> = ({
         <div className="lg:col-span-6 bg-white border border-slate-200 rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-bold text-slate-950">
             <Shield className="w-4 h-4 text-blue-900" />
-            <span>Ma trận Phân quyền RBAC (4 cấp bậc)</span>
+            <span>Ma trận Phân quyền RBAC (6 vai trò chuẩn)</span>
           </div>
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-500 border-y border-slate-200">
@@ -657,20 +974,28 @@ export const SupportSystemModule: React.FC<SupportSystemModuleProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
               <tr>
-                <td className="py-2.5 px-3 font-bold text-blue-950">Quản trị viên</td>
-                <td className="py-2.5 px-3">Toàn quyền CMS, TKB chống trùng, đối soát thu chi, nhắc nợ, xuất SQL Cloudflare D1.</td>
+                <td className="py-2.5 px-3 font-bold text-blue-950">SuperAdmin</td>
+                <td className="py-2.5 px-3">Toàn quyền CMS, chính sách định danh, TKB động, phòng học, học phí, thu chi &amp; phân quyền tất cả cấp.</td>
               </tr>
               <tr>
-                <td className="py-2.5 px-3 font-bold text-slate-900">Giáo viên</td>
-                <td className="py-2.5 px-3">Quản lý lớp, nhập Excel/OCR danh sách, điểm danh, xác nhận điểm &amp; báo nghỉ dạy thay.</td>
+                <td className="py-2.5 px-3 font-bold text-blue-900">Admin Vận hành</td>
+                <td className="py-2.5 px-3">Điều phối TKB động, phòng học, giáo viên, đối soát học phí, ưu đãi nhiều con &amp; cấp/khóa tài khoản vận hành.</td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-3 font-bold text-slate-950">Người quản lý</td>
+                <td className="py-2.5 px-3">Sửa TKB động (kéo-thả/hoán đổi), cấu hình phòng học, quản lý giáo viên, duyệt nghỉ đột xuất, điểm danh &amp; học sinh. Không xem tài chính.</td>
+              </tr>
+              <tr>
+                <td className="py-2.5 px-3 font-bold text-slate-900">Giáo viên (Bộ môn / Trả bài)</td>
+                <td className="py-2.5 px-3">Xem TKB cá nhân, đăng ký lịch rảnh theo ca, gửi đơn xin nghỉ đột xuất (chờ duyệt), điểm danh &amp; chấm điểm.</td>
               </tr>
               <tr>
                 <td className="py-2.5 px-3 font-bold text-slate-900">Phụ huynh</td>
-                <td className="py-2.5 px-3">Xem Học bạ Online của con, xuất TKB Google Calendar, thanh toán học phí QR &amp; gửi góp ý.</td>
+                <td className="py-2.5 px-3">Xem Học bạ, TKB cá nhân và tổng hợp học phí VietQR của tất cả các con trong gia đình (cô lập tuyệt đối dữ liệu HS khác).</td>
               </tr>
               <tr>
                 <td className="py-2.5 px-3 font-bold text-slate-900">Học sinh</td>
-                <td className="py-2.5 px-3">Tự nhập điểm, chụp bài kiểm tra phân tích AI, luyện đề trắc nghiệm chuẩn quốc gia &amp; hỏi AI 24/7.</td>
+                <td className="py-2.5 px-3">Xem TKB lớp mình, tự nhập điểm, chụp bài kiểm tra AI, luyện đề GDPT 2018 &amp; hỏi Trợ lý AI 24/7.</td>
               </tr>
             </tbody>
           </table>

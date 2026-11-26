@@ -314,7 +314,11 @@ export function subscribeCourses(
 export function subscribePublicTimetable(
   fallbackSlots: TimetableSlot[],
   onChange: (slots: TimetableSlot[]) => void,
+  enabled = false,
 ): () => void {
+  if (!enabled) {
+    return () => {};
+  }
   const colRef = collection(db, 'public_timetable');
   return onSnapshot(
     colRef,

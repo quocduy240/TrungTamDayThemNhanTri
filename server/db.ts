@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { DatabaseState } from '../src/types.ts';
+import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
 import { INITIAL_DB } from './seedData.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -14,6 +15,24 @@ function ensureDataDir(): void {
   }
 }
 
+function normalizeDbState(parsed: DatabaseState): DatabaseState {
+  if (!Array.isArray(parsed.rooms) || parsed.rooms.length === 0) {
+    parsed.rooms = structuredClone(INITIAL_DB.rooms);
+  }
+  if (!Array.isArray(parsed.teacherLeaves)) {
+    parsed.teacherLeaves = structuredClone(INITIAL_DB.teacherLeaves);
+  }
+  if (!Array.isArray(parsed.families)) {
+    parsed.families = structuredClone(INITIAL_DB.families);
+  }
+  parsed.teachers = (parsed.teachers || []).map((t) => ({
+    ...t,
+    teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
+    availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
+  }));
+  return parsed;
+}
+
 export function loadDb(): DatabaseState {
   if (memoryDb) return memoryDb;
   ensureDataDir();
@@ -22,7 +41,7 @@ export function loadDb(): DatabaseState {
       const raw = fs.readFileSync(DB_FILE, 'utf8');
       const parsed = JSON.parse(raw) as DatabaseState;
       if (parsed && Array.isArray(parsed.students) && Array.isArray(parsed.timetable)) {
-        memoryDb = parsed;
+        memoryDb = normalizeDbState(parsed);
         return memoryDb;
       }
     } catch {

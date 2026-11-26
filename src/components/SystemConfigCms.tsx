@@ -861,7 +861,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                   </h2>
                   {!isSuperAdmin && (
                     <span className="text-[11px] text-slate-500">
-                      Phạm vi Admin: Cấp &amp; thu hồi Giáo viên, Phụ huynh, Học sinh
+                      Phạm vi Admin: Cấp &amp; thu hồi Người quản lý, Giáo viên, Phụ huynh, Học sinh
                     </span>
                   )}
                 </div>
@@ -885,6 +885,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                     className="h-9 px-3 text-xs border border-slate-300 rounded-lg bg-white"
                   >
                     {isSuperAdmin && <option value="ADMIN">Admin Vận hành</option>}
+                    <option value="MANAGER">Người quản lý (TKB, Phòng &amp; Học vụ)</option>
                     <option value="TEACHER">Giáo viên</option>
                     <option value="PARENT">Phụ huynh</option>
                     <option value="STUDENT">Học sinh</option>
@@ -982,6 +983,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                                 {(isSuperAdmin || u.role === 'ADMIN') && (
                                   <option value="ADMIN">Admin Vận hành</option>
                                 )}
+                                <option value="MANAGER">Người quản lý (TKB &amp; Học vụ)</option>
                                 <option value="TEACHER">Giáo viên</option>
                                 <option value="PARENT">Phụ huynh</option>
                                 <option value="STUDENT">Học sinh</option>

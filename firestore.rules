@@ -67,8 +67,12 @@ service cloud.firestore {
       return isSuperAdmin() || isBootstrappedAdmin() || (userDocExists() && userDocRole() == 'ADMIN');
     }
 
+    function isManager() {
+      return isAdmin() || (userDocExists() && userDocRole() == 'MANAGER');
+    }
+
     function isStaff() {
-      return isAdmin() || (userDocExists() && userDocRole() == 'TEACHER');
+      return isManager() || (userDocExists() && userDocRole() == 'TEACHER');
     }
 
     function isNonEmptyString(val, maxLen) {
@@ -151,7 +155,7 @@ service cloud.firestore {
         && isNonEmptyString(data.email, 160)
         && isNonEmptyString(data.displayName, 120)
         && isOptionalString(data, 'photoURL', 500)
-        && data.role in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT']
+        && data.role in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT']
         && isOptionalString(data, 'phone', 40)
         && (!('preferredView' in data) || data.preferredView in ['TEACHER_STUDENT', 'PARENT', 'NEW_CUSTOMER'])
         && isOptionalString(data, 'linkedStudentId', 128)
@@ -166,7 +170,7 @@ service cloud.firestore {
       return data.keys().hasAll(['email', 'role', 'createdBy'])
         && data.keys().hasOnly(['email', 'role', 'displayName', 'linkedStudentId', 'linkedTeacherId', 'createdBy', 'createdAt'])
         && isNonEmptyString(data.email, 160)
-        && data.role in ['ADMIN', 'TEACHER', 'PARENT', 'STUDENT']
+        && data.role in ['ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT']
         && isOptionalString(data, 'displayName', 120)
         && isOptionalString(data, 'linkedStudentId', 128)
         && isOptionalString(data, 'linkedTeacherId', 128)
@@ -197,17 +201,60 @@ service cloud.firestore {
         && isOptionalString(data, 'imageUrl', 300);
     }
 
+    function isValidRoom(data) {
+      return data.keys().hasAll(['id', 'code', 'name', 'campus', 'capacity', 'active'])
+        && data.keys().hasOnly(['id', 'code', 'name', 'campus', 'capacity', 'active', 'note'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.code, 24)
+        && isNonEmptyString(data.name, 80)
+        && isNonEmptyString(data.campus, 120)
+        && data.capacity is number && data.capacity >= 1 && data.capacity <= 100
+        && data.active is bool
+        && isOptionalString(data, 'note', 240);
+    }
+
+    function isValidTeacherLeave(data) {
+      return data.keys().hasAll(['id', 'teacherId', 'teacherName', 'day', 'dateLabel', 'period', 'reason', 'status', 'createdBy', 'createdAt'])
+        && data.keys().hasOnly(['id', 'teacherId', 'teacherName', 'day', 'dateLabel', 'period', 'shift', 'reason', 'status', 'createdBy', 'reviewedBy', 'createdAt'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.teacherId, 128)
+        && isNonEmptyString(data.teacherName, 80)
+        && data.day in ['T2', 'T3', 'T4', 'T5', 'T6', 'T7']
+        && isNonEmptyString(data.dateLabel, 40)
+        && data.period in ['ALL', 'SANG', 'CHIEU', 'TOI']
+        && (!('shift' in data) || data.shift in ['CA_1', 'CA_2'])
+        && isNonEmptyString(data.reason, 300)
+        && data.status in ['PENDING', 'APPROVED', 'REJECTED']
+        && isNonEmptyString(data.createdBy, 160)
+        && isOptionalString(data, 'reviewedBy', 160)
+        && isNonEmptyString(data.createdAt, 40);
+    }
+
+    function isValidFamilyProfile(data) {
+      return data.keys().hasAll(['id', 'parentName', 'parentPhone', 'siblingDiscountPercent', 'defaultBillingCycle'])
+        && data.keys().hasOnly(['id', 'parentName', 'parentPhone', 'parentEmails', 'siblingDiscountPercent', 'defaultBillingCycle', 'note'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.parentName, 120)
+        && isNonEmptyString(data.parentPhone, 40)
+        && (!('parentEmails' in data) || isBoundedStringList(data.parentEmails, 5))
+        && data.siblingDiscountPercent is number && data.siblingDiscountPercent >= 0 && data.siblingDiscountPercent <= 30
+        && data.defaultBillingCycle in ['MONTHLY', 'ANNUAL_12M']
+        && isOptionalString(data, 'note', 300);
+    }
+
     function isValidPublicTeacher(data) {
       return data.keys().hasAll(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'status'])
-        && data.keys().hasOnly(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'roomDefault', 'status'])
+        && data.keys().hasOnly(['id', 'name', 'shortName', 'teacherGroup', 'subjects', 'degree', 'experienceYears', 'roomDefault', 'status', 'availability'])
         && isValidId(data.id)
         && isNonEmptyString(data.name, 120)
         && isNonEmptyString(data.shortName, 60)
+        && (!('teacherGroup' in data) || data.teacherGroup in ['SUBJECT', 'TUTOR_REVIEW'])
         && isBoundedStringList(data.subjects, 10)
         && isNonEmptyString(data.degree, 140)
         && data.experienceYears is number && data.experienceYears >= 0 && data.experienceYears <= 60
         && isOptionalString(data, 'roomDefault', 60)
-        && data.status in ['ACTIVE', 'ON_LEAVE'];
+        && data.status in ['ACTIVE', 'ON_LEAVE']
+        && (!('availability' in data) || isBoundedStringList(data.availability, 40));
     }
 
     function isValidTimetableSlot(data) {
@@ -217,7 +264,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'weekLabel', 'period', 'shift', 'timeRange', 'day', 'centerClass',
-          'subject', 'teacherId', 'teacherName', 'room', 'slotType', 'status', 'note'
+          'subject', 'teacherId', 'teacherName', 'roomId', 'room', 'slotType', 'status', 'note'
         ])
         && isValidId(data.id)
         && isOptionalString(data, 'weekLabel', 80)
@@ -229,6 +276,7 @@ service cloud.firestore {
         && isNonEmptyString(data.subject, 100)
         && isNonEmptyString(data.teacherId, 128)
         && isNonEmptyString(data.teacherName, 80)
+        && isOptionalString(data, 'roomId', 128)
         && isNonEmptyString(data.room, 60)
         && data.slotType in ['MAIN', 'TRA_BAI', 'PHU_DAO', 'BU_THE_DUC']
         && data.status in ['SCHEDULED', 'TEACHER_ABSENT', 'SUBSTITUTED', 'OFF']
@@ -241,7 +289,7 @@ service cloud.firestore {
           'school', 'parentName', 'parentPhone', 'packageType', 'status'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerUid', 'code', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass',
+          'id', 'ownerUid', 'familyId', 'code', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass', 'enrolledClasses',
           'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
           'parentPhone', 'parentSecondaryPhone', 'parentZalo', 'parentEmails', 'studentEmail',
           'allowPersonalGmailOverride', 'accessPin', 'accessStatus', 'accessNote', 'lastLoginAt',
@@ -251,12 +299,14 @@ service cloud.firestore {
         ])
         && isValidId(data.id)
         && isOptionalString(data, 'ownerUid', 128)
+        && isOptionalString(data, 'familyId', 128)
         && isNonEmptyString(data.code, 40)
         && isOptionalString(data, 'parentLinkCode', 24)
         && isNonEmptyString(data.fullName, 120)
         && data.grade is number && data.grade >= 3 && data.grade <= 12
         && data.level in ['CAP_1', 'CAP_2', 'CAP_3']
         && isNonEmptyString(data.centerClass, 60)
+        && (!('enrolledClasses' in data) || isBoundedStringList(data.enrolledClasses, 10))
         && isOptionalString(data, 'schoolClass', 40)
         && isNonEmptyString(data.school, 140)
         && isOptionalString(data, 'homeroomTeacher', 80)
@@ -337,23 +387,31 @@ service cloud.firestore {
           'totalAmount', 'paidAmount', 'dueDate', 'status', 'remindersSent'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerUid', 'studentId', 'studentName', 'centerClass', 'parentPhone',
-          'monthLabel', 'baseAmount', 'boardingAmount', 'shuttleAmount', 'discountAmount',
-          'totalAmount', 'paidAmount', 'dueDate', 'status', 'paymentMethod', 'paidAt', 'remindersSent'
+          'id', 'ownerUid', 'familyId', 'studentId', 'studentName', 'centerClass', 'parentPhone',
+          'monthLabel', 'billingCycle', 'monthsCount', 'baseAmount', 'boardingAmount', 'shuttleAmount',
+          'siblingDiscountPercent', 'annualDiscountPercent', 'siblingDiscountAmount', 'annualDiscountAmount',
+          'discountAmount', 'totalAmount', 'paidAmount', 'dueDate', 'status', 'paymentMethod', 'paidAt', 'remindersSent'
         ])
         && isValidId(data.id)
         && isOptionalString(data, 'ownerUid', 128)
+        && isOptionalString(data, 'familyId', 128)
         && isNonEmptyString(data.studentId, 128)
         && isNonEmptyString(data.studentName, 120)
         && isNonEmptyString(data.centerClass, 60)
         && isOptionalString(data, 'parentPhone', 40)
-        && isNonEmptyString(data.monthLabel, 100)
+        && isNonEmptyString(data.monthLabel, 120)
+        && (!('billingCycle' in data) || data.billingCycle in ['MONTHLY', 'ANNUAL_12M'])
+        && (!('monthsCount' in data) || (data.monthsCount is number && data.monthsCount >= 1 && data.monthsCount <= 12))
         && (!('baseAmount' in data) || (data.baseAmount is number && data.baseAmount >= 0))
         && (!('boardingAmount' in data) || (data.boardingAmount is number && data.boardingAmount >= 0))
         && (!('shuttleAmount' in data) || (data.shuttleAmount is number && data.shuttleAmount >= 0))
+        && (!('siblingDiscountPercent' in data) || (data.siblingDiscountPercent is number && data.siblingDiscountPercent >= 0 && data.siblingDiscountPercent <= 30))
+        && (!('annualDiscountPercent' in data) || (data.annualDiscountPercent is number && data.annualDiscountPercent >= 0 && data.annualDiscountPercent <= 30))
+        && (!('siblingDiscountAmount' in data) || (data.siblingDiscountAmount is number && data.siblingDiscountAmount >= 0))
+        && (!('annualDiscountAmount' in data) || (data.annualDiscountAmount is number && data.annualDiscountAmount >= 0))
         && (!('discountAmount' in data) || (data.discountAmount is number && data.discountAmount >= 0))
-        && data.totalAmount is number && data.totalAmount >= 0 && data.totalAmount <= 100000000
-        && data.paidAmount is number && data.paidAmount >= 0 && data.paidAmount <= 100000000
+        && data.totalAmount is number && data.totalAmount >= 0 && data.totalAmount <= 200000000
+        && data.paidAmount is number && data.paidAmount >= 0 && data.paidAmount <= 200000000
         && isNonEmptyString(data.dueDate, 30)
         && data.status in ['PAID', 'DUE_SOON', 'OVERDUE']
         && (!('paymentMethod' in data) || data.paymentMethod in ['VIETQR', 'MOMO', 'ZALOPAY', 'CASH'])
@@ -393,7 +451,7 @@ service cloud.firestore {
         && isNonEmptyString(data.authorUid, 128)
         && isNonEmptyString(data.createdAt, 40)
         && isNonEmptyString(data.authorName, 120)
-        && data.authorRole in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT', 'GUEST']
+        && data.authorRole in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT', 'GUEST']
         && isOptionalString(data, 'phone', 40)
         && data.category in ['CONSULTATION', 'FEEDBACK', 'SCHEDULE_CHANGE', 'TUITION']
         && isNonEmptyString(data.subject, 180)
@@ -411,7 +469,7 @@ service cloud.firestore {
         && isNonEmptyString(data.title, 180)
         && isNonEmptyString(data.body, 600)
         && data.channel in ['APP', 'ZALO', 'EMAIL']
-        && data.targetRole in ['SUPER_ADMIN', 'ADMIN', 'TEACHER', 'PARENT', 'STUDENT', 'ALL']
+        && data.targetRole in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER', 'PARENT', 'STUDENT', 'ALL']
         && data.read is bool;
     }
 
@@ -464,8 +522,8 @@ service cloud.firestore {
         isSuperAdmin() ||
         (
           isAdmin() &&
-          existing().role in ['TEACHER', 'PARENT', 'STUDENT'] &&
-          incoming().role in ['TEACHER', 'PARENT', 'STUDENT'] &&
+          existing().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'] &&
+          incoming().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'] &&
           incoming().uid == existing().uid &&
           incoming().email == existing().email &&
           incoming().diff(existing()).affectedKeys().hasOnly(['role', 'active', 'linkedStudentId', 'linkedStudentIds', 'linkedTeacherId', 'updatedAt'])
@@ -482,21 +540,21 @@ service cloud.firestore {
       allow delete: if isValidId(uid) && isSuperAdmin();
     }
 
-    // 3. Pre-Assigned Role Invites (SuperAdmin: all roles; Admin: TEACHER / PARENT / STUDENT only)
+    // 3. Pre-Assigned Role Invites (SuperAdmin: all roles; Admin: MANAGER / TEACHER / PARENT / STUDENT)
     match /role_invites/{inviteEmail} {
       allow get: if isValidEmailId(inviteEmail) && isVerified() && (isSuperAdmin() || isAdmin() || inviteEmail == request.auth.token.email);
       allow list: if isVerified() && (isSuperAdmin() || isAdmin() || existing().email == request.auth.token.email);
       allow create: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && (
         isSuperAdmin() ||
-        (isAdmin() && incoming().role in ['TEACHER', 'PARENT', 'STUDENT'])
+        (isAdmin() && incoming().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'])
       );
       allow update: if isValidEmailId(inviteEmail) && isValidRoleInvite(incoming()) && incoming().email == inviteEmail && (
         isSuperAdmin() ||
-        (isAdmin() && existing().role in ['TEACHER', 'PARENT', 'STUDENT'] && incoming().role in ['TEACHER', 'PARENT', 'STUDENT'])
+        (isAdmin() && existing().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'] && incoming().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'])
       );
       allow delete: if isValidEmailId(inviteEmail) && (
         isSuperAdmin() ||
-        (isAdmin() && existing().role in ['TEACHER', 'PARENT', 'STUDENT'])
+        (isAdmin() && existing().role in ['MANAGER', 'TEACHER', 'PARENT', 'STUDENT'])
       );
     }
 
@@ -509,30 +567,63 @@ service cloud.firestore {
       allow delete: if isValidId(courseId) && isSuperAdmin();
     }
 
-    // 5. Public Non-PII Faculty Directory
+    // 4b. Dynamic Rooms (Editable strictly by Manager / Admin / SuperAdmin)
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId) && isVerified();
+      allow list: if isVerified();
+      allow create: if isValidId(roomId) && isValidRoom(incoming()) && isManager();
+      allow update: if isValidId(roomId) && isValidRoom(incoming()) && isManager();
+      allow delete: if isValidId(roomId) && isManager();
+    }
+
+    // 5. Public Non-PII Faculty Directory (Editable by Manager / Admin / SuperAdmin)
     match /public_teachers/{teacherId} {
       allow get: if isValidId(teacherId);
       allow list: if true;
-      allow create: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isAdmin();
-      allow update: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isAdmin();
+      allow create: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isManager();
+      allow update: if isValidId(teacherId) && isValidPublicTeacher(incoming()) && isManager();
       allow delete: if isValidId(teacherId) && isAdmin();
     }
 
-    // 6. Synced Center Weekly Timetable (Publicly viewable on Default Teacher/Student View)
+    // 5b. Teacher Emergency Leave Requests
+    match /teacher_leaves/{leaveId} {
+      allow get: if isValidId(leaveId) && isVerified() && (isManager() || existing().createdBy == request.auth.token.email);
+      allow list: if isVerified() && (isManager() || existing().createdBy == request.auth.token.email);
+      allow create: if isValidId(leaveId) && isVerified() && isValidTeacherLeave(incoming()) && (
+        isManager() ||
+        (isStaff() && incoming().createdBy == request.auth.token.email && incoming().status == 'PENDING')
+      );
+      allow update: if isValidId(leaveId) && isVerified() && isValidTeacherLeave(incoming()) && isManager();
+      allow delete: if isValidId(leaveId) && isVerified() && (
+        isManager() ||
+        (existing().createdBy == request.auth.token.email && existing().status == 'PENDING')
+      );
+    }
+
+    // 5c. Multi-Child Family Billing Profiles (Admin manages; Parents read own via email)
+    match /families/{familyId} {
+      allow get: if isValidId(familyId) && isVerified() && (isAdmin() || (request.auth.token.email in existing().parentEmails));
+      allow list: if isVerified() && (isAdmin() || (request.auth.token.email in existing().parentEmails));
+      allow create: if isValidId(familyId) && isValidFamilyProfile(incoming()) && isAdmin();
+      allow update: if isValidId(familyId) && isValidFamilyProfile(incoming()) && isAdmin();
+      allow delete: if isValidId(familyId) && isSuperAdmin();
+    }
+
+    // 6. Synced Center Weekly Timetable (Authenticated Reads Only; Writes Strictly Manager / Admin / SuperAdmin)
     match /public_timetable/{slotId} {
-      allow get: if isValidId(slotId);
-      allow list: if true;
-      allow create: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isStaff();
-      allow update: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isStaff();
-      allow delete: if isValidId(slotId) && isAdmin();
+      allow get: if isValidId(slotId) && isVerified();
+      allow list: if isVerified();
+      allow create: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isManager();
+      allow update: if isValidId(slotId) && isValidTimetableSlot(incoming()) && isManager();
+      allow delete: if isValidId(slotId) && isManager();
     }
 
     // 7. Protected Student Records (Strict PII Isolation)
     match /students/{studentId} {
       allow get: if isValidId(studentId) && isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
       allow list: if isVerified() && (isStaff() || existing().ownerUid == request.auth.uid);
-      allow create: if isValidId(studentId) && isValidStudent(incoming()) && isStaff();
-      allow update: if isValidId(studentId) && isValidStudent(incoming()) && isStaff();
+      allow create: if isValidId(studentId) && isValidStudent(incoming()) && isManager();
+      allow update: if isValidId(studentId) && isValidStudent(incoming()) && isManager();
       allow delete: if isValidId(studentId) && isAdmin();
     }
 

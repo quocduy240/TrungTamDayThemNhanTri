@@ -21,6 +21,12 @@ export const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
     email: ADMIN_EMAIL,
     role: 'ADMIN',
   },
+  MANAGER: {
+    id: 'usr-manager',
+    name: 'Người quản lý Học vụ (Cô Tâm)',
+    email: 'quanly@daythemnhantri.com',
+    role: 'MANAGER',
+  },
   TEACHER: {
     id: 'usr-teacher',
     name: 'Cô Nguyễn Thị Mẫn (GV Toán)',
@@ -163,9 +169,11 @@ export function requireAuth(roles?: UserRole[]) {
       return;
     }
     if (roles && roles.length > 0) {
+      const role = req.user.role;
       const allowed =
-        roles.includes(req.user.role) ||
-        (req.user.role === 'SUPER_ADMIN' && roles.includes('ADMIN'));
+        roles.includes(role) ||
+        (role === 'SUPER_ADMIN' && (roles.includes('ADMIN') || roles.includes('MANAGER'))) ||
+        (role === 'ADMIN' && roles.includes('MANAGER'));
       if (!allowed) {
         res.status(403).json({ error: 'Tài khoản hiện tại không đủ quyền truy cập chức năng này.' });
         return;

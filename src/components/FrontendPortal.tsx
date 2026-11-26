@@ -48,6 +48,8 @@ import {
   type WorkspacePayload,
 } from '../lib/api';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
+import { calculateTuitionBreakdown, findFamilyForStudent } from '../lib/tuitionCalculator';
+import { dayLabel, studentBelongsToClass } from '../lib/timetableEngine';
 import { InlineEditable } from './InlineEditable';
 import {
   ClassroomAuthGate,
@@ -226,6 +228,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const [calcBoarding, setCalcBoarding] = useState(true);
   const [calcShuttle, setCalcShuttle] = useState(false);
   const [calcAnnual, setCalcAnnual] = useState(true);
+  const [calcSiblingPct, setCalcSiblingPct] = useState<number>(0);
   const [estimateCopied, setEstimateCopied] = useState(false);
 
   // --- Mode 1 (Teacher & Student) State ---
@@ -255,6 +258,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
   const [transferNotice, setTransferNotice] = useState('');
   const [qrCopiedField, setQrCopiedField] = useState('');
+  const [showFamilyCombinedQr, setShowFamilyCombinedQr] = useState(false);
   const [zaloCopied, setZaloCopied] = useState(false);
   const [parentFeedbackSent, setParentFeedbackSent] = useState('');
   const [parentFeedbackForm, setParentFeedbackForm] = useState({
@@ -288,46 +292,83 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const estimatedFee = useMemo(() => {
     const course = courses.find((c) => c.level === calcLevel) || courses[1] || courses[0];
     if (!course) {
-      return { base: 0, boarding: 0, shuttle: 0, discount: 0, monthlyFinal: 0, annualTotal: 0 };
+      return {
+        monthlyBase: 0,
+        monthlyBoarding: 0,
+        monthlyShuttle: 0,
+        monthsCount: 1,
+        baseAmount: 0,
+        boardingAmount: 0,
+        shuttleAmount: 0,
+        siblingDiscountPercent: 0,
+        annualDiscountPercent: 0,
+        combinedDiscountPercent: 0,
+        siblingDiscountAmount: 0,
+        annualDiscountAmount: 0,
+        discountAmount: 0,
+        totalAmount: 0,
+        monthlyEquivalent: 0,
+      };
     }
-    const base =
+    const monthlyBase =
       course.billingModel === 'PER_SUBJECT'
         ? course.monthlyPrice * calcSubjectsCount
         : course.monthlyPrice;
-    const boarding = calcBoarding && course.boardingAddonPrice ? course.boardingAddonPrice : 0;
-    const shuttle = calcShuttle && course.shuttleAddonPrice ? course.shuttleAddonPrice : 0;
-    const sub = base + boarding + shuttle;
-    const discPct = siteConfig.annualDiscountPercent ?? course.annualDiscountPercent ?? 10;
-    const discount = calcAnnual ? Math.round(sub * (discPct / 100)) : 0;
+    const monthlyBoarding =
+      calcLevel !== 'CAP_3' && calcBoarding && course.boardingAddonPrice ? course.boardingAddonPrice : 0;
+    const monthlyShuttle =
+      calcLevel !== 'CAP_3' && calcShuttle && course.shuttleAddonPrice ? course.shuttleAddonPrice : 0;
+    const annualPct = siteConfig.annualDiscountPercent ?? course.annualDiscountPercent ?? 10;
+    const breakdown = calculateTuitionBreakdown({
+      baseMonthly: monthlyBase,
+      boardingMonthly: monthlyBoarding,
+      shuttleMonthly: monthlyShuttle,
+      billingCycle: calcAnnual ? 'ANNUAL_12M' : 'MONTHLY',
+      siblingDiscountPercent: calcSiblingPct,
+      annualDiscountPercent: annualPct,
+    });
     return {
-      base,
-      boarding,
-      shuttle,
-      discount,
-      monthlyFinal: sub - discount,
-      annualTotal: (sub - discount) * 9,
+      monthlyBase,
+      monthlyBoarding,
+      monthlyShuttle,
+      ...breakdown,
     };
-  }, [courses, calcLevel, calcSubjectsCount, calcBoarding, calcShuttle, calcAnnual, siteConfig.annualDiscountPercent]);
+  }, [
+    courses,
+    calcLevel,
+    calcSubjectsCount,
+    calcBoarding,
+    calcShuttle,
+    calcAnnual,
+    calcSiblingPct,
+    siteConfig.annualDiscountPercent,
+  ]);
 
   const modalEstimatedFee = useMemo(() => {
-    if (!selectedCourse) return 0;
-    const base =
+    if (!selectedCourse) {
+      return { totalAmount: 0, monthlyEquivalent: 0, discountAmount: 0, monthsCount: 1 };
+    }
+    const monthlyBase =
       selectedCourse.billingModel === 'PER_SUBJECT'
         ? selectedCourse.monthlyPrice * Math.max(1, enrollForm.selectedSubjects.length)
         : selectedCourse.monthlyPrice;
-    const boarding =
+    const monthlyBoarding =
       enrollForm.hasBoarding && selectedCourse.boardingAddonPrice
         ? selectedCourse.boardingAddonPrice
         : 0;
-    const shuttle =
+    const monthlyShuttle =
       enrollForm.hasShuttle && selectedCourse.shuttleAddonPrice
         ? selectedCourse.shuttleAddonPrice
         : 0;
-    const sub = base + boarding + shuttle;
-    const discount = enrollForm.annualPrepaid
-      ? Math.round(sub * ((siteConfig.annualDiscountPercent ?? 10) / 100))
-      : 0;
-    return sub - discount;
+    const annualPct = siteConfig.annualDiscountPercent ?? selectedCourse.annualDiscountPercent ?? 10;
+    return calculateTuitionBreakdown({
+      baseMonthly: monthlyBase,
+      boardingMonthly: monthlyBoarding,
+      shuttleMonthly: monthlyShuttle,
+      billingCycle: enrollForm.annualPrepaid ? 'ANNUAL_12M' : 'MONTHLY',
+      siblingDiscountPercent: 0,
+      annualDiscountPercent: annualPct,
+    });
   }, [selectedCourse, enrollForm, siteConfig.annualDiscountPercent]);
 
   // Parent portal active student (from signed-in workspace or sample preview)
@@ -363,6 +404,28 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     if (!focusedStudent || !workspace) return [];
     return workspace.tuition.filter((t) => t.studentId === focusedStudent.id);
   }, [focusedStudent, workspace]);
+
+  const focusedTimetable = useMemo(() => {
+    if (!focusedStudent || !workspace) return [];
+    const dayOrder: Record<DayOfWeek, number> = { T2: 1, T3: 2, T4: 3, T5: 4, T6: 5, T7: 6 };
+    return workspace.timetable
+      .filter((sl) => studentBelongsToClass(focusedStudent, sl.centerClass))
+      .sort((a, b) => dayOrder[a.day] - dayOrder[b.day] || a.timeRange.localeCompare(b.timeRange));
+  }, [focusedStudent, workspace]);
+
+  const parentFamily = useMemo(() => {
+    if (!focusedStudent || !workspace?.families?.length) return null;
+    return findFamilyForStudent(focusedStudent, workspace.families) || workspace.families[0] || null;
+  }, [focusedStudent, workspace]);
+
+  const familyBillingSummary = useMemo(() => {
+    const records = workspace?.tuition || [];
+    const totalAmount = records.reduce((s, t) => s + t.totalAmount, 0);
+    const totalPaid = records.reduce((s, t) => s + t.paidAmount, 0);
+    const totalRemaining = Math.max(0, totalAmount - totalPaid);
+    const unpaidChildren = records.filter((t) => t.totalAmount - t.paidAmount > 0);
+    return { records, totalAmount, totalPaid, totalRemaining, unpaidChildren };
+  }, [workspace]);
 
   async function handleParentLinkSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -415,7 +478,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     const addons = [
       calcLevel !== 'CAP_3' && calcBoarding ? 'Bán trú cơm nước' : null,
       calcLevel !== 'CAP_3' && calcShuttle ? 'Đưa rước tận nơi' : null,
-      calcAnnual ? `Đóng nguyên năm (-${siteConfig.annualDiscountPercent}%)` : 'Đóng theo tháng',
+      calcSiblingPct > 0 ? `Ưu đãi gia đình nhiều con (-${calcSiblingPct}% học phí chính)` : null,
+      calcAnnual
+        ? `Đóng nguyên năm 12 tháng (-${siteConfig.annualDiscountPercent}% trên học phí chính)`
+        : 'Đóng theo tháng',
     ]
       .filter(Boolean)
       .join(' · ');
@@ -423,9 +489,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
       `[DỰ TOÁN HỌC PHÍ — ${siteConfig.shortName.toUpperCase()}]`,
       `• Cấp học: ${levelLabel}`,
       `• Tùy chọn: ${addons}`,
-      `• Học phí thực đóng dự kiến: ${formatVnd(estimatedFee.monthlyFinal)}/tháng`,
+      `• Học phí quy đổi/tháng: ${formatVnd(estimatedFee.monthlyEquivalent)}/tháng`,
+      calcAnnual
+        ? `• Tổng đóng nguyên năm 12 tháng: ${formatVnd(estimatedFee.totalAmount)} (Tiết kiệm ${formatVnd(estimatedFee.discountAmount)})`
+        : null,
       `Nhờ Cô Tâm tư vấn lịch học phù hợp cho bé giúp gia đình ạ!`,
-    ].join('\n');
+    ]
+      .filter(Boolean)
+      .join('\n');
     navigator.clipboard?.writeText(summaryText);
     setEstimateCopied(true);
     setTimeout(() => setEstimateCopied(false), 3500);
@@ -461,18 +532,25 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     setEnrollSubmitting(true);
     setEnrollError('');
     try {
-      const res = await apiRequest<{ student: { fullName: string }; tuition: { totalAmount: number } }>(
+      const res = await apiRequest<{
+        student: { fullName: string };
+        tuition: { totalAmount: number; monthsCount?: number };
+      }>(
         '/api/v1/enrollments',
         {
           method: 'POST',
           body: JSON.stringify({
             ...enrollForm,
+            billingCycle: enrollForm.annualPrepaid ? 'ANNUAL_12M' : 'MONTHLY',
             courseId: selectedCourse.id,
           }),
         },
       );
+      const months = res.tuition.monthsCount || (enrollForm.annualPrepaid ? 12 : 1);
       setEnrollResult({
-        message: `Đã ghi nhận hồ sơ em ${res.student.fullName} vào hệ thống Trung Tâm Nhân Trí. Ban học vụ sẽ gửi TKB cá nhân qua Zalo ngay.`,
+        message: `Đã ghi nhận hồ sơ em ${res.student.fullName} vào hệ thống Trung Tâm Nhân Trí (${
+          months === 12 ? 'Kỳ nguyên năm 12 tháng' : 'Kỳ hàng tháng'
+        }). Ban học vụ sẽ gửi TKB cá nhân qua Zalo ngay.`,
         total: res.tuition.totalAmount,
       });
     } catch (err: unknown) {
@@ -1425,6 +1503,136 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     )}
                   </div>
 
+                  {/* Consolidated Multi-Child Family Tuition Summary */}
+                  {familyBillingSummary.records.length > 0 &&
+                    (parentStudents.length > 1 || Boolean(parentFamily)) && (
+                      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold text-blue-900">
+                              Tổng hợp Học phí Gia đình ({parentStudents.length} học sinh)
+                            </p>
+                            <h3 className="text-base font-bold text-slate-950 mt-0.5">
+                              {parentFamily?.parentName || currentUser?.name}
+                              {parentFamily && parentFamily.siblingDiscountPercent > 0 && (
+                                <span className="ml-2 text-xs font-semibold text-emerald-700">
+                                  · Ưu đãi nhiều con -{parentFamily.siblingDiscountPercent}% trên học phí chính
+                                </span>
+                              )}
+                            </h3>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[11px] text-slate-500">Tổng còn cần đóng cả gia đình</p>
+                            <p
+                              className={`font-mono-num text-lg font-extrabold ${
+                                familyBillingSummary.totalRemaining > 0
+                                  ? 'text-red-700'
+                                  : 'text-emerald-700'
+                              }`}
+                            >
+                              {formatVnd(familyBillingSummary.totalRemaining)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                          {familyBillingSummary.records.map((rec) => {
+                            const due = Math.max(0, rec.totalAmount - rec.paidAmount);
+                            return (
+                              <div
+                                key={rec.id}
+                                className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-bold text-slate-950 truncate">
+                                    {rec.studentName}
+                                  </span>
+                                  <span
+                                    className={`font-semibold shrink-0 ${
+                                      due === 0 ? 'text-emerald-700' : 'text-amber-700'
+                                    }`}
+                                  >
+                                    {due === 0 ? 'Đã đóng' : 'Chưa đóng'}
+                                  </span>
+                                </div>
+                                <p className="text-slate-500">
+                                  {rec.centerClass} · {rec.monthLabel}
+                                </p>
+                                <p className="font-mono-num font-bold text-slate-900">
+                                  {due > 0 ? `Còn: ${formatVnd(due)}` : `Đã thu: ${formatVnd(rec.paidAmount)}`}
+                                </p>
+                                {rec.discountAmount > 0 && (
+                                  <p className="text-[11px] text-emerald-700 font-mono-num">
+                                    Đã giảm: -{formatVnd(rec.discountAmount)}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {familyBillingSummary.totalRemaining > 0 &&
+                          familyBillingSummary.unpaidChildren.length > 1 &&
+                          siteConfig.enableOnlinePayment && (
+                            <div className="pt-2 border-t border-slate-100 space-y-3">
+                              <button
+                                type="button"
+                                onClick={() => setShowFamilyCombinedQr((v) => !v)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg cursor-pointer"
+                              >
+                                <CreditCard className="w-3.5 h-3.5" />
+                                <span>
+                                  {showFamilyCombinedQr
+                                    ? 'Ẩn mã VietQR gộp cả gia đình'
+                                    : `Hiện mã VietQR gộp ${familyBillingSummary.unpaidChildren.length} con (${formatVnd(familyBillingSummary.totalRemaining)})`}
+                                </span>
+                              </button>
+                              {showFamilyCombinedQr && (
+                                <div className="flex flex-col sm:flex-row items-center gap-4 p-3.5 bg-slate-50 border border-slate-200 rounded-lg">
+                                  <div className="w-40 bg-white p-1.5 rounded-lg border border-slate-200 shrink-0">
+                                    <img
+                                      src={buildVietQrUrl({
+                                        bankName: siteConfig.bankName,
+                                        accountNo: siteConfig.bankAccount,
+                                        accountName: siteConfig.bankOwner,
+                                        amount: familyBillingSummary.totalRemaining,
+                                        memo: buildTuitionTransferMemo(
+                                          'GIADINH',
+                                          parentFamily?.parentName || currentUser?.name || 'PHUHUYNH',
+                                        ),
+                                      })}
+                                      alt="Mã VietQR thanh toán học phí gộp cả gia đình"
+                                      loading="lazy"
+                                      className="w-full h-auto rounded"
+                                    />
+                                  </div>
+                                  <div className="text-xs text-slate-700 space-y-1">
+                                    <p className="font-bold text-slate-950">
+                                      Chuyển khoản 1 lần cho cả {familyBillingSummary.unpaidChildren.length} con
+                                    </p>
+                                    <p>
+                                      Số tiền:{' '}
+                                      <strong className="font-mono-num text-blue-950">
+                                        {formatVnd(familyBillingSummary.totalRemaining)}
+                                      </strong>
+                                    </p>
+                                    <p>
+                                      Nội dung:{' '}
+                                      <strong className="font-mono-num">
+                                        {buildTuitionTransferMemo(
+                                          'GIADINH',
+                                          parentFamily?.parentName || currentUser?.name || 'PHUHUYNH',
+                                        )}
+                                      </strong>
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                      </div>
+                    )}
+
                   {focusedStudent && (
                     <div className="grid lg:grid-cols-12 gap-6">
                       {/* Left: Học bạ & Chuyên cần */}
@@ -1502,6 +1710,45 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                               )}
                             </div>
                           </div>
+
+                          <div>
+                            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5">
+                              Thời khóa biểu Cá nhân của con ({focusedTimetable.length} buổi/tuần)
+                            </h3>
+                            <div className="space-y-2">
+                              {focusedTimetable.length === 0 ? (
+                                <p className="text-xs text-slate-400">
+                                  Chưa có lịch học được phân công cho lớp {focusedStudent.centerClass}.
+                                </p>
+                              ) : (
+                                focusedTimetable.map((sl) => (
+                                  <div
+                                    key={sl.id}
+                                    className="flex flex-wrap items-center justify-between gap-2 text-xs p-2.5 bg-slate-50 border border-slate-100 rounded-lg"
+                                  >
+                                    <div>
+                                      <span className="font-semibold text-blue-950">
+                                        {dayLabel(sl.day)}
+                                      </span>
+                                      <span className="font-mono-num text-slate-600 ml-2">
+                                        {sl.timeRange}
+                                      </span>
+                                      <span className="font-bold text-slate-900 ml-2">
+                                        · {sl.subject}
+                                      </span>
+                                    </div>
+                                    <div className="text-slate-600">
+                                      <span>{sl.teacherName}</span>
+                                      <span className="mx-1.5 text-slate-300">|</span>
+                                      <span className="font-mono-num font-semibold text-slate-800">
+                                        {sl.room}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
 
@@ -1563,6 +1810,24 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                                     <span>{due > 0 ? 'Còn cần đóng:' : 'Tổng học phí:'}</span>
                                     <span>{formatVnd(due > 0 ? due : t.totalAmount)}</span>
                                   </div>
+                                  {t.discountAmount > 0 && (
+                                    <p className="text-[11px] text-emerald-700 font-mono-num">
+                                      Đã ưu đãi{' '}
+                                      {[
+                                        t.siblingDiscountPercent
+                                          ? `-${t.siblingDiscountPercent}% nhiều con`
+                                          : null,
+                                        t.annualDiscountPercent
+                                          ? `-${t.annualDiscountPercent}% đóng 12 tháng`
+                                          : t.billingCycle === 'ANNUAL_12M'
+                                            ? '-10% đóng 12 tháng'
+                                            : null,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' + ')}
+                                      : -{formatVnd(t.discountAmount)} (trên học phí chính)
+                                    </p>
+                                  )}
 
                                   {due > 0 && qrSrc && (
                                     <div className="pt-2 border-t border-slate-200 space-y-2.5">
@@ -2084,45 +2349,85 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     </div>
                   )}
 
-                  <label className="flex items-center gap-2.5 text-sm text-amber-300 cursor-pointer pt-1">
-                    <input
-                      type="checkbox"
-                      checked={calcAnnual}
-                      onChange={(e) => setCalcAnnual(e.target.checked)}
-                      className="rounded accent-amber-400"
-                    />
-                    <span>Đóng trước nguyên năm học (Ưu đãi -{siteConfig.annualDiscountPercent}%)</span>
-                  </label>
+                  <div className="space-y-2.5 pt-1">
+                    <label className="flex items-center gap-2.5 text-sm text-amber-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={calcAnnual}
+                        onChange={(e) => setCalcAnnual(e.target.checked)}
+                        className="rounded accent-amber-400"
+                      />
+                      <span>
+                        Đóng trước nguyên năm 12 tháng (Ưu đãi -{siteConfig.annualDiscountPercent}% trên học phí chính)
+                      </span>
+                    </label>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
+                      <span>Gia đình gửi nhiều con (cộng dồn % trên học phí chính):</span>
+                      <div className="inline-flex items-center gap-1">
+                        {[0, 5, 10, 15].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => setCalcSiblingPct(pct)}
+                            className={`px-2 py-1 rounded font-mono-num font-semibold cursor-pointer ${
+                              calcSiblingPct === pct
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                            }`}
+                          >
+                            {pct === 0 ? '1 con' : `-${pct}%`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
 
                   <div className="pt-4 border-t border-slate-800 space-y-1.5 text-sm">
                     <div className="flex justify-between text-slate-300">
-                      <span>Học phí chính khóa</span>
-                      <span className="font-mono-num">{formatVnd(estimatedFee.base)}</span>
+                      <span>Học phí chính khóa ({estimatedFee.monthsCount} tháng)</span>
+                      <span className="font-mono-num">{formatVnd(estimatedFee.baseAmount)}</span>
                     </div>
-                    {estimatedFee.boarding > 0 && (
+                    {estimatedFee.boardingAmount > 0 && (
                       <div className="flex justify-between text-slate-300">
-                        <span>Bán trú cơm nước</span>
-                        <span className="font-mono-num">{formatVnd(estimatedFee.boarding)}</span>
+                        <span>Bán trú cơm nước (không giảm %)</span>
+                        <span className="font-mono-num">{formatVnd(estimatedFee.boardingAmount)}</span>
                       </div>
                     )}
-                    {estimatedFee.shuttle > 0 && (
+                    {estimatedFee.shuttleAmount > 0 && (
                       <div className="flex justify-between text-slate-300">
-                        <span>Đưa rước tận nơi</span>
-                        <span className="font-mono-num">{formatVnd(estimatedFee.shuttle)}</span>
+                        <span>Đưa rước tận nơi (không giảm %)</span>
+                        <span className="font-mono-num">{formatVnd(estimatedFee.shuttleAmount)}</span>
                       </div>
                     )}
-                    {estimatedFee.discount > 0 && (
+                    {estimatedFee.siblingDiscountAmount > 0 && (
                       <div className="flex justify-between text-emerald-400">
-                        <span>Ưu đãi nguyên năm (-{siteConfig.annualDiscountPercent}%)</span>
-                        <span className="font-mono-num">-{formatVnd(estimatedFee.discount)}</span>
+                        <span>Ưu đãi nhiều con (-{estimatedFee.siblingDiscountPercent}% học phí chính)</span>
+                        <span className="font-mono-num">-{formatVnd(estimatedFee.siblingDiscountAmount)}</span>
+                      </div>
+                    )}
+                    {estimatedFee.annualDiscountAmount > 0 && (
+                      <div className="flex justify-between text-emerald-400">
+                        <span>Ưu đãi đóng 12 tháng (-{estimatedFee.annualDiscountPercent}% học phí chính)</span>
+                        <span className="font-mono-num">-{formatVnd(estimatedFee.annualDiscountAmount)}</span>
                       </div>
                     )}
                     <div className="flex justify-between items-baseline pt-2 border-t border-slate-800">
-                      <span className="font-semibold text-white">Học phí thực đóng / tháng</span>
+                      <span className="font-semibold text-white">
+                        {calcAnnual ? 'Quy đổi trung bình / tháng' : 'Học phí thực đóng / tháng'}
+                      </span>
                       <span className="font-mono-num text-xl font-bold text-white">
-                        {formatVnd(estimatedFee.monthlyFinal)}
+                        {formatVnd(estimatedFee.monthlyEquivalent)}
                       </span>
                     </div>
+                    {calcAnnual && (
+                      <div className="flex justify-between items-baseline text-xs text-amber-300">
+                        <span>Tổng đóng nguyên năm 12 tháng (tiết kiệm {formatVnd(estimatedFee.discountAmount)})</span>
+                        <span className="font-mono-num font-bold text-sm">
+                          {formatVnd(estimatedFee.totalAmount)}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap gap-2.5 pt-2">
@@ -2330,7 +2635,8 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                   <p className="font-semibold">Đăng ký thành công</p>
                   <p className="mt-1">{enrollResult.message}</p>
                   <p className="mt-2 font-mono-num font-bold">
-                    Học phí dự kiến: {formatVnd(enrollResult.total)} / tháng
+                    Tổng học phí kỳ đăng ký: {formatVnd(enrollResult.total)}
+                    {enrollForm.annualPrepaid ? ' (Nguyên năm 12 tháng)' : ' / tháng'}
                   </p>
                 </div>
                 <div className="flex justify-end gap-2">
@@ -2427,12 +2733,28 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     checked={enrollForm.annualPrepaid}
                     onChange={(e) => setEnrollForm({ ...enrollForm, annualPrepaid: e.target.checked })}
                   />
-                  <span>Đóng trước nguyên năm học (Ưu đãi -{siteConfig.annualDiscountPercent}%)</span>
+                  <span>
+                    Đóng trước nguyên năm 12 tháng (Ưu đãi -{siteConfig.annualDiscountPercent}% trên học phí chính)
+                  </span>
                 </label>
 
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-sm">
-                  <span className="text-slate-600">Ước tính học phí / tháng:</span>
-                  <span className="font-mono-num font-bold text-blue-950">{formatVnd(modalEstimatedFee)}</span>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-1 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-600">
+                      {enrollForm.annualPrepaid
+                        ? 'Tổng học phí nguyên năm (12 tháng):'
+                        : 'Ước tính học phí / tháng:'}
+                    </span>
+                    <span className="font-mono-num font-bold text-blue-950">
+                      {formatVnd(modalEstimatedFee.totalAmount)}
+                    </span>
+                  </div>
+                  {enrollForm.annualPrepaid && (
+                    <p className="text-[11px] text-emerald-700 font-mono-num text-right">
+                      Quy đổi {formatVnd(modalEstimatedFee.monthlyEquivalent)}/tháng · Tiết kiệm{' '}
+                      {formatVnd(modalEstimatedFee.discountAmount)}
+                    </p>
+                  )}
                 </div>
 
                 {enrollError && <p className="text-xs text-red-700">{enrollError}</p>}

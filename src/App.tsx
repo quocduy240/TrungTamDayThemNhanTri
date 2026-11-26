@@ -50,6 +50,7 @@ import {
 import { DEFAULT_AUTH_POLICY } from './lib/identityPolicy';
 import {
   apiRequest,
+  canManageFinance,
   isAdminOrSuper,
   isSuperAdminRole,
   roleLabel,
@@ -166,18 +167,30 @@ export default function App() {
     return () => unsub();
   }, [modeInitializedFromConfig]);
 
-  // Subscribe to live Firestore Courses, Timetable & Exams (offline-cached with graceful fallback)
+  // Subscribe to live Firestore Courses & Exams (public catalog)
   useEffect(() => {
     if (!bootstrap) return;
     const unsubCourses = subscribeCourses(bootstrap.courses, setLiveCourses);
-    const unsubTimetable = subscribePublicTimetable(bootstrap.timetable || [], setLiveTimetable);
     const unsubExams = subscribePublicExams(bootstrap.exams || [], setLiveExams);
     return () => {
       unsubCourses();
-      unsubTimetable();
       unsubExams();
     };
   }, [bootstrap]);
+
+  // Subscribe to Firestore timetable ONLY when authenticated (strict privacy for guests)
+  useEffect(() => {
+    if (!bootstrap || !currentUser) {
+      setLiveTimetable([]);
+      return;
+    }
+    const unsubTimetable = subscribePublicTimetable(
+      bootstrap.timetable || [],
+      setLiveTimetable,
+      true,
+    );
+    return () => unsubTimetable();
+  }, [bootstrap, currentUser]);
 
   const mergedBootstrap = useMemo<BootstrapPayload | null>(() => {
     if (!bootstrap) return null;
@@ -523,6 +536,8 @@ export default function App() {
   const unreadCount = workspace?.notifications.filter((n) => !n.read).length ?? 0;
   const activeRole = currentUser?.role || workspace?.user.role;
   const showSystemCmsNav = isAdminOrSuper(activeRole);
+  const showTuitionNav =
+    canManageFinance(activeRole) || activeRole === 'PARENT' || activeRole === 'STUDENT';
 
   const navItems: { id: CmsTab; label: string; icon: React.ReactNode }[] = [
     {
@@ -559,11 +574,15 @@ export default function App() {
       label: lang === 'vi' ? 'Thư viện Đề chuẩn' : 'National Exam Bank',
       icon: <BookOpen className="w-4 h-4" />,
     },
-    {
-      id: 'tuition',
-      label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing',
-      icon: <Wallet className="w-4 h-4" />,
-    },
+    ...(showTuitionNav
+      ? [
+          {
+            id: 'tuition' as CmsTab,
+            label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing',
+            icon: <Wallet className="w-4 h-4" />,
+          },
+        ]
+      : []),
     {
       id: 'support',
       label: lang === 'vi' ? 'Hỗ trợ 24/7 & Hạ tầng' : '24/7 AI & System',
@@ -826,7 +845,7 @@ export default function App() {
                 {activeTab === 'exams' && (
                   <ExamLibraryModule workspace={workspace} onRefresh={refreshWorkspace} />
                 )}
-                {activeTab === 'tuition' && (
+                {activeTab === 'tuition' && showTuitionNav && (
                   <TuitionModule
                     workspace={workspace}
                     siteConfig={siteConfig}
@@ -899,11 +918,12 @@ export default function App() {
                 <p className="text-xs font-semibold text-slate-500">
                   Hoặc trải nghiệm nhanh giao diện theo vai trò (chế độ xem thử):
                 </p>
-                <div className="grid sm:grid-cols-3 gap-2.5">
+                <div className="grid sm:grid-cols-2 gap-2.5">
                   {[
-                    { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Điểm danh & TKB' },
-                    { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'Học bạ & Học phí' },
-                    { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'Đề thi & AI chấm' },
+                    { role: 'MANAGER' as UserRole, label: 'Người quản lý', desc: 'Sửa TKB, Phòng, GV & HS' },
+                    { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Lịch rảnh, Xin nghỉ & Điểm danh' },
+                    { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'TKB, Học bạ & Học phí các con' },
+                    { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'TKB lớp, Đề thi & AI chấm' },
                   ].map((item) => (
                     <button
                       key={item.role}

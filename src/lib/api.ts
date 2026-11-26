@@ -6,12 +6,15 @@ import type {
   AuthUser,
   CoursePackage,
   ExpenseRecord,
+  FamilyProfile,
   FanpagePost,
   FeedbackTicket,
   NationalExam,
+  Room,
   ScoreRecord,
   Student,
   Teacher,
+  TeacherLeave,
   TimetableSlot,
   TuitionRecord,
   UserRole,
@@ -104,7 +107,10 @@ export interface BootstrapPayload {
 
 export interface WorkspacePayload {
   user: AuthUser;
+  rooms: Room[];
   teachers: Teacher[];
+  teacherLeaves: TeacherLeave[];
+  families: FamilyProfile[];
   students: Student[];
   timetable: TimetableSlot[];
   scores: ScoreRecord[];
@@ -126,6 +132,7 @@ export function roleLabel(role: UserRole, lang: 'vi' | 'en' = 'vi'): string {
   const map: Record<UserRole, { vi: string; en: string }> = {
     SUPER_ADMIN: { vi: 'SuperAdmin (Toàn quyền)', en: 'SuperAdmin' },
     ADMIN: { vi: 'Admin (Quản trị vận hành)', en: 'Operations Admin' },
+    MANAGER: { vi: 'Người quản lý (Học vụ & TKB)', en: 'Academic Manager' },
     TEACHER: { vi: 'Giáo viên', en: 'Teacher' },
     PARENT: { vi: 'Phụ huynh', en: 'Parent' },
     STUDENT: { vi: 'Học sinh', en: 'Student' },
@@ -134,6 +141,14 @@ export function roleLabel(role: UserRole, lang: 'vi' | 'en' = 'vi'): string {
 }
 
 export function isAdminOrSuper(role?: UserRole | null): boolean {
+  return role === 'SUPER_ADMIN' || role === 'ADMIN';
+}
+
+export function isTimetableManager(role?: UserRole | null): boolean {
+  return role === 'SUPER_ADMIN' || role === 'ADMIN' || role === 'MANAGER';
+}
+
+export function canManageFinance(role?: UserRole | null): boolean {
   return role === 'SUPER_ADMIN' || role === 'ADMIN';
 }
 

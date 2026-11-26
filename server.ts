@@ -29,18 +29,37 @@ import {
   maskPhoneVN,
   normalizePhoneVN,
 } from './src/lib/identityPolicy.ts';
+import {
+  ALL_SHIFT_KEYS,
+  evaluateMoveOrSwap,
+  evaluateSlotConstraints,
+  getTimeRangeForShift,
+  studentBelongsToClass,
+  suggestAvailableSubstitutes,
+} from './src/lib/timetableEngine.ts';
+import {
+  calculateTuitionBreakdown,
+  findFamilyForStudent,
+  getStudentsInFamily,
+} from './src/lib/tuitionCalculator.ts';
 import type {
   AccessAuditLog,
   AttendanceRecord,
   AuthPolicy,
   AuthUser,
+  BillingCycle,
   DatabaseState,
   DayOfWeek,
+  FamilyProfile,
   FeedbackTicket,
+  Room,
   ScoreRecord,
   SessionPeriod,
   ShiftCode,
   Student,
+  Teacher,
+  TeacherGroup,
+  TeacherLeave,
   TimetableSlot,
   TuitionRecord,
   UserRole,
@@ -216,11 +235,10 @@ app.get('/api/v1/bootstrap', (_req, res) => {
       domain: 'daythemnhantri.com',
     },
     courses: db.courses,
-    teachers: db.teachers.map(({ phone: _omitPhone, ...publicTeacher }) => ({
+    teachers: db.teachers.map(({ phone: _omitPhone, email: _omitEmail, ...publicTeacher }) => ({
       ...publicTeacher,
       phone: '',
     })),
-    timetable: db.timetable,
     exams: db.exams,
     gallery: REAL_CENTER_GALLERY,
     fanpagePosts: FANPAGE_POSTS_FEED,
@@ -592,6 +610,24 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
     return;
   }
 
+  // Auto-link Teacher by registered Gmail
+  const teacherMatch = db.teachers.find((t) => t.email && t.email.toLowerCase() === email);
+  if (teacherMatch && portalIntent !== 'PARENT' && portalIntent !== 'STUDENT') {
+    const user: AuthUser = {
+      id: verified.uid,
+      name: teacherMatch.name,
+      email,
+      photoURL: verified.photoURL,
+      role: 'TEACHER',
+      linkedTeacherId: teacherMatch.id,
+      authProvider: 'GOOGLE_FIREBASE',
+      loginChannel: 'STAFF_GMAIL',
+    };
+    const token = signSessionToken(user);
+    res.json({ token, user });
+    return;
+  }
+
   const parentMatches = db.students.filter(
     (s) =>
       s.accessStatus !== 'LOCKED' &&
@@ -774,7 +810,10 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
 
   const requestedRole = req.body?.requestedRole;
   const fallbackRole: UserRole =
-    requestedRole === 'TEACHER' || requestedRole === 'PARENT' || requestedRole === 'STUDENT'
+    requestedRole === 'MANAGER' ||
+    requestedRole === 'TEACHER' ||
+    requestedRole === 'PARENT' ||
+    requestedRole === 'STUDENT'
       ? requestedRole
       : 'STUDENT';
   const user: AuthUser = {
@@ -783,8 +822,9 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
     email,
     photoURL: verified.photoURL,
     role: fallbackRole,
+    linkedTeacherId: teacherMatch?.id,
     authProvider: 'GOOGLE_FIREBASE',
-    loginChannel: fallbackRole === 'TEACHER' ? 'STAFF_GMAIL' : 'STUDENT_GMAIL',
+    loginChannel: fallbackRole === 'TEACHER' || fallbackRole === 'MANAGER' ? 'STAFF_GMAIL' : 'STUDENT_GMAIL',
   };
   const token = signSessionToken(user);
   res.json({ token, user });
@@ -829,12 +869,39 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
   const user = req.user!;
   const isAdminUser = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
-  const isStaff = isAdminUser || user.role === 'TEACHER';
+  const isManagerUser = isAdminUser || user.role === 'MANAGER';
+  const isTeacherUser = user.role === 'TEACHER';
+  const isStaff = isManagerUser || isTeacherUser;
+
   const allowedStudentIds = new Set(getAllowedStudentIds(user));
+
+  // For Parents: auto-group all children sharing the same registered parentPhone or parentEmails
+  if (user.role === 'PARENT') {
+    const seedStudents = db.students.filter((s) => allowedStudentIds.has(s.id));
+    const phones = new Set(
+      seedStudents.map((s) => normalizePhoneVN(s.parentPhone)).filter((p) => p.length >= 8),
+    );
+    const emails = new Set<string>();
+    if (user.email && user.email.includes('@')) emails.add(user.email.toLowerCase());
+    seedStudents.forEach((s) => (s.parentEmails || []).forEach((e) => emails.add(e.toLowerCase())));
+    db.students.forEach((s) => {
+      if (s.accessStatus === 'LOCKED') return;
+      const pMatch = phones.has(normalizePhoneVN(s.parentPhone));
+      const eMatch = (s.parentEmails || []).some((e) => emails.has(e.toLowerCase()));
+      if (pMatch || eMatch) allowedStudentIds.add(s.id);
+    });
+  }
 
   const students = isStaff
     ? db.students
     : db.students.filter((s) => allowedStudentIds.has(s.id));
+
+  // Strict Timetable Projection by role (zero exposure of unrelated schedules)
+  const timetable = isManagerUser
+    ? db.timetable
+    : isTeacherUser
+      ? db.timetable.filter((sl) => !user.linkedTeacherId || sl.teacherId === user.linkedTeacherId)
+      : db.timetable.filter((sl) => students.some((st) => studentBelongsToClass(st, sl.centerClass)));
 
   const scores = isStaff
     ? db.scores
@@ -844,9 +911,32 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     ? db.attendance
     : db.attendance.filter((a) => allowedStudentIds.has(a.studentId));
 
-  const tuition = isStaff
+  // Finance privacy: ADMIN/SUPER_ADMIN see all; PARENT/STUDENT see own; MANAGER/TEACHER do not access tuition
+  const tuition = isAdminUser
     ? db.tuition
-    : db.tuition.filter((t) => allowedStudentIds.has(t.studentId));
+    : user.role === 'PARENT' || user.role === 'STUDENT'
+      ? db.tuition.filter((t) => allowedStudentIds.has(t.studentId))
+      : [];
+
+  const families = isAdminUser
+    ? db.families
+    : user.role === 'PARENT'
+      ? db.families.filter((f) => students.some((st) => findFamilyForStudent(st, [f]) !== undefined))
+      : [];
+
+  const teacherLeaves = isManagerUser
+    ? db.teacherLeaves
+    : isTeacherUser
+      ? db.teacherLeaves.filter((l) => l.teacherId === user.linkedTeacherId)
+      : [];
+
+  const teachers = isManagerUser
+    ? db.teachers
+    : db.teachers.map((t) =>
+        isTeacherUser && t.id === user.linkedTeacherId
+          ? t
+          : { ...t, phone: '', email: undefined },
+      );
 
   const tickets = isStaff
     ? db.tickets
@@ -858,16 +948,21 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
       );
 
   const notifications = db.notifications.filter(
-    (n) => n.targetRole === 'ALL' || n.targetRole === user.role || isAdminUser,
+    (n) =>
+      n.targetRole === 'ALL' ||
+      n.targetRole === user.role ||
+      isAdminUser ||
+      (user.role === 'MANAGER' && n.targetRole === 'MANAGER'),
   );
 
   res.json({
     user,
-    teachers: isStaff
-      ? db.teachers
-      : db.teachers.map(({ phone: _omit, ...pub }) => ({ ...pub, phone: '' })),
+    rooms: db.rooms,
+    teachers,
+    teacherLeaves,
+    families,
     students,
-    timetable: db.timetable,
+    timetable,
     scores,
     attendance,
     tuition,
@@ -881,7 +976,7 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
 });
 
 // ============================================================
-// COURSE ENROLLMENT (PUBLIC -> CREATES STUDENT + TUITION)
+// COURSE ENROLLMENT (PUBLIC -> CREATES STUDENT + 12M/SIBLING TUITION)
 // ============================================================
 
 app.post('/api/v1/enrollments', (req, res) => {
@@ -920,15 +1015,41 @@ app.post('/api/v1/enrollments', (req, res) => {
     ? selectedSubjects.map(String)
     : course.subjects.slice(0, 3);
 
+  const normalizedPhone = normalizePhoneVN(parentPhone) || parentPhone.trim();
+  let family = db.families.find((f) => normalizePhoneVN(f.parentPhone) === normalizedPhone);
+  const existingSiblings = db.students.filter((s) => normalizePhoneVN(s.parentPhone) === normalizedPhone);
+  if (!family && existingSiblings.length > 0) {
+    family = {
+      id: `fam-${Date.now()}`,
+      parentName: typeof parentName === 'string' && parentName.trim() ? parentName.trim() : existingSiblings[0].parentName,
+      parentPhone: normalizedPhone,
+      parentEmails: existingSiblings[0].parentEmails || [],
+      siblingDiscountPercent: 5,
+      defaultBillingCycle: annualPrepaid ? 'ANNUAL_12M' : 'MONTHLY',
+      note: 'Tự động gom nhóm gia đình có nhiều con theo SĐT phụ huynh.',
+    };
+    db.families.unshift(family);
+    existingSiblings.forEach((s) => {
+      s.familyId = family!.id;
+    });
+  }
+
   const baseMonthly =
     course.billingModel === 'PER_SUBJECT'
       ? course.monthlyPrice * subjectsArray.length
       : course.monthlyPrice;
   const boardingAmt = hasBoarding && course.boardingAddonPrice ? course.boardingAddonPrice : 0;
   const shuttleAmt = hasShuttle && course.shuttleAddonPrice ? course.shuttleAddonPrice : 0;
-  const subtotal = baseMonthly + boardingAmt + shuttleAmt;
-  const discount = annualPrepaid ? Math.round(subtotal * (course.annualDiscountPercent / 100)) : 0;
-  const totalAmount = subtotal - discount;
+  const billingCycle: BillingCycle = annualPrepaid ? 'ANNUAL_12M' : 'MONTHLY';
+
+  const calc = calculateTuitionBreakdown({
+    baseMonthly,
+    boardingMonthly: boardingAmt,
+    shuttleMonthly: shuttleAmt,
+    siblingDiscountPercent: family ? family.siblingDiscountPercent : 0,
+    annualDiscountPercent: course.annualDiscountPercent || 10,
+    billingCycle,
+  });
 
   const newStudentId = `st-${Date.now()}`;
   const centerClass =
@@ -943,19 +1064,21 @@ app.post('/api/v1/enrollments', (req, res) => {
 
   const newStudent: Student = {
     id: newStudentId,
+    familyId: family?.id,
     code: `NT-${numericGrade}-${String(db.students.length + 1).padStart(2, '0')}`,
     parentLinkCode: generateParentLinkCode(numericGrade),
     fullName: studentName.trim(),
     grade: numericGrade,
     level: course.level,
     centerClass,
+    enrolledClasses: [centerClass],
     schoolClass: `${numericGrade}A`,
     school: typeof school === 'string' && school.trim() ? school.trim() : 'THCS Lý Thường Kiệt',
     homeroomTeacher: numericGrade <= 5 ? 'Cô Tâm' : numericGrade <= 9 ? 'Cô Nghi' : 'Cô Mẫn',
     room: numericGrade <= 5 ? 'Phòng 1' : 'Phòng 2',
     parentName: typeof parentName === 'string' && parentName.trim() ? parentName.trim() : 'Phụ huynh mới',
-    parentPhone: normalizePhoneVN(parentPhone) || parentPhone.trim(),
-    parentZalo: normalizePhoneVN(parentPhone) || parentPhone.trim(),
+    parentPhone: normalizedPhone,
+    parentZalo: normalizedPhone,
     accessPin: generateAccessPin(),
     accessStatus: 'ACTIVE',
     packageType: course.billingModel,
@@ -968,18 +1091,32 @@ app.post('/api/v1/enrollments', (req, res) => {
     status: 'ACTIVE',
   };
 
+  const discountNotes: string[] = [];
+  if (calc.siblingDiscountPercent > 0) discountNotes.push(`-${calc.siblingDiscountPercent}% nhiều con`);
+  if (calc.annualDiscountPercent > 0) discountNotes.push(`-${calc.annualDiscountPercent}% đóng 12 tháng`);
+
   const newTuition: TuitionRecord = {
     id: `tui-${Date.now()}`,
+    familyId: family?.id,
     studentId: newStudentId,
     studentName: newStudent.fullName,
     centerClass: newStudent.centerClass,
     parentPhone: newStudent.parentPhone,
-    monthLabel: annualPrepaid ? 'Đăng ký mới (Ưu đãi nguyên năm -10%)' : 'Tháng 12/2026 (Đăng ký mới)',
-    baseAmount: baseMonthly,
-    boardingAmount: boardingAmt,
-    shuttleAmount: shuttleAmt,
-    discountAmount: discount,
-    totalAmount,
+    monthLabel:
+      billingCycle === 'ANNUAL_12M'
+        ? `Gói nguyên năm 12 tháng (${discountNotes.join(' + ') || 'Chuẩn'})`
+        : `Tháng 12/2026${discountNotes.length ? ` (${discountNotes.join(' + ')})` : ''}`,
+    billingCycle,
+    monthsCount: calc.monthsCount,
+    baseAmount: calc.baseAmount,
+    boardingAmount: calc.boardingAmount,
+    shuttleAmount: calc.shuttleAmount,
+    siblingDiscountPercent: calc.siblingDiscountPercent,
+    annualDiscountPercent: calc.annualDiscountPercent,
+    siblingDiscountAmount: calc.siblingDiscountAmount,
+    annualDiscountAmount: calc.annualDiscountAmount,
+    discountAmount: calc.discountAmount,
+    totalAmount: calc.totalAmount,
     paidAmount: 0,
     dueDate: '2026-12-05',
     status: 'DUE_SOON',
@@ -994,7 +1131,7 @@ app.post('/api/v1/enrollments', (req, res) => {
     phone: newStudent.parentPhone,
     category: 'CONSULTATION',
     subject: `Đăng ký khóa ${course.title}`,
-    message: `Đăng ký lớp ${centerClass}, môn: ${subjectsArray.join(', ')}. Bán trú: ${hasBoarding ? 'Có' : 'Không'}, Đưa rước: ${hasShuttle ? 'Có' : 'Không'}, Đóng nguyên năm: ${annualPrepaid ? 'Có (-10%)' : 'Không'}.`,
+    message: `Đăng ký lớp ${centerClass}, môn: ${subjectsArray.join(', ')}. Bán trú: ${hasBoarding ? 'Có' : 'Không'}, Đưa rước: ${hasShuttle ? 'Có' : 'Không'}, Chu kỳ: ${billingCycle === 'ANNUAL_12M' ? 'Nguyên năm 12 tháng (-10% HP chính)' : 'Theo tháng'}.`,
     status: 'OPEN',
   };
 
@@ -1005,7 +1142,7 @@ app.post('/api/v1/enrollments', (req, res) => {
     id: `ntf-${Date.now()}`,
     createdAt: nowFormatted(),
     title: 'Đăng ký khóa học mới',
-    body: `Em ${newStudent.fullName} (${centerClass}) vừa đăng ký ${course.title}. Tổng học phí dự kiến: ${totalAmount.toLocaleString('vi-VN')}đ/tháng.`,
+    body: `Em ${newStudent.fullName} (${centerClass}) vừa đăng ký ${course.title}. Tổng học phí dự kiến: ${calc.totalAmount.toLocaleString('vi-VN')}đ (${calc.monthsCount} tháng).`,
     channel: 'APP',
     targetRole: 'ADMIN',
     read: false,
@@ -1019,7 +1156,7 @@ app.post('/api/v1/enrollments', (req, res) => {
 // STUDENTS & SMART BULK IMPORT (EXCEL / IMAGE OCR)
 // ============================================================
 
-app.post('/api/v1/students', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.post('/api/v1/students', requireAuth(['MANAGER', 'TEACHER']), (req, res) => {
   const b = req.body || {};
   if (!b.fullName || typeof b.fullName !== 'string') {
     res.status(400).json({ error: 'Thiếu họ tên học sinh.' });
@@ -1122,7 +1259,7 @@ app.patch('/api/v1/students/:id/access', requireAuth(['ADMIN']), (req: AuthedReq
   res.json({ student });
 });
 
-app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.post('/api/v1/students/import', requireAuth(['MANAGER', 'TEACHER']), (req, res) => {
   const rows = Array.isArray(req.body?.students) ? req.body.students : [];
   if (rows.length === 0) {
     res.status(400).json({ error: 'Không có dữ liệu học sinh để nhập.' });
@@ -1178,85 +1315,395 @@ app.post('/api/v1/students/import', requireAuth(['ADMIN', 'TEACHER']), (req, res
 });
 
 // ============================================================
-// DYNAMIC TIMETABLE, CONFLICT ENGINE, SUBSTITUTE & .ICS EXPORT
+// DYNAMIC ROOMS, 2-GROUP TEACHERS, AVAILABILITY & LEAVES
 // ============================================================
 
-const SHIFT_TIMES: Record<`${SessionPeriod}_${ShiftCode}`, string> = {
-  SANG_CA_1: '07:15–08:45',
-  SANG_CA_2: '09:15–10:45',
-  CHIEU_CA_1: '13:30–15:00',
-  CHIEU_CA_2: '15:15–16:45',
-  TOI_CA_1: '17:30–19:00',
-  TOI_CA_2: '19:00–20:30',
-};
-
-function findConflicts(
-  slots: TimetableSlot[],
-  candidate: {
-    id?: string;
-    day: DayOfWeek;
-    period: SessionPeriod;
-    shift: ShiftCode;
-    teacherId: string;
-    room: string;
-    centerClass: string;
-  },
-): string[] {
-  const conflicts: string[] = [];
-  for (const s of slots) {
-    if (candidate.id && s.id === candidate.id) continue;
-    if (s.day === candidate.day && s.period === candidate.period && s.shift === candidate.shift && s.status !== 'OFF') {
-      if (s.teacherId === candidate.teacherId) {
-        conflicts.push(`Trùng lịch giáo viên: ${s.teacherName} đang dạy ${s.subject} cho ${s.centerClass} tại ${s.room}.`);
-      }
-      if (s.room === candidate.room) {
-        conflicts.push(`Trùng phòng học: ${s.room} đang sử dụng bởi ${s.centerClass} (${s.subject} – ${s.teacherName}).`);
-      }
-      if (s.centerClass === candidate.centerClass) {
-        conflicts.push(`Trùng lịch lớp: ${s.centerClass} đã có tiết ${s.subject} trong ca này.`);
-      }
-    }
-  }
-  return conflicts;
-}
-
-app.post('/api/v1/timetable/check-conflict', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.post('/api/v1/rooms', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
   const db = loadDb();
-  const { day, period, shift, teacherId, room, centerClass, id } = req.body || {};
-  const conflicts = findConflicts(db.timetable, { id, day, period, shift, teacherId, room, centerClass });
-  res.json({ hasConflict: conflicts.length > 0, conflicts });
+  const b = req.body || {};
+  const code = String(b.code || '').trim().toUpperCase().slice(0, 24);
+  const name = String(b.name || '').trim().slice(0, 80);
+  if (code.length < 2 || name.length < 2) {
+    res.status(400).json({ error: 'Vui lòng nhập Mã phòng (VD: P106) và Tên phòng hợp lệ.' });
+    return;
+  }
+  if (db.rooms.some((r) => r.code.toUpperCase() === code || r.name.toLowerCase() === name.toLowerCase())) {
+    res.status(409).json({ error: `Phòng ${name} (${code}) đã tồn tại.` });
+    return;
+  }
+  const room: Room = {
+    id: `room-${Date.now()}`,
+    code,
+    name,
+    campus: String(b.campus || 'Cơ sở 1 (35 Lý Thường Kiệt)').trim().slice(0, 120),
+    capacity: Math.max(1, Math.min(100, Number(b.capacity) || 18)),
+    active: b.active !== false,
+    note: b.note ? String(b.note).trim().slice(0, 240) : undefined,
+  };
+  db.rooms.push(room);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'ROOM_CREATE',
+    targetLabel: `${room.name} (${room.code})`,
+    detail: `Thêm phòng học mới tại ${room.campus}, sức chứa ${room.capacity} HS.`,
+  });
+  saveDb(db);
+  res.status(201).json({ room });
 });
 
-app.post('/api/v1/timetable', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.patch('/api/v1/rooms/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
   const db = loadDb();
-  const { day, period, shift, centerClass, subject, teacherId, room, slotType, note } = req.body || {};
-  const teacher = db.teachers.find((t) => t.id === teacherId);
-  if (!teacher || !day || !period || !shift || !centerClass || !subject || !room) {
-    res.status(400).json({ error: 'Vui lòng điền đầy đủ thông tin tiết học.' });
+  const room = db.rooms.find((r) => r.id === req.params.id);
+  if (!room) {
+    res.status(404).json({ error: 'Không tìm thấy phòng học.' });
     return;
   }
-  const conflicts = findConflicts(db.timetable, { day, period, shift, teacherId, room, centerClass });
-  if (conflicts.length > 0) {
-    res.status(409).json({ error: conflicts[0], conflicts });
+  const b = req.body || {};
+  const oldName = room.name;
+  if (typeof b.code === 'string' && b.code.trim().length >= 2) room.code = b.code.trim().toUpperCase().slice(0, 24);
+  if (typeof b.name === 'string' && b.name.trim().length >= 2) room.name = b.name.trim().slice(0, 80);
+  if (typeof b.campus === 'string' && b.campus.trim()) room.campus = b.campus.trim().slice(0, 120);
+  if (b.capacity !== undefined) room.capacity = Math.max(1, Math.min(100, Number(b.capacity) || room.capacity));
+  if (typeof b.active === 'boolean') room.active = b.active;
+  if (typeof b.note === 'string') room.note = b.note.trim().slice(0, 240) || undefined;
+
+  if (oldName !== room.name) {
+    db.timetable.forEach((slot) => {
+      if (slot.roomId === room.id || slot.room === oldName) {
+        slot.room = room.name;
+        slot.roomId = room.id;
+      }
+    });
+  }
+  saveDb(db);
+  res.json({ room });
+});
+
+app.delete('/api/v1/rooms/:id', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const room = db.rooms.find((r) => r.id === req.params.id);
+  if (!room) {
+    res.status(404).json({ error: 'Không tìm thấy phòng học.' });
+    return;
+  }
+  const inUse = db.timetable.some((s) => s.status !== 'OFF' && (s.roomId === room.id || s.room === room.name));
+  if (inUse) {
+    res.status(409).json({
+      error: `Phòng ${room.name} đang có tiết học trong Thời khóa biểu. Vui lòng đổi phòng cho các tiết đó hoặc chuyển trạng thái Tạm ngưng.`,
+    });
+    return;
+  }
+  db.rooms = db.rooms.filter((r) => r.id !== room.id);
+  saveDb(db);
+  res.json({ deleted: true });
+});
+
+app.post('/api/v1/teachers', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  const shortName = String(b.shortName || name.split(' ').slice(-2).join(' ')).trim();
+  if (name.length < 2) {
+    res.status(400).json({ error: 'Vui lòng nhập đầy đủ họ tên giáo viên.' });
+    return;
+  }
+  const group: TeacherGroup = b.teacherGroup === 'TUTOR_REVIEW' ? 'TUTOR_REVIEW' : 'SUBJECT';
+  const subjectsRaw = Array.isArray(b.subjects)
+    ? b.subjects
+    : typeof b.subjects === 'string'
+      ? b.subjects.split(/[,;]/)
+      : [];
+  const subjects = subjectsRaw.map((s: unknown) => String(s || '').trim()).filter(Boolean);
+  const teacher: Teacher = {
+    id: `t-${Date.now()}`,
+    name: name.slice(0, 120),
+    shortName: (shortName || name).slice(0, 60),
+    teacherGroup: group,
+    subjects: subjects.length > 0 ? subjects : group === 'TUTOR_REVIEW' ? ['Trả bài', 'Soạn bài'] : ['Toán'],
+    degree: String(b.degree || 'Cử nhân Sư phạm').trim().slice(0, 140),
+    experienceYears: Math.max(0, Math.min(60, Number(b.experienceYears) || 3)),
+    phone: normalizePhoneVN(String(b.phone || '')) || String(b.phone || '').trim().slice(0, 40),
+    email: typeof b.email === 'string' && b.email.includes('@') ? b.email.trim().toLowerCase().slice(0, 160) : undefined,
+    roomDefault: String(b.roomDefault || db.rooms[0]?.name || 'Phòng 1').trim().slice(0, 60),
+    status: b.status === 'ON_LEAVE' ? 'ON_LEAVE' : 'ACTIVE',
+    availability: Array.isArray(b.availability) && b.availability.length > 0 ? b.availability.map(String) : [...ALL_SHIFT_KEYS],
+  };
+  db.teachers.push(teacher);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'TEACHER_CREATE',
+    targetLabel: `${teacher.name} (${group === 'TUTOR_REVIEW' ? 'GV Trả bài' : 'GV Bộ môn'})`,
+    detail: `Môn: ${teacher.subjects.join(', ')}${teacher.email ? ` · Gmail: ${teacher.email}` : ''}.`,
+  });
+  saveDb(db);
+  res.status(201).json({ teacher });
+});
+
+app.patch('/api/v1/teachers/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const teacher = db.teachers.find((t) => t.id === req.params.id);
+  if (!teacher) {
+    res.status(404).json({ error: 'Không tìm thấy giáo viên.' });
+    return;
+  }
+  const b = req.body || {};
+  const oldShort = teacher.shortName;
+  if (typeof b.name === 'string' && b.name.trim().length >= 2) teacher.name = b.name.trim().slice(0, 120);
+  if (typeof b.shortName === 'string' && b.shortName.trim().length >= 2) teacher.shortName = b.shortName.trim().slice(0, 60);
+  if (b.teacherGroup === 'SUBJECT' || b.teacherGroup === 'TUTOR_REVIEW') teacher.teacherGroup = b.teacherGroup;
+  if (b.subjects !== undefined) {
+    const arr = Array.isArray(b.subjects) ? b.subjects : String(b.subjects).split(/[,;]/);
+    const cleaned = arr.map((s: unknown) => String(s || '').trim()).filter(Boolean);
+    if (cleaned.length > 0) teacher.subjects = cleaned;
+  }
+  if (typeof b.degree === 'string' && b.degree.trim()) teacher.degree = b.degree.trim().slice(0, 140);
+  if (b.experienceYears !== undefined) teacher.experienceYears = Math.max(0, Math.min(60, Number(b.experienceYears) || 0));
+  if (typeof b.phone === 'string') teacher.phone = normalizePhoneVN(b.phone) || b.phone.trim().slice(0, 40);
+  if (typeof b.email === 'string') {
+    const cleaned = b.email.trim().toLowerCase();
+    teacher.email = cleaned && cleaned.includes('@') ? cleaned.slice(0, 160) : undefined;
+  }
+  if (typeof b.roomDefault === 'string' && b.roomDefault.trim()) teacher.roomDefault = b.roomDefault.trim().slice(0, 60);
+  if (b.status === 'ACTIVE' || b.status === 'ON_LEAVE') teacher.status = b.status;
+  if (Array.isArray(b.availability)) {
+    teacher.availability = b.availability.map(String).filter((k: string) => ALL_SHIFT_KEYS.includes(k));
+  }
+  if (oldShort !== teacher.shortName) {
+    db.timetable.forEach((slot) => {
+      if (slot.teacherId === teacher.id) slot.teacherName = teacher.shortName;
+    });
+  }
+  saveDb(db);
+  res.json({ teacher });
+});
+
+app.patch('/api/v1/teachers/:id/availability', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  if (user.role === 'TEACHER' && user.linkedTeacherId !== req.params.id) {
+    res.status(403).json({ error: 'Giáo viên chỉ có thể cập nhật khung giờ rảnh của chính mình.' });
+    return;
+  }
+  const teacher = db.teachers.find((t) => t.id === req.params.id);
+  if (!teacher) {
+    res.status(404).json({ error: 'Không tìm thấy giáo viên.' });
+    return;
+  }
+  const rawList = Array.isArray(req.body?.availability) ? req.body.availability : [];
+  teacher.availability = rawList.map(String).filter((k: string) => ALL_SHIFT_KEYS.includes(k));
+  saveDb(db);
+  res.json({ teacher });
+});
+
+app.post('/api/v1/teacher-leaves', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  const b = req.body || {};
+  const isManager = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER';
+  const teacherId = isManager ? String(b.teacherId || user.linkedTeacherId || '') : String(user.linkedTeacherId || '');
+  const teacher = db.teachers.find((t) => t.id === teacherId);
+  if (!teacher) {
+    res.status(400).json({ error: 'Không tìm thấy hồ sơ giáo viên tương ứng.' });
+    return;
+  }
+  const validDays: DayOfWeek[] = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+  const day = validDays.includes(b.day) ? (b.day as DayOfWeek) : null;
+  const period = b.period === 'ALL' || b.period === 'SANG' || b.period === 'CHIEU' || b.period === 'TOI' ? b.period : 'ALL';
+  const shift = b.shift === 'CA_1' || b.shift === 'CA_2' ? (b.shift as ShiftCode) : undefined;
+  const reason = String(b.reason || '').trim();
+  if (!day || reason.length < 3) {
+    res.status(400).json({ error: 'Vui lòng chọn thứ/ca nghỉ và nhập lý do nghỉ (tối thiểu 3 ký tự).' });
     return;
   }
 
-  const key = `${period}_${shift}` as keyof typeof SHIFT_TIMES;
+  const leave: TeacherLeave = {
+    id: `lv-${Date.now()}`,
+    teacherId: teacher.id,
+    teacherName: teacher.shortName,
+    day,
+    dateLabel: String(b.dateLabel || todayIso()).trim().slice(0, 40),
+    period,
+    shift: period === 'ALL' ? undefined : shift,
+    reason: reason.slice(0, 300),
+    status: isManager && b.autoApprove ? 'APPROVED' : 'PENDING',
+    createdBy: user.email,
+    reviewedBy: isManager && b.autoApprove ? user.email : undefined,
+    createdAt: nowFormatted(),
+  };
+  db.teacherLeaves.unshift(leave);
+
+  // Count affected timetable blocks so Managers know immediately
+  const affectedSlots = db.timetable.filter(
+    (sl) =>
+      sl.status !== 'OFF' &&
+      sl.teacherId === teacher.id &&
+      sl.day === leave.day &&
+      (leave.period === 'ALL' || (sl.period === leave.period && (!leave.shift || sl.shift === leave.shift))),
+  );
+  if (leave.status === 'APPROVED') {
+    affectedSlots.forEach((sl) => {
+      sl.status = 'TEACHER_ABSENT';
+      sl.note = `GV nghỉ phép (${leave.reason}) · Cần xếp GV dạy thay`;
+    });
+  }
+
+  db.notifications.unshift({
+    id: `ntf-${Date.now()}`,
+    createdAt: nowFormatted(),
+    title: `Báo nghỉ đột xuất · ${teacher.shortName} (${leave.day})`,
+    body: `${teacher.shortName} báo nghỉ ${leave.dateLabel} (${leave.period === 'ALL' ? 'Cả ngày' : `${leave.period}${leave.shift ? ' ' + leave.shift : ''}`}) — Lý do: ${leave.reason}. Ảnh hưởng ${affectedSlots.length} ca trên TKB.`,
+    channel: 'APP',
+    targetRole: 'MANAGER',
+    read: false,
+  });
+  saveDb(db);
+  res.status(201).json({ leave, affectedCount: affectedSlots.length });
+});
+
+app.patch('/api/v1/teacher-leaves/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const leave = db.teacherLeaves.find((l) => l.id === req.params.id);
+  if (!leave) {
+    res.status(404).json({ error: 'Không tìm thấy đơn xin nghỉ.' });
+    return;
+  }
+  const nextStatus = req.body?.status;
+  if (nextStatus !== 'APPROVED' && nextStatus !== 'REJECTED' && nextStatus !== 'PENDING') {
+    res.status(400).json({ error: 'Trạng thái duyệt không hợp lệ.' });
+    return;
+  }
+  leave.status = nextStatus;
+  leave.reviewedBy = req.user!.email;
+
+  if (nextStatus === 'APPROVED') {
+    db.timetable.forEach((sl) => {
+      if (
+        sl.status !== 'OFF' &&
+        sl.teacherId === leave.teacherId &&
+        sl.day === leave.day &&
+        (leave.period === 'ALL' || (sl.period === leave.period && (!leave.shift || sl.shift === leave.shift)))
+      ) {
+        sl.status = 'TEACHER_ABSENT';
+        sl.note = `GV nghỉ đã duyệt (${leave.reason}) · Cần bố trí dạy thay`;
+      }
+    });
+  }
+  saveDb(db);
+  res.json({ leave });
+});
+
+app.delete('/api/v1/teacher-leaves/:id', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const user = req.user!;
+  const leave = db.teacherLeaves.find((l) => l.id === req.params.id);
+  if (!leave) {
+    res.status(404).json({ error: 'Không tìm thấy đơn xin nghỉ.' });
+    return;
+  }
+  if (user.role === 'TEACHER' && (leave.teacherId !== user.linkedTeacherId || leave.status !== 'PENDING')) {
+    res.status(403).json({ error: 'Giáo viên chỉ có thể hủy đơn xin nghỉ đang chờ duyệt của chính mình.' });
+    return;
+  }
+  db.teacherLeaves = db.teacherLeaves.filter((l) => l.id !== leave.id);
+  saveDb(db);
+  res.json({ deleted: true });
+});
+
+// ============================================================
+// DYNAMIC TIMETABLE, 5-LAYER CONFLICT ENGINE, MOVE/SWAP & .ICS
+// ============================================================
+
+app.post('/api/v1/timetable/check-conflict', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const { id, day, period, shift, teacherId, room, roomId, centerClass, subject, slotType } = req.body || {};
+  const result = evaluateSlotConstraints(
+    {
+      id,
+      day,
+      period,
+      shift,
+      teacherId,
+      room: String(room || ''),
+      roomId,
+      centerClass: String(centerClass || ''),
+      subject: String(subject || ''),
+      slotType: slotType || 'MAIN',
+    },
+    {
+      timetable: db.timetable,
+      teachers: db.teachers,
+      rooms: db.rooms,
+      students: db.students,
+      leaves: db.teacherLeaves,
+      ignoreSlotIds: id ? [id] : [],
+    },
+  );
+  res.json({
+    hasConflict: !result.valid,
+    conflicts: result.hardConflicts,
+    suggestedFreeRooms: result.suggestedFreeRooms,
+    roomOnlyConflict: result.roomOnlyConflict,
+  });
+});
+
+app.post('/api/v1/timetable', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const { day, period, shift, centerClass, subject, teacherId, room, roomId, slotType, note, timeRange } = req.body || {};
+  const teacher = db.teachers.find((t) => t.id === teacherId);
+  const matchedRoom = db.rooms.find((r) => (roomId && r.id === roomId) || r.name === room);
+  const roomName = matchedRoom?.name || String(room || '').trim();
+  if (!teacher || !day || !period || !shift || !centerClass || !subject || !roomName) {
+    res.status(400).json({ error: 'Vui lòng điền đầy đủ thông tin ca học.' });
+    return;
+  }
+
+  const check = evaluateSlotConstraints(
+    {
+      day,
+      period,
+      shift,
+      centerClass: String(centerClass),
+      subject: String(subject),
+      teacherId: teacher.id,
+      room: roomName,
+      roomId: matchedRoom?.id,
+      slotType: slotType || 'MAIN',
+    },
+    {
+      timetable: db.timetable,
+      teachers: db.teachers,
+      rooms: db.rooms,
+      students: db.students,
+      leaves: db.teacherLeaves,
+    },
+  );
+  if (!check.valid) {
+    res.status(409).json({
+      error: check.hardConflicts[0],
+      conflicts: check.hardConflicts,
+      suggestedFreeRooms: check.suggestedFreeRooms,
+    });
+    return;
+  }
+
   const newSlot: TimetableSlot = {
     id: `tt-${Date.now()}`,
     weekLabel: 'Tuần 13 (23/11 – 28/11)',
     period,
     shift,
-    timeRange: SHIFT_TIMES[key] || '17:30–19:00',
+    timeRange: typeof timeRange === 'string' && timeRange.trim() ? timeRange.trim() : getTimeRangeForShift(period, shift),
     day,
-    centerClass: String(centerClass),
-    subject: String(subject),
+    centerClass: String(centerClass).trim(),
+    subject: String(subject).trim(),
     teacherId: teacher.id,
     teacherName: teacher.shortName,
-    room: String(room),
+    roomId: matchedRoom?.id,
+    room: roomName,
     slotType: slotType || 'MAIN',
     status: 'SCHEDULED',
-    note: note ? String(note) : undefined,
+    note: note ? String(note).trim() : undefined,
   };
 
   db.timetable.push(newSlot);
@@ -1264,7 +1711,7 @@ app.post('/api/v1/timetable', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
     id: `ntf-${Date.now()}`,
     createdAt: nowFormatted(),
     title: `Cập nhật Thời khóa biểu ${newSlot.centerClass}`,
-    body: `Đã thêm tiết ${newSlot.subject} (${newSlot.teacherName}) vào ${newSlot.day} · ${newSlot.timeRange} tại ${newSlot.room}.`,
+    body: `Đã thêm ca ${newSlot.subject} (${newSlot.teacherName}) vào ${newSlot.day} · ${newSlot.timeRange} tại ${newSlot.room}.`,
     channel: 'APP',
     targetRole: 'ALL',
     read: false,
@@ -1273,7 +1720,194 @@ app.post('/api/v1/timetable', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
   res.status(201).json({ slot: newSlot });
 });
 
-app.post('/api/v1/timetable/:id/suggest-substitute', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const slot = db.timetable.find((s) => s.id === req.params.id);
+  if (!slot) {
+    res.status(404).json({ error: 'Không tìm thấy block ca học.' });
+    return;
+  }
+  const b = req.body || {};
+  const nextDay = (b.day || slot.day) as DayOfWeek;
+  const nextPeriod = (b.period || slot.period) as SessionPeriod;
+  const nextShift = (b.shift || slot.shift) as ShiftCode;
+  const nextTeacherId = String(b.teacherId || slot.teacherId);
+  const teacher = db.teachers.find((t) => t.id === nextTeacherId);
+  if (!teacher) {
+    res.status(400).json({ error: 'Giáo viên không hợp lệ.' });
+    return;
+  }
+  const matchedRoom = db.rooms.find((r) => (b.roomId && r.id === b.roomId) || (b.room && r.name === b.room));
+  const nextRoomName = matchedRoom?.name || String(b.room || slot.room);
+  const nextRoomId = matchedRoom?.id || (b.room ? undefined : slot.roomId);
+  const nextClass = String(b.centerClass || slot.centerClass).trim();
+  const nextSubject = String(b.subject || slot.subject).trim();
+  const nextSlotType = (b.slotType || slot.slotType) as TimetableSlot['slotType'];
+  const nextStatus = (b.status || slot.status) as TimetableSlot['status'];
+
+  if (nextStatus !== 'OFF') {
+    const check = evaluateSlotConstraints(
+      {
+        id: slot.id,
+        day: nextDay,
+        period: nextPeriod,
+        shift: nextShift,
+        centerClass: nextClass,
+        subject: nextSubject,
+        teacherId: teacher.id,
+        room: nextRoomName,
+        roomId: nextRoomId,
+        slotType: nextSlotType,
+        status: nextStatus,
+      },
+      {
+        timetable: db.timetable,
+        teachers: db.teachers,
+        rooms: db.rooms,
+        students: db.students,
+        leaves: db.teacherLeaves,
+        ignoreSlotIds: [slot.id],
+      },
+    );
+    if (!check.valid) {
+      res.status(409).json({
+        error: check.hardConflicts[0],
+        conflicts: check.hardConflicts,
+        suggestedFreeRooms: check.suggestedFreeRooms,
+      });
+      return;
+    }
+  }
+
+  slot.day = nextDay;
+  slot.period = nextPeriod;
+  slot.shift = nextShift;
+  slot.timeRange =
+    typeof b.timeRange === 'string' && b.timeRange.trim()
+      ? b.timeRange.trim()
+      : getTimeRangeForShift(nextPeriod, nextShift);
+  slot.centerClass = nextClass;
+  slot.subject = nextSubject;
+  slot.teacherId = teacher.id;
+  slot.teacherName = teacher.shortName;
+  slot.room = nextRoomName;
+  slot.roomId = nextRoomId;
+  slot.slotType = nextSlotType;
+  slot.status = nextStatus;
+  if (b.note !== undefined) slot.note = String(b.note || '').trim() || undefined;
+  if (typeof b.weekLabel === 'string' && b.weekLabel.trim()) slot.weekLabel = b.weekLabel.trim();
+
+  saveDb(db);
+  res.json({ slot });
+});
+
+app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) => {
+  const db = loadDb();
+  const b = req.body || {};
+
+  // Support 1-click Undo restore of 1 or 2 previously modified blocks
+  if (Array.isArray(b.restoreSlots) && b.restoreSlots.length > 0) {
+    const restored: TimetableSlot[] = [];
+    for (const snap of b.restoreSlots as TimetableSlot[]) {
+      const idx = db.timetable.findIndex((s) => s.id === snap.id);
+      if (idx >= 0) {
+        db.timetable[idx] = { ...snap };
+        restored.push(db.timetable[idx]);
+      }
+    }
+    saveDb(db);
+    res.json({ restored: true, slots: restored });
+    return;
+  }
+
+  const sourceSlot = db.timetable.find((s) => s.id === b.slotId);
+  if (!sourceSlot) {
+    res.status(404).json({ error: 'Không tìm thấy block ca học nguồn.' });
+    return;
+  }
+  const targetSlot = b.swapWithSlotId ? db.timetable.find((s) => s.id === b.swapWithSlotId) || null : null;
+  const targetDay = (b.targetDay || targetSlot?.day || sourceSlot.day) as DayOfWeek;
+  const targetPeriod = (b.targetPeriod || targetSlot?.period || sourceSlot.period) as SessionPeriod;
+  const targetShift = (b.targetShift || targetSlot?.shift || sourceSlot.shift) as ShiftCode;
+
+  const evalRes = evaluateMoveOrSwap(
+    sourceSlot,
+    { day: targetDay, period: targetPeriod, shift: targetShift },
+    targetSlot,
+    {
+      timetable: db.timetable,
+      teachers: db.teachers,
+      rooms: db.rooms,
+      students: db.students,
+      leaves: db.teacherLeaves,
+    },
+  );
+
+  if (!evalRes.valid) {
+    res.status(409).json({
+      error: evalRes.reasons[0] || 'Không thể di chuyển/hoán đổi do xung đột ràng buộc.',
+      conflicts: evalRes.reasons,
+    });
+    return;
+  }
+
+  const previousSnapshots: TimetableSlot[] = targetSlot
+    ? [{ ...sourceSlot }, { ...targetSlot }]
+    : [{ ...sourceSlot }];
+
+  if (evalRes.mode === 'SWAP' && targetSlot) {
+    const srcCopy = { ...sourceSlot };
+    const tgtCopy = { ...targetSlot };
+
+    sourceSlot.day = tgtCopy.day;
+    sourceSlot.period = tgtCopy.period;
+    sourceSlot.shift = tgtCopy.shift;
+    sourceSlot.timeRange = getTimeRangeForShift(tgtCopy.period, tgtCopy.shift);
+    sourceSlot.room = tgtCopy.room;
+    sourceSlot.roomId = tgtCopy.roomId;
+
+    targetSlot.day = srcCopy.day;
+    targetSlot.period = srcCopy.period;
+    targetSlot.shift = srcCopy.shift;
+    targetSlot.timeRange = getTimeRangeForShift(srcCopy.period, srcCopy.shift);
+    targetSlot.room = srcCopy.room;
+    targetSlot.roomId = srcCopy.roomId;
+
+    saveDb(db);
+    res.json({
+      mode: 'SWAP',
+      updatedSlots: [sourceSlot, targetSlot],
+      previousSnapshots,
+    });
+    return;
+  }
+
+  // MOVE or MOVE_AUTO_ROOM
+  sourceSlot.day = targetDay;
+  sourceSlot.period = targetPeriod;
+  sourceSlot.shift = targetShift;
+  sourceSlot.timeRange = getTimeRangeForShift(targetPeriod, targetShift);
+  if (b.overrideRoomId || b.overrideRoom) {
+    const matched = db.rooms.find((r) => (b.overrideRoomId && r.id === b.overrideRoomId) || r.name === b.overrideRoom);
+    if (matched) {
+      sourceSlot.room = matched.name;
+      sourceSlot.roomId = matched.id;
+    }
+  } else if (evalRes.mode === 'MOVE_AUTO_ROOM' && evalRes.autoRoom) {
+    sourceSlot.room = evalRes.autoRoom.name;
+    sourceSlot.roomId = evalRes.autoRoom.id;
+  }
+
+  saveDb(db);
+  res.json({
+    mode: evalRes.mode,
+    updatedSlots: [sourceSlot],
+    previousSnapshots,
+    autoRoom: evalRes.autoRoom,
+  });
+});
+
+app.post('/api/v1/timetable/:id/suggest-substitute', requireAuth(['MANAGER']), (req, res) => {
   const db = loadDb();
   const slot = db.timetable.find((s) => s.id === req.params.id);
   if (!slot) {
@@ -1281,32 +1915,24 @@ app.post('/api/v1/timetable/:id/suggest-substitute', requireAuth(['ADMIN', 'TEAC
     return;
   }
 
-  // Find teachers busy at the exact same day/period/shift
-  const busyTeacherIds = new Set(
-    db.timetable
-      .filter((s) => s.day === slot.day && s.period === slot.period && s.shift === slot.shift && s.id !== slot.id)
-      .map((s) => s.teacherId),
-  );
+  const candidates = suggestAvailableSubstitutes(slot, {
+    timetable: db.timetable,
+    teachers: db.teachers,
+    rooms: db.rooms,
+    students: db.students,
+    leaves: db.teacherLeaves,
+  });
 
-  const normalizedSubj = slot.subject.toLowerCase();
-  const availableTeachers = db.teachers
-    .filter((t) => t.id !== slot.teacherId && !busyTeacherIds.has(t.id) && t.status === 'ACTIVE')
-    .map((t) => {
-      const exactMatch = t.subjects.some((sub) =>
-        normalizedSubj.includes(sub.toLowerCase()) || sub.toLowerCase().includes(normalizedSubj.split(' ')[0]),
-      );
-      return {
-        teacherId: t.id,
-        teacherName: t.shortName,
-        fullName: t.name,
-        subjects: t.subjects,
-        matchScore: exactMatch ? 'Đúng chuyên môn · Đang trống ca' : 'Có thể hỗ trợ Trả bài / Kèm',
-        isExactSubject: exactMatch,
-      };
-    })
-    .sort((a, b) => Number(b.isExactSubject) - Number(a.isExactSubject));
+  const substituteTeachers = candidates.slice(0, 8).map((c) => ({
+    teacherId: c.teacher.id,
+    teacherName: c.teacher.shortName,
+    fullName: c.teacher.name,
+    teacherGroup: c.teacher.teacherGroup,
+    subjects: c.teacher.subjects,
+    matchScore: c.reason,
+    isExactSubject: c.matchScore >= 80,
+  }));
 
-  // Suggest alternative evening slots if no teacher wants to sub
   const eveningMakeupSuggestion = {
     day: slot.day,
     period: 'TOI' as SessionPeriod,
@@ -1318,12 +1944,12 @@ app.post('/api/v1/timetable/:id/suggest-substitute', requireAuth(['ADMIN', 'TEAC
 
   res.json({
     slot,
-    substituteTeachers: availableTeachers.slice(0, 5),
+    substituteTeachers,
     eveningMakeupSuggestion,
   });
 });
 
-app.patch('/api/v1/timetable/:id/substitute', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.patch('/api/v1/timetable/:id/substitute', requireAuth(['MANAGER']), (req, res) => {
   const db = loadDb();
   const slot = db.timetable.find((s) => s.id === req.params.id);
   if (!slot) {
@@ -1343,6 +1969,21 @@ app.patch('/api/v1/timetable/:id/substitute', requireAuth(['ADMIN', 'TEACHER']),
     const subTeacher = db.teachers.find((t) => t.id === newTeacherId);
     if (!subTeacher) {
       res.status(400).json({ error: 'Giáo viên dạy thay không hợp lệ.' });
+      return;
+    }
+    const check = evaluateSlotConstraints(
+      { ...slot, teacherId: subTeacher.id },
+      {
+        timetable: db.timetable,
+        teachers: db.teachers,
+        rooms: db.rooms,
+        students: db.students,
+        leaves: db.teacherLeaves,
+        ignoreSlotIds: [slot.id],
+      },
+    );
+    if (!check.valid) {
+      res.status(409).json({ error: check.hardConflicts[0], conflicts: check.hardConflicts });
       return;
     }
     const oldName = slot.teacherName;
@@ -1365,7 +2006,7 @@ app.patch('/api/v1/timetable/:id/substitute', requireAuth(['ADMIN', 'TEACHER']),
   res.json({ slot });
 });
 
-app.delete('/api/v1/timetable/:id', requireAuth(['ADMIN']), (req, res) => {
+app.delete('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
   const db = loadDb();
   db.timetable = db.timetable.filter((s) => s.id !== req.params.id);
   saveDb(db);
@@ -1375,7 +2016,8 @@ app.delete('/api/v1/timetable/:id', requireAuth(['ADMIN']), (req, res) => {
 app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
   const user = req.user!;
-  const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'TEACHER';
+  const isStaff =
+    user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER' || user.role === 'TEACHER';
   const allowedIds = new Set(getAllowedStudentIds(user));
   if (!isStaff && !allowedIds.has(req.params.studentId)) {
     res.status(403).json({ error: 'Bạn chỉ có thể tải lịch học của học sinh đã liên kết với tài khoản.' });
@@ -1386,7 +2028,7 @@ app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req: AuthedR
     res.status(404).json({ error: 'Không tìm thấy học sinh.' });
     return;
   }
-  const slots = db.timetable.filter((s) => s.centerClass === student.centerClass);
+  const slots = db.timetable.filter((s) => studentBelongsToClass(student, s.centerClass));
   const dayToOffset: Record<DayOfWeek, number> = { T2: 23, T3: 24, T4: 25, T5: 26, T6: 27, T7: 28 };
 
   const events = slots.map((slot) => {
@@ -1429,7 +2071,8 @@ app.get('/api/v1/timetable/student/:studentId/ics', requireAuth(), (req: AuthedR
 app.post('/api/v1/scores', requireAuth(), (req: AuthedRequest, res) => {
   const db = loadDb();
   const user = req.user!;
-  const isStaff = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'TEACHER';
+  const isStaff =
+    user.role === 'SUPER_ADMIN' || user.role === 'ADMIN' || user.role === 'MANAGER' || user.role === 'TEACHER';
   const b = req.body || {};
   const student = db.students.find((s) => s.id === b.studentId);
   if (!student) {
@@ -1479,7 +2122,7 @@ app.post('/api/v1/scores', requireAuth(), (req: AuthedRequest, res) => {
   res.status(201).json({ score: record });
 });
 
-app.post('/api/v1/attendance', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.post('/api/v1/attendance', requireAuth(['MANAGER', 'TEACHER']), (req, res) => {
   const db = loadDb();
   const { studentId, shiftLabel, status, note } = req.body || {};
   const student = db.students.find((s) => s.id === studentId);
@@ -1614,6 +2257,119 @@ app.post('/api/v1/tuition/:id/remind', requireAuth(['ADMIN']), (req, res) => {
 });
 
 // ============================================================
+// MULTI-CHILD FAMILY BILLING & 12-MONTH RECALCULATION (ADMIN+)
+// ============================================================
+
+app.post('/api/v1/families', requireAuth(['ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const b = req.body || {};
+  const parentName = String(b.parentName || '').trim();
+  const parentPhone = normalizePhoneVN(String(b.parentPhone || ''));
+  if (parentName.length < 2 || parentPhone.length < 8) {
+    res.status(400).json({ error: 'Vui lòng nhập tên phụ huynh và SĐT hợp lệ.' });
+    return;
+  }
+  const existing = db.families.find((f) => normalizePhoneVN(f.parentPhone) === parentPhone);
+  if (existing) {
+    res.status(409).json({ error: 'Hồ sơ gia đình cho SĐT này đã tồn tại.', family: existing });
+    return;
+  }
+  const family: FamilyProfile = {
+    id: `fam-${Date.now()}`,
+    parentName: parentName.slice(0, 120),
+    parentPhone,
+    parentEmails: sanitizeEmailList(b.parentEmails),
+    siblingDiscountPercent: Math.max(0, Math.min(30, Number(b.siblingDiscountPercent) || 5)),
+    defaultBillingCycle: b.defaultBillingCycle === 'ANNUAL_12M' ? 'ANNUAL_12M' : 'MONTHLY',
+    note: b.note ? String(b.note).trim().slice(0, 300) : undefined,
+  };
+  db.families.unshift(family);
+  db.students.forEach((s) => {
+    if (normalizePhoneVN(s.parentPhone) === parentPhone) {
+      s.familyId = family.id;
+    }
+  });
+  saveDb(db);
+  res.status(201).json({ family });
+});
+
+app.patch('/api/v1/families/:id', requireAuth(['ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const family = db.families.find((f) => f.id === req.params.id);
+  if (!family) {
+    res.status(404).json({ error: 'Không tìm thấy hồ sơ gia đình.' });
+    return;
+  }
+  const b = req.body || {};
+  if (typeof b.parentName === 'string' && b.parentName.trim().length >= 2) family.parentName = b.parentName.trim().slice(0, 120);
+  if (b.parentEmails !== undefined) family.parentEmails = sanitizeEmailList(b.parentEmails);
+  if (b.siblingDiscountPercent !== undefined) {
+    family.siblingDiscountPercent = Math.max(0, Math.min(30, Number(b.siblingDiscountPercent) || 0));
+  }
+  if (b.defaultBillingCycle === 'MONTHLY' || b.defaultBillingCycle === 'ANNUAL_12M') {
+    family.defaultBillingCycle = b.defaultBillingCycle;
+  }
+  if (typeof b.note === 'string') family.note = b.note.trim().slice(0, 300) || undefined;
+
+  const updatedInvoices: TuitionRecord[] = [];
+  if (b.recalculateInvoices) {
+    const famStudents = getStudentsInFamily(family, db.students);
+    const famStudentIds = new Set(famStudents.map((s) => s.id));
+    const annualPct = Math.max(0, Math.min(30, Number(b.annualDiscountPercent) || 10));
+
+    db.tuition.forEach((inv) => {
+      if (!famStudentIds.has(inv.studentId) || inv.status === 'PAID') return;
+      const oldMonths = inv.monthsCount && inv.monthsCount > 0 ? inv.monthsCount : 1;
+      const baseMonthly = Math.round(inv.baseAmount / oldMonths);
+      const boardingMonthly = Math.round(inv.boardingAmount / oldMonths);
+      const shuttleMonthly = Math.round(inv.shuttleAmount / oldMonths);
+      const cycle: BillingCycle = b.applyDefaultCycle ? family.defaultBillingCycle : inv.billingCycle || 'MONTHLY';
+
+      const calc = calculateTuitionBreakdown({
+        baseMonthly,
+        boardingMonthly,
+        shuttleMonthly,
+        siblingDiscountPercent: family.siblingDiscountPercent,
+        annualDiscountPercent: annualPct,
+        billingCycle: cycle,
+      });
+
+      const notes: string[] = [];
+      if (calc.siblingDiscountPercent > 0) notes.push(`-${calc.siblingDiscountPercent}% nhiều con`);
+      if (calc.annualDiscountPercent > 0) notes.push(`-${calc.annualDiscountPercent}% đóng 12 tháng`);
+
+      inv.familyId = family.id;
+      inv.billingCycle = calc.billingCycle;
+      inv.monthsCount = calc.monthsCount;
+      inv.baseAmount = calc.baseAmount;
+      inv.boardingAmount = calc.boardingAmount;
+      inv.shuttleAmount = calc.shuttleAmount;
+      inv.siblingDiscountPercent = calc.siblingDiscountPercent;
+      inv.annualDiscountPercent = calc.annualDiscountPercent;
+      inv.siblingDiscountAmount = calc.siblingDiscountAmount;
+      inv.annualDiscountAmount = calc.annualDiscountAmount;
+      inv.discountAmount = calc.discountAmount;
+      inv.totalAmount = calc.totalAmount;
+      inv.monthLabel =
+        cycle === 'ANNUAL_12M'
+          ? `Gói nguyên năm 12 tháng (${notes.join(' + ') || 'Chuẩn'})`
+          : `Tháng 11/2026${notes.length ? ` (${notes.join(' + ')})` : ''}`;
+      updatedInvoices.push(inv);
+    });
+  }
+
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'FAMILY_DISCOUNT_UPDATE',
+    targetLabel: `${family.parentName} (${maskPhoneVN(family.parentPhone)})`,
+    detail: `Ưu đãi nhiều con: ${family.siblingDiscountPercent}% trên học phí chính · Chu kỳ: ${family.defaultBillingCycle} · Cập nhật ${updatedInvoices.length} phiếu chưa đóng.`,
+  });
+  saveDb(db);
+  res.json({ family, updatedInvoices });
+});
+
+// ============================================================
 // NATIONAL EXAM LIBRARY SUBMISSION
 // ============================================================
 
@@ -1717,7 +2473,7 @@ app.post('/api/v1/tickets', (req: AuthedRequest, res) => {
   res.status(201).json({ ticket });
 });
 
-app.patch('/api/v1/tickets/:id/reply', requireAuth(['ADMIN', 'TEACHER']), (req, res) => {
+app.patch('/api/v1/tickets/:id/reply', requireAuth(['MANAGER', 'TEACHER']), (req, res) => {
   const db = loadDb();
   const ticket = db.tickets.find((t) => t.id === req.params.id);
   if (!ticket) {
@@ -1807,7 +2563,7 @@ app.post('/api/v1/ai/analyze-test', requireAuth(), async (req, res) => {
   }
 });
 
-app.post('/api/v1/ai/import-students-image', requireAuth(['ADMIN', 'TEACHER']), async (req, res) => {
+app.post('/api/v1/ai/import-students-image', requireAuth(['MANAGER', 'TEACHER']), async (req, res) => {
   try {
     let base64Data = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64 : '';
     let mimeType = typeof req.body?.mimeType === 'string' ? req.body.mimeType : 'image/jpeg';

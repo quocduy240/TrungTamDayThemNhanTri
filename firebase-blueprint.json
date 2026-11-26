@@ -62,7 +62,7 @@
         "email": { "type": "string", "format": "email", "maxLength": 160 },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "photoURL": { "type": "string", "maxLength": 500 },
-        "role": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT"] },
+        "role": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT"] },
         "phone": { "type": "string", "maxLength": 40 },
         "preferredView": { "type": "string", "enum": ["TEACHER_STUDENT", "PARENT", "NEW_CUSTOMER"] },
         "linkedStudentId": { "type": "string", "maxLength": 128 },
@@ -76,11 +76,11 @@
     },
     "RoleInvite": {
       "title": "RoleInvite",
-      "description": "Pre-assigned Gmail-to-role mapping managed exclusively by SuperAdmin.",
+      "description": "Pre-assigned Gmail-to-role mapping managed by SuperAdmin and Operations Admin.",
       "type": "object",
       "properties": {
         "email": { "type": "string", "format": "email", "maxLength": 160 },
-        "role": { "type": "string", "enum": ["ADMIN", "TEACHER", "PARENT", "STUDENT"] },
+        "role": { "type": "string", "enum": ["ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT"] },
         "displayName": { "type": "string", "maxLength": 120 },
         "linkedStudentId": { "type": "string", "maxLength": 128 },
         "linkedTeacherId": { "type": "string", "maxLength": 128 },
@@ -111,25 +111,77 @@
       },
       "required": ["id", "level", "title", "grades", "billingModel", "monthlyPrice", "annualDiscountPercent"]
     },
+    "Room": {
+      "title": "Room",
+      "description": "Dynamic classroom room configuration managed by Manager, Admin, and SuperAdmin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 2, "maxLength": 24 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "campus": { "type": "string", "maxLength": 120 },
+        "capacity": { "type": "number" },
+        "active": { "type": "boolean" },
+        "note": { "type": "string", "maxLength": 240 }
+      },
+      "required": ["id", "code", "name", "campus", "capacity", "active"]
+    },
+    "TeacherLeave": {
+      "title": "TeacherLeave",
+      "description": "Teacher emergency leave request linked to dynamic timetable conflict alerts.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 80 },
+        "day": { "type": "string", "enum": ["T2", "T3", "T4", "T5", "T6", "T7"] },
+        "dateLabel": { "type": "string", "maxLength": 40 },
+        "period": { "type": "string", "enum": ["ALL", "SANG", "CHIEU", "TOI"] },
+        "shift": { "type": "string", "enum": ["CA_1", "CA_2"] },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "reviewedBy": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "teacherId", "teacherName", "day", "dateLabel", "period", "reason", "status", "createdBy", "createdAt"]
+    },
+    "FamilyProfile": {
+      "title": "FamilyProfile",
+      "description": "Multi-child family billing profile with custom sibling discount and default billing cycle.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "parentName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "parentPhone": { "type": "string", "minLength": 8, "maxLength": 40 },
+        "parentEmails": { "type": "array" },
+        "siblingDiscountPercent": { "type": "number" },
+        "defaultBillingCycle": { "type": "string", "enum": ["MONTHLY", "ANNUAL_12M"] },
+        "note": { "type": "string", "maxLength": 300 }
+      },
+      "required": ["id", "parentName", "parentPhone", "siblingDiscountPercent", "defaultBillingCycle"]
+    },
     "PublicTeacher": {
       "title": "PublicTeacher",
-      "description": "Public faculty directory entry without personal contact PII.",
+      "description": "Faculty directory entry grouped into SUBJECT and TUTOR_REVIEW teachers without personal contact PII.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "name": { "type": "string", "minLength": 2, "maxLength": 120 },
         "shortName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "teacherGroup": { "type": "string", "enum": ["SUBJECT", "TUTOR_REVIEW"] },
         "subjects": { "type": "array" },
         "degree": { "type": "string", "maxLength": 140 },
         "experienceYears": { "type": "number" },
         "roomDefault": { "type": "string", "maxLength": 60 },
-        "status": { "type": "string", "enum": ["ACTIVE", "ON_LEAVE"] }
+        "status": { "type": "string", "enum": ["ACTIVE", "ON_LEAVE"] },
+        "availability": { "type": "array" }
       },
       "required": ["id", "name", "shortName", "subjects", "degree", "experienceYears", "status"]
     },
     "PublicTimetableSlot": {
       "title": "PublicTimetableSlot",
-      "description": "Class schedule slot synced across center shifts (Morning/Afternoon/Evening).",
+      "description": "Authenticated center class schedule slot synced across Morning, Afternoon, and Evening shifts.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -142,6 +194,7 @@
         "subject": { "type": "string", "maxLength": 100 },
         "teacherId": { "type": "string", "maxLength": 128 },
         "teacherName": { "type": "string", "maxLength": 80 },
+        "roomId": { "type": "string", "maxLength": 128 },
         "room": { "type": "string", "maxLength": 60 },
         "slotType": { "type": "string", "enum": ["MAIN", "TRA_BAI", "PHU_DAO", "BU_THE_DUC"] },
         "status": { "type": "string", "enum": ["SCHEDULED", "TEACHER_ABSENT", "SUBSTITUTED", "OFF"] },
@@ -156,12 +209,14 @@
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "ownerUid": { "type": "string", "maxLength": 128 },
+        "familyId": { "type": "string", "maxLength": 128 },
         "code": { "type": "string", "maxLength": 40 },
         "parentLinkCode": { "type": "string", "maxLength": 24 },
         "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
         "grade": { "type": "number" },
         "level": { "type": "string", "enum": ["CAP_1", "CAP_2", "CAP_3"] },
         "centerClass": { "type": "string", "maxLength": 60 },
+        "enrolledClasses": { "type": "array" },
         "schoolClass": { "type": "string", "maxLength": 40 },
         "school": { "type": "string", "maxLength": 140 },
         "homeroomTeacher": { "type": "string", "maxLength": 80 },
@@ -234,19 +289,26 @@
     },
     "TuitionRecord": {
       "title": "TuitionRecord",
-      "description": "Monthly tuition invoice, online payment status, and reminder count.",
+      "description": "Monthly or 12-month annual tuition invoice with sibling discount breakdown, online payment status, and reminder count.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "ownerUid": { "type": "string", "maxLength": 128 },
+        "familyId": { "type": "string", "maxLength": 128 },
         "studentId": { "type": "string", "maxLength": 128 },
         "studentName": { "type": "string", "maxLength": 120 },
         "centerClass": { "type": "string", "maxLength": 60 },
         "parentPhone": { "type": "string", "maxLength": 40 },
-        "monthLabel": { "type": "string", "maxLength": 100 },
+        "monthLabel": { "type": "string", "maxLength": 120 },
+        "billingCycle": { "type": "string", "enum": ["MONTHLY", "ANNUAL_12M"] },
+        "monthsCount": { "type": "number" },
         "baseAmount": { "type": "number" },
         "boardingAmount": { "type": "number" },
         "shuttleAmount": { "type": "number" },
+        "siblingDiscountPercent": { "type": "number" },
+        "annualDiscountPercent": { "type": "number" },
+        "siblingDiscountAmount": { "type": "number" },
+        "annualDiscountAmount": { "type": "number" },
         "discountAmount": { "type": "number" },
         "totalAmount": { "type": "number" },
         "paidAmount": { "type": "number" },
@@ -298,7 +360,7 @@
         "authorUid": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "maxLength": 40 },
         "authorName": { "type": "string", "minLength": 2, "maxLength": 120 },
-        "authorRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT", "GUEST"] },
+        "authorRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT", "GUEST"] },
         "phone": { "type": "string", "maxLength": 40 },
         "category": { "type": "string", "enum": ["CONSULTATION", "FEEDBACK", "SCHEDULE_CHANGE", "TUITION"] },
         "subject": { "type": "string", "minLength": 2, "maxLength": 180 },
@@ -319,7 +381,7 @@
         "title": { "type": "string", "minLength": 2, "maxLength": 180 },
         "body": { "type": "string", "minLength": 2, "maxLength": 600 },
         "channel": { "type": "string", "enum": ["APP", "ZALO", "EMAIL"] },
-        "targetRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "TEACHER", "PARENT", "STUDENT", "ALL"] },
+        "targetRole": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "TEACHER", "PARENT", "STUDENT", "ALL"] },
         "read": { "type": "boolean" }
       },
       "required": ["id", "createdAt", "title", "body", "channel", "targetRole", "read"]
@@ -336,19 +398,31 @@
     },
     "/role_invites/{inviteId}": {
       "schema": { "$ref": "#/entities/RoleInvite" },
-      "description": "Pre-assigned Gmail role invites managed exclusively by SuperAdmin."
+      "description": "Pre-assigned Gmail role invites managed by SuperAdmin and Admin."
     },
     "/courses/{courseId}": {
       "schema": { "$ref": "#/entities/CoursePackage" },
       "description": "Publicly readable course packages editable by Admin and SuperAdmin."
     },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Dynamic classroom rooms editable by Manager, Admin, and SuperAdmin."
+    },
     "/public_teachers/{teacherId}": {
       "schema": { "$ref": "#/entities/PublicTeacher" },
-      "description": "Non-PII public faculty directory."
+      "description": "Non-PII faculty directory with 2-group role and availability shifts."
+    },
+    "/teacher_leaves/{leaveId}": {
+      "schema": { "$ref": "#/entities/TeacherLeave" },
+      "description": "Teacher emergency leave requests triggering dynamic timetable conflict flags."
+    },
+    "/families/{familyId}": {
+      "schema": { "$ref": "#/entities/FamilyProfile" },
+      "description": "Multi-child family billing profiles with per-family sibling discounts."
     },
     "/public_timetable/{slotId}": {
       "schema": { "$ref": "#/entities/PublicTimetableSlot" },
-      "description": "Synced weekly center schedule across Morning, Afternoon, and Evening shifts."
+      "description": "Authenticated center weekly timetable editable strictly by Manager, Admin, and SuperAdmin."
     },
     "/students/{studentId}": {
       "schema": { "$ref": "#/entities/StudentRecord" },

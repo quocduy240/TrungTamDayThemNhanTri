@@ -1,4 +1,8 @@
-export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'TEACHER' | 'PARENT' | 'STUDENT';
+export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'TEACHER' | 'PARENT' | 'STUDENT';
+
+export type TeacherGroup = 'SUBJECT' | 'TUTOR_REVIEW';
+
+export type BillingCycle = 'MONTHLY' | 'ANNUAL_12M';
 
 export type FrontendMode = 'TEACHER_STUDENT' | 'PARENT' | 'NEW_CUSTOMER';
 
@@ -139,16 +143,54 @@ export interface CoursePackage {
   imageUrl: string;
 }
 
+export interface Room {
+  id: string;
+  code: string;
+  name: string;
+  campus: string;
+  capacity: number;
+  active: boolean;
+  note?: string;
+}
+
 export interface Teacher {
   id: string;
   name: string;
   shortName: string;
+  teacherGroup: TeacherGroup;
   subjects: string[];
   degree: string;
   experienceYears: number;
   phone: string;
+  email?: string;
   roomDefault: string;
   status: 'ACTIVE' | 'ON_LEAVE';
+  availability?: string[];
+}
+
+export interface TeacherLeave {
+  id: string;
+  teacherId: string;
+  teacherName: string;
+  day: DayOfWeek;
+  dateLabel: string;
+  period: 'ALL' | SessionPeriod;
+  shift?: ShiftCode;
+  reason: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  createdBy: string;
+  reviewedBy?: string;
+  createdAt: string;
+}
+
+export interface FamilyProfile {
+  id: string;
+  parentName: string;
+  parentPhone: string;
+  parentEmails?: string[];
+  siblingDiscountPercent: number;
+  defaultBillingCycle: BillingCycle;
+  note?: string;
 }
 
 export type StudentAccessStatus = 'ACTIVE' | 'PENDING_VERIFY' | 'LOCKED';
@@ -156,12 +198,14 @@ export type StudentAccessStatus = 'ACTIVE' | 'PENDING_VERIFY' | 'LOCKED';
 export interface Student {
   id: string;
   ownerUid?: string;
+  familyId?: string;
   code: string;
   parentLinkCode?: string;
   fullName: string;
   grade: number;
   level: EducationLevel;
   centerClass: string;
+  enrolledClasses?: string[];
   schoolClass: string;
   school: string;
   homeroomTeacher: string;
@@ -201,6 +245,7 @@ export interface TimetableSlot {
   subject: string;
   teacherId: string;
   teacherName: string;
+  roomId?: string;
   room: string;
   slotType: 'MAIN' | 'TRA_BAI' | 'PHU_DAO' | 'BU_THE_DUC';
   status: 'SCHEDULED' | 'TEACHER_ABSENT' | 'SUBSTITUTED' | 'OFF';
@@ -243,14 +288,21 @@ export interface AttendanceRecord {
 export interface TuitionRecord {
   id: string;
   ownerUid?: string;
+  familyId?: string;
   studentId: string;
   studentName: string;
   centerClass: string;
   parentPhone: string;
   monthLabel: string;
+  billingCycle?: BillingCycle;
+  monthsCount?: number;
   baseAmount: number;
   boardingAmount: number;
   shuttleAmount: number;
+  siblingDiscountPercent?: number;
+  annualDiscountPercent?: number;
+  siblingDiscountAmount?: number;
+  annualDiscountAmount?: number;
   discountAmount: number;
   totalAmount: number;
   paidAmount: number;
@@ -329,7 +381,10 @@ export interface FanpagePost {
 
 export interface DatabaseState {
   courses: CoursePackage[];
+  rooms: Room[];
   teachers: Teacher[];
+  teacherLeaves: TeacherLeave[];
+  families: FamilyProfile[];
   students: Student[];
   timetable: TimetableSlot[];
   scores: ScoreRecord[];

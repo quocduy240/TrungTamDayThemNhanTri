@@ -1,5 +1,30 @@
 import type { DatabaseState, FanpagePost } from '../src/types.ts';
 import { DEFAULT_AUTH_POLICY } from '../src/lib/identityPolicy.ts';
+import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
+import { calculateTuitionBreakdown } from '../src/lib/tuitionCalculator.ts';
+
+function shiftsExcept(excluded: string[]): string[] {
+  const set = new Set(excluded);
+  return ALL_SHIFT_KEYS.filter((k) => !set.has(k));
+}
+
+const TUI_HOA = calculateTuitionBreakdown({
+  baseMonthly: 1850000,
+  boardingMonthly: 950000,
+  shuttleMonthly: 450000,
+  siblingDiscountPercent: 5,
+  annualDiscountPercent: 10,
+  billingCycle: 'ANNUAL_12M',
+});
+
+const TUI_QUE_ANH = calculateTuitionBreakdown({
+  baseMonthly: 1100000,
+  boardingMonthly: 750000,
+  shuttleMonthly: 400000,
+  siblingDiscountPercent: 5,
+  annualDiscountPercent: 10,
+  billingCycle: 'MONTHLY',
+});
 
 export const OFFICIAL_FANPAGE_URL =
   'https://www.facebook.com/people/Trung-t%C3%A2m-d%E1%BA%A1y-th%C3%AAm-Nh%C3%A2n-Tr%C3%AD/61586568261774/';
@@ -196,31 +221,86 @@ export const INITIAL_DB: DatabaseState = {
     },
   ],
 
+  rooms: [
+    { id: 'room-1', code: 'P101', name: 'Phòng 1', campus: 'Cơ sở 1 (35 Lý Thường Kiệt)', capacity: 18, active: true, note: 'Phòng máy lạnh tầng trệt · Chuyên Toán & Cấp 1' },
+    { id: 'room-2', code: 'P102', name: 'Phòng 2', campus: 'Cơ sở 1 (35 Lý Thường Kiệt)', capacity: 16, active: true, note: 'Phòng máy lạnh tiêu chuẩn · Tiếng Anh & Trả bài' },
+    { id: 'room-3', code: 'P103', name: 'Phòng 3', campus: 'Cơ sở 1 (35 Lý Thường Kiệt)', capacity: 18, active: true, note: 'Phòng chuyên đề Lý - Hóa - KHTN & Toán NC' },
+    { id: 'room-4', code: 'P104', name: 'Phòng 4', campus: 'Cơ sở 1 (35 Lý Thường Kiệt)', capacity: 15, active: true, note: 'Phòng Tiếng Anh, Tin học & Luyện đề' },
+    { id: 'room-5', code: 'P105', name: 'Phòng 5', campus: 'Cơ sở 1 (35 Lý Thường Kiệt)', capacity: 18, active: true, note: 'Phòng Ngữ Văn & Ôn thi tuyển sinh 10' },
+    { id: 'room-6', code: 'P201', name: 'Phòng 6 (CS2)', campus: 'Cơ sở 2 (Nhân Trí 2)', capacity: 20, active: true, note: 'Phòng dự phòng & mở rộng lớp mới Cơ sở 2' },
+  ],
+
   teachers: [
-    { id: 't-man', name: 'Cô Nguyễn Thị Mẫn', shortName: 'Cô Mẫn', subjects: ['Toán', 'Đại số', 'Hình học'], degree: 'Thạc sĩ Toán học', experienceYears: 14, phone: '0918 *** 101', roomDefault: 'Phòng 1', status: 'ACTIVE' },
-    { id: 't-nhung', name: 'Cô Trần Thị Nhung', shortName: 'Cô Nhung', subjects: ['Ngữ Văn', 'Văn'], degree: 'Cử nhân Sư phạm Văn', experienceYears: 12, phone: '0918 *** 102', roomDefault: 'Phòng 5', status: 'ACTIVE' },
-    { id: 't-yen', name: 'Cô Lê Thị Yên', shortName: 'Cô Yên', subjects: ['Hóa học', 'KHTN'], degree: 'Thạc sĩ Hóa học', experienceYears: 11, phone: '0939 *** 103', roomDefault: 'Phòng 3', status: 'ACTIVE' },
-    { id: 't-thoa', name: 'Cô Phạm Thị Thoa', shortName: 'Cô Thoa', subjects: ['Vật Lý', 'KHTN'], degree: 'Cử nhân Sư phạm Lý', experienceYears: 10, phone: '0939 *** 104', roomDefault: 'Phòng 3', status: 'ACTIVE' },
-    { id: 't-loan', name: 'Cô Võ Thị Loan', shortName: 'Cô Loan', subjects: ['Tiếng Anh'], degree: 'Cử nhân Ngôn ngữ Anh', experienceYears: 9, phone: '0915 *** 105', roomDefault: 'Phòng 2', status: 'ACTIVE' },
-    { id: 't-trang', name: 'Cô Huỳnh Thị Trang', shortName: 'Cô Trang', subjects: ['Tiếng Anh'], degree: 'Thạc sĩ Giảng dạy Tiếng Anh', experienceYears: 8, phone: '0988 *** 106', roomDefault: 'Phòng 4', status: 'ACTIVE' },
-    { id: 't-lan', name: 'Cô Nguyễn Thị Lan', shortName: 'Cô Lan', subjects: ['Tiếng Anh'], degree: 'Cử nhân Sư phạm Anh', experienceYears: 11, phone: '0977 *** 107', roomDefault: 'Phòng 2', status: 'ACTIVE' },
-    { id: 't-phung', name: 'Cô Dương Thị Phụng', shortName: 'Cô Phụng', subjects: ['Vật Lý', 'Tin học'], degree: 'Cử nhân Sư phạm Lý - Tin', experienceYears: 7, phone: '0949 *** 108', roomDefault: 'Phòng 4', status: 'ACTIVE' },
-    { id: 't-nam', name: 'Thầy Đỗ Hoàng Nam', shortName: 'Thầy Nam', subjects: ['Hóa học', 'Toán'], degree: 'Cử nhân Sư phạm Hóa', experienceYears: 8, phone: '0934 *** 109', roomDefault: 'Phòng 3', status: 'ACTIVE' },
-    { id: 't-dang', name: 'Thầy Lâm Quốc Đặng', shortName: 'Thầy Đặng', subjects: ['Vật Lý'], degree: 'Thạc sĩ Vật Lý', experienceYears: 13, phone: '0985 *** 110', roomDefault: 'Phòng 3', status: 'ACTIVE' },
-    { id: 't-tam', name: 'Cô Bùi Thanh Tâm', shortName: 'Cô Tâm', subjects: ['Toán', 'Đại số', 'Khoa học'], degree: 'Cử nhân Sư phạm Tiểu học & Toán', experienceYears: 10, phone: '0947 376 444', roomDefault: 'Phòng 1', status: 'ACTIVE' },
-    { id: 't-nghi', name: 'Cô Trịnh Bảo Nghi', shortName: 'Cô Nghi', subjects: ['Trả bài', 'Soạn bài'], degree: 'Cử nhân Giáo dục', experienceYears: 6, phone: '0939 *** 112', roomDefault: 'Phòng 2', status: 'ACTIVE' },
-    { id: 't-quan', name: 'Thầy Trần Minh Quân', shortName: 'Thầy Quân', subjects: ['Trả bài', 'Toán NC'], degree: 'Cử nhân Sư phạm Toán', experienceYears: 7, phone: '0975 *** 113', roomDefault: 'Phòng 3', status: 'ACTIVE' },
+    { id: 't-man', name: 'Cô Nguyễn Thị Mẫn', shortName: 'Cô Mẫn', teacherGroup: 'SUBJECT', subjects: ['Toán', 'Đại số', 'Hình học'], degree: 'Thạc sĩ Toán học', experienceYears: 14, phone: '0918204101', email: 'co.man@daythemnhantri.com', roomDefault: 'Phòng 1', status: 'ACTIVE', availability: shiftsExcept(['T3_SANG_CA_1', 'T3_SANG_CA_2']) },
+    { id: 't-nhung', name: 'Cô Trần Thị Nhung', shortName: 'Cô Nhung', teacherGroup: 'SUBJECT', subjects: ['Ngữ Văn', 'Văn'], degree: 'Cử nhân Sư phạm Văn', experienceYears: 12, phone: '0918204102', email: 'co.nhung@daythemnhantri.com', roomDefault: 'Phòng 5', status: 'ACTIVE', availability: shiftsExcept(['T3_SANG_CA_1', 'T3_SANG_CA_2', 'T6_SANG_CA_1']) },
+    { id: 't-yen', name: 'Cô Lê Thị Yên', shortName: 'Cô Yên', teacherGroup: 'SUBJECT', subjects: ['Hóa học', 'KHTN'], degree: 'Thạc sĩ Hóa học', experienceYears: 11, phone: '0939204103', email: 'co.yen@daythemnhantri.com', roomDefault: 'Phòng 3', status: 'ACTIVE', availability: shiftsExcept(['T3_SANG_CA_1', 'T4_SANG_CA_1']) },
+    { id: 't-thoa', name: 'Cô Phạm Thị Thoa', shortName: 'Cô Thoa', teacherGroup: 'SUBJECT', subjects: ['Vật Lý', 'KHTN'], degree: 'Cử nhân Sư phạm Lý', experienceYears: 10, phone: '0939204104', email: 'co.thoa@daythemnhantri.com', roomDefault: 'Phòng 3', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1']) },
+    { id: 't-loan', name: 'Cô Võ Thị Loan', shortName: 'Cô Loan', teacherGroup: 'SUBJECT', subjects: ['Tiếng Anh'], degree: 'Cử nhân Ngôn ngữ Anh', experienceYears: 9, phone: '0915204105', email: 'co.loan@daythemnhantri.com', roomDefault: 'Phòng 2', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1']) },
+    { id: 't-trang', name: 'Cô Huỳnh Thị Trang', shortName: 'Cô Trang', teacherGroup: 'SUBJECT', subjects: ['Tiếng Anh'], degree: 'Thạc sĩ Giảng dạy Tiếng Anh', experienceYears: 8, phone: '0988204106', email: 'co.trang@daythemnhantri.com', roomDefault: 'Phòng 4', status: 'ACTIVE', availability: shiftsExcept(['T3_SANG_CA_1', 'T4_SANG_CA_1']) },
+    { id: 't-lan', name: 'Cô Nguyễn Thị Lan', shortName: 'Cô Lan', teacherGroup: 'SUBJECT', subjects: ['Tiếng Anh'], degree: 'Cử nhân Sư phạm Anh', experienceYears: 11, phone: '0977204107', email: 'co.lan@daythemnhantri.com', roomDefault: 'Phòng 2', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1']) },
+    { id: 't-phung', name: 'Cô Dương Thị Phụng', shortName: 'Cô Phụng', teacherGroup: 'SUBJECT', subjects: ['Vật Lý', 'Tin học'], degree: 'Cử nhân Sư phạm Lý - Tin', experienceYears: 7, phone: '0949204108', email: 'co.phung@daythemnhantri.com', roomDefault: 'Phòng 4', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1']) },
+    { id: 't-nam', name: 'Thầy Đỗ Hoàng Nam', shortName: 'Thầy Nam', teacherGroup: 'SUBJECT', subjects: ['Hóa học', 'Toán'], degree: 'Cử nhân Sư phạm Hóa', experienceYears: 8, phone: '0934204109', email: 'thay.nam@daythemnhantri.com', roomDefault: 'Phòng 3', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1', 'T4_SANG_CA_1']) },
+    { id: 't-dang', name: 'Thầy Lâm Quốc Đặng', shortName: 'Thầy Đặng', teacherGroup: 'SUBJECT', subjects: ['Vật Lý'], degree: 'Thạc sĩ Vật Lý', experienceYears: 13, phone: '0985204110', email: 'thay.dang@daythemnhantri.com', roomDefault: 'Phòng 3', status: 'ACTIVE', availability: shiftsExcept(['T2_SANG_CA_1', 'T3_SANG_CA_1', 'T4_SANG_CA_1']) },
+    { id: 't-tam', name: 'Cô Bùi Thanh Tâm', shortName: 'Cô Tâm', teacherGroup: 'SUBJECT', subjects: ['Toán', 'Đại số', 'Khoa học', 'Tiếng Việt'], degree: 'Cử nhân Sư phạm Tiểu học & Toán', experienceYears: 10, phone: '0947376444', email: 'co.tam@daythemnhantri.com', roomDefault: 'Phòng 1', status: 'ACTIVE', availability: shiftsExcept(['T3_CHIEU_CA_1']) },
+    { id: 't-nghi', name: 'Cô Trịnh Bảo Nghi', shortName: 'Cô Nghi', teacherGroup: 'TUTOR_REVIEW', subjects: ['Trả bài', 'Soạn bài', 'Phụ đạo đa khối'], degree: 'Cử nhân Giáo dục', experienceYears: 6, phone: '0939204112', email: 'co.nghi@daythemnhantri.com', roomDefault: 'Phòng 2', status: 'ACTIVE', availability: [...ALL_SHIFT_KEYS] },
+    { id: 't-quan', name: 'Thầy Trần Minh Quân', shortName: 'Thầy Quân', teacherGroup: 'TUTOR_REVIEW', subjects: ['Trả bài', 'Soạn bài', 'Toán NC'], degree: 'Cử nhân Sư phạm Toán', experienceYears: 7, phone: '0975204113', email: 'thay.quan@daythemnhantri.com', roomDefault: 'Phòng 3', status: 'ACTIVE', availability: [...ALL_SHIFT_KEYS] },
+  ],
+
+  teacherLeaves: [
+    {
+      id: 'lv-01',
+      teacherId: 't-thoa',
+      teacherName: 'Cô Thoa',
+      day: 'T5',
+      dateLabel: '26/11/2026',
+      period: 'SANG',
+      shift: 'CA_1',
+      reason: 'Họp tổ chuyên môn đột xuất tại trường THCS Lý Thường Kiệt',
+      status: 'PENDING',
+      createdBy: 'co.thoa@daythemnhantri.com',
+      createdAt: '2026-11-25 19:20',
+    },
+  ],
+
+  families: [
+    {
+      id: 'fam-phuc',
+      parentName: 'Anh Nguyễn Văn Phúc',
+      parentPhone: '0918204412',
+      parentEmails: ['ph.phuchoa@gmail.com'],
+      siblingDiscountPercent: 5,
+      defaultBillingCycle: 'ANNUAL_12M',
+      note: 'Gia đình gửi 2 con (Nguyễn Phúc Hòa lớp 6A1 & Nguyễn Quế Anh lớp 4,5) — Ưu đãi riêng 5% học phí chính + giảm 10% nếu đóng nguyên năm 12 tháng.',
+    },
+    {
+      id: 'fam-hoa',
+      parentName: 'Chị Chung Thị Hoa',
+      parentPhone: '0918309999',
+      parentEmails: ['ph.camthy@gmail.com'],
+      siblingDiscountPercent: 0,
+      defaultBillingCycle: 'MONTHLY',
+    },
+    {
+      id: 'fam-hanh',
+      parentName: 'Chị Ngọc Hạnh',
+      parentPhone: '0988401953',
+      parentEmails: ['ph.giahan@gmail.com'],
+      siblingDiscountPercent: 0,
+      defaultBillingCycle: 'ANNUAL_12M',
+    },
   ],
 
   students: [
     {
       id: 'st-01',
+      familyId: 'fam-phuc',
       code: 'NT-6A1-01',
       parentLinkCode: 'NT6A1H',
       fullName: 'Nguyễn Phúc Hòa',
       grade: 6,
       level: 'CAP_2',
       centerClass: 'Lớp 6A1',
+      enrolledClasses: ['Lớp 6A1'],
       schoolClass: '6A5',
       school: 'THCS Lý Thường Kiệt',
       homeroomTeacher: 'Cô Nghi',
@@ -355,6 +435,7 @@ export const INITIAL_DB: DatabaseState = {
       grade: 7,
       level: 'CAP_2',
       centerClass: 'Lớp 7A1',
+      enrolledClasses: ['Lớp 7A1', 'Lớp 7NC'],
       schoolClass: '7A4',
       school: 'THCS Lý Thường Kiệt',
       homeroomTeacher: 'Thầy Quân',
@@ -475,12 +556,14 @@ export const INITIAL_DB: DatabaseState = {
     },
     {
       id: 'st-11',
+      familyId: 'fam-phuc',
       code: 'NT-5A-01',
       parentLinkCode: 'NT5AQA',
       fullName: 'Nguyễn Quế Anh',
       grade: 5,
       level: 'CAP_1',
       centerClass: 'Lớp 4,5',
+      enrolledClasses: ['Lớp 4,5'],
       schoolClass: '5A2',
       school: 'Tiểu học Nguyễn Du',
       homeroomTeacher: 'Cô Tâm',
@@ -667,13 +750,61 @@ export const INITIAL_DB: DatabaseState = {
   ],
 
   tuition: [
-    { id: 'tui-01', studentId: 'st-01', studentName: 'Nguyễn Phúc Hòa', centerClass: 'Lớp 6A1', parentPhone: '0918 *** 412', monthLabel: 'Tháng 11/2026 (Gói năm -10%)', baseAmount: 1850000, boardingAmount: 950000, shuttleAmount: 450000, discountAmount: 325000, totalAmount: 2925000, paidAmount: 2925000, dueDate: '2026-11-05', status: 'PAID', paymentMethod: 'VIETQR', paidAt: '2026-11-02', remindersSent: 0 },
-    { id: 'tui-02', studentId: 'st-02', studentName: 'Chung Cẩm Thy', centerClass: 'Lớp 7A1', parentPhone: '0918 *** 999', monthLabel: 'Tháng 11/2026', baseAmount: 1850000, boardingAmount: 950000, shuttleAmount: 0, discountAmount: 0, totalAmount: 2800000, paidAmount: 2800000, dueDate: '2026-11-05', status: 'PAID', paymentMethod: 'MOMO', paidAt: '2026-11-04', remindersSent: 0 },
-    { id: 'tui-03', studentId: 'st-03', studentName: 'Nguyễn Thị Minh Thư', centerClass: 'Lớp 7A1', parentPhone: '0356 *** 483', monthLabel: 'Tháng 11/2026', baseAmount: 1850000, boardingAmount: 0, shuttleAmount: 0, discountAmount: 0, totalAmount: 1850000, paidAmount: 0, dueDate: '2026-11-10', status: 'OVERDUE', remindersSent: 1 },
-    { id: 'tui-04', studentId: 'st-05', studentName: 'Quách Xuân Quang', centerClass: 'Lớp 7A1', parentPhone: '0365 *** 689', monthLabel: 'Tháng 11/2026', baseAmount: 1850000, boardingAmount: 0, shuttleAmount: 450000, discountAmount: 0, totalAmount: 2300000, paidAmount: 0, dueDate: '2026-11-12', status: 'OVERDUE', remindersSent: 2 },
-    { id: 'tui-05', studentId: 'st-06', studentName: 'Phan Nguyễn Tấn Phong', centerClass: 'Lớp 7A1', parentPhone: '0977 *** 541', monthLabel: 'Tháng 11/2026', baseAmount: 1850000, boardingAmount: 950000, shuttleAmount: 0, discountAmount: 0, totalAmount: 2800000, paidAmount: 1500000, dueDate: '2026-11-28', status: 'DUE_SOON', remindersSent: 0 },
-    { id: 'tui-06', studentId: 'st-09', studentName: 'Lê Trần Khánh Vy', centerClass: 'Lớp 10', parentPhone: '0985 *** 114', monthLabel: 'Tháng 11/2026 (3 môn)', baseAmount: 1950000, boardingAmount: 0, shuttleAmount: 0, discountAmount: 0, totalAmount: 1950000, paidAmount: 1950000, dueDate: '2026-11-05', status: 'PAID', paymentMethod: 'ZALOPAY', paidAt: '2026-11-05', remindersSent: 0 },
-    { id: 'tui-07', studentId: 'st-11', studentName: 'Nguyễn Quế Anh', centerClass: 'Lớp 4,5', parentPhone: '0918204412', monthLabel: 'Tháng 11/2026', baseAmount: 1100000, boardingAmount: 750000, shuttleAmount: 400000, discountAmount: 0, totalAmount: 2250000, paidAmount: 0, dueDate: '2026-11-29', status: 'DUE_SOON', remindersSent: 0 },
+    {
+      id: 'tui-01',
+      familyId: 'fam-phuc',
+      studentId: 'st-01',
+      studentName: 'Nguyễn Phúc Hòa',
+      centerClass: 'Lớp 6A1',
+      parentPhone: '0918204412',
+      monthLabel: 'Năm học 2026–2027 (12 tháng · Giảm 5% nhiều con + 10% năm)',
+      billingCycle: 'ANNUAL_12M',
+      monthsCount: 12,
+      baseAmount: TUI_HOA.baseAmount,
+      boardingAmount: TUI_HOA.boardingAmount,
+      shuttleAmount: TUI_HOA.shuttleAmount,
+      siblingDiscountPercent: TUI_HOA.siblingDiscountPercent,
+      annualDiscountPercent: TUI_HOA.annualDiscountPercent,
+      siblingDiscountAmount: TUI_HOA.siblingDiscountAmount,
+      annualDiscountAmount: TUI_HOA.annualDiscountAmount,
+      discountAmount: TUI_HOA.discountAmount,
+      totalAmount: TUI_HOA.totalAmount,
+      paidAmount: TUI_HOA.totalAmount,
+      dueDate: '2026-11-05',
+      status: 'PAID',
+      paymentMethod: 'VIETQR',
+      paidAt: '2026-11-02',
+      remindersSent: 0,
+    },
+    { id: 'tui-02', familyId: 'fam-hoa', studentId: 'st-02', studentName: 'Chung Cẩm Thy', centerClass: 'Lớp 7A1', parentPhone: '0918309999', monthLabel: 'Tháng 11/2026', billingCycle: 'MONTHLY', monthsCount: 1, baseAmount: 1850000, boardingAmount: 950000, shuttleAmount: 0, siblingDiscountPercent: 0, annualDiscountPercent: 0, siblingDiscountAmount: 0, annualDiscountAmount: 0, discountAmount: 0, totalAmount: 2800000, paidAmount: 2800000, dueDate: '2026-11-05', status: 'PAID', paymentMethod: 'MOMO', paidAt: '2026-11-04', remindersSent: 0 },
+    { id: 'tui-03', studentId: 'st-03', studentName: 'Nguyễn Thị Minh Thư', centerClass: 'Lớp 7A1', parentPhone: '0356104483', monthLabel: 'Tháng 11/2026', billingCycle: 'MONTHLY', monthsCount: 1, baseAmount: 1850000, boardingAmount: 0, shuttleAmount: 0, siblingDiscountPercent: 0, annualDiscountPercent: 0, siblingDiscountAmount: 0, annualDiscountAmount: 0, discountAmount: 0, totalAmount: 1850000, paidAmount: 0, dueDate: '2026-11-10', status: 'OVERDUE', remindersSent: 1 },
+    { id: 'tui-04', studentId: 'st-05', studentName: 'Quách Xuân Quang', centerClass: 'Lớp 7A1', parentPhone: '0365112689', monthLabel: 'Tháng 11/2026', billingCycle: 'MONTHLY', monthsCount: 1, baseAmount: 1850000, boardingAmount: 0, shuttleAmount: 450000, siblingDiscountPercent: 0, annualDiscountPercent: 0, siblingDiscountAmount: 0, annualDiscountAmount: 0, discountAmount: 0, totalAmount: 2300000, paidAmount: 0, dueDate: '2026-11-12', status: 'OVERDUE', remindersSent: 2 },
+    { id: 'tui-05', studentId: 'st-06', studentName: 'Phan Nguyễn Tấn Phong', centerClass: 'Lớp 7A1', parentPhone: '0977309541', monthLabel: 'Tháng 11/2026', billingCycle: 'MONTHLY', monthsCount: 1, baseAmount: 1850000, boardingAmount: 950000, shuttleAmount: 0, siblingDiscountPercent: 0, annualDiscountPercent: 0, siblingDiscountAmount: 0, annualDiscountAmount: 0, discountAmount: 0, totalAmount: 2800000, paidAmount: 1500000, dueDate: '2026-11-28', status: 'DUE_SOON', remindersSent: 0 },
+    { id: 'tui-06', studentId: 'st-09', studentName: 'Lê Trần Khánh Vy', centerClass: 'Lớp 10', parentPhone: '0985601114', monthLabel: 'Tháng 11/2026 (3 môn)', billingCycle: 'MONTHLY', monthsCount: 1, baseAmount: 1950000, boardingAmount: 0, shuttleAmount: 0, siblingDiscountPercent: 0, annualDiscountPercent: 0, siblingDiscountAmount: 0, annualDiscountAmount: 0, discountAmount: 0, totalAmount: 1950000, paidAmount: 1950000, dueDate: '2026-11-05', status: 'PAID', paymentMethod: 'ZALOPAY', paidAt: '2026-11-05', remindersSent: 0 },
+    {
+      id: 'tui-07',
+      familyId: 'fam-phuc',
+      studentId: 'st-11',
+      studentName: 'Nguyễn Quế Anh',
+      centerClass: 'Lớp 4,5',
+      parentPhone: '0918204412',
+      monthLabel: 'Tháng 11/2026 (Ưu đãi nhiều con -5% học phí chính)',
+      billingCycle: 'MONTHLY',
+      monthsCount: 1,
+      baseAmount: TUI_QUE_ANH.baseAmount,
+      boardingAmount: TUI_QUE_ANH.boardingAmount,
+      shuttleAmount: TUI_QUE_ANH.shuttleAmount,
+      siblingDiscountPercent: TUI_QUE_ANH.siblingDiscountPercent,
+      annualDiscountPercent: TUI_QUE_ANH.annualDiscountPercent,
+      siblingDiscountAmount: TUI_QUE_ANH.siblingDiscountAmount,
+      annualDiscountAmount: TUI_QUE_ANH.annualDiscountAmount,
+      discountAmount: TUI_QUE_ANH.discountAmount,
+      totalAmount: TUI_QUE_ANH.totalAmount,
+      paidAmount: 0,
+      dueDate: '2026-11-29',
+      status: 'DUE_SOON',
+      remindersSent: 0,
+    },
   ],
 
   expenses: [
