@@ -1,30 +1,21 @@
-# Trung Tâm Dạy Thêm Học Thêm Nhân Trí — CMS & Cổng Học Tập
+# Trung Tâm Dạy Thêm Học Thêm Nhân Trí — `daythemnhantri.com`
 
-Hệ thống Webapp Full-Stack cho **Trung Tâm Dạy Thêm Học Thêm Nhân Trí** (*"Trao tri thức – Gửi yêu thương"*), hỗ trợ triển khai trực tiếp từ **GitHub → Cloudflare Workers** (hoặc **Cloudflare Pages**).
+Hệ thống Webapp & Backend CMS Full-Stack cho **Trung Tâm Dạy Thêm Học Thêm Nhân Trí** (*"Trao tri thức – Gửi yêu thương"*), tích hợp **Firebase Auth (Gmail) + Cloud Firestore + Cloudflare Workers**.
 
-## Hướng dẫn Deploy từ GitHub lên Cloudflare
+## Hướng dẫn Deploy từ GitHub lên Cloudflare Workers (`trungtamdaythemnhantri`)
 
-### Cách 1: Cloudflare Workers (Khuyên dùng — đã cấu hình sẵn `wrangler.jsonc`)
 1. Đẩy toàn bộ mã nguồn này lên kho GitHub của bạn.
-2. Vào **Cloudflare Dashboard → Workers & Pages → Create → Import a repository** và chọn repo GitHub.
-3. Cấu hình build:
+2. Vào **Cloudflare Dashboard → Workers & Pages → `trungtamdaythemnhantri` → Settings → Build → Build configuration**:
    - **Build command**: `npm run build`
    - **Deploy command**: `npx wrangler deploy`
-4. Vào **Settings → Variables and Secrets** của Worker vừa tạo, thêm các biến bảo mật (Encrypted Secret):
-   - `GEMINI_API_KEY`: API key Gemini để kích hoạt AI quét bài kiểm tra, OCR danh sách học sinh và trợ lý tư vấn 24/7.
-   - `SESSION_SECRET`: Chuỗi bí mật ngẫu nhiên (32+ ký tự) dùng ký phiên đăng nhập.
-   - `ADMIN_PASSCODE`: Mật khẩu đăng nhập vai trò Quản trị viên.
-5. *(Tùy chọn lưu trữ lâu dài)* Tạo cơ sở dữ liệu **Cloudflare D1** (`nhantri-db`), gắn Binding tên `DB` trong **Settings → Bindings** và chạy file `schema.sql`. Nếu chưa gắn D1, ứng dụng vẫn chạy mượt ngay lập tức với dữ liệu khởi tạo sẵn.
+   *(Lưu ý: `wrangler.jsonc` đã cấu hình sẵn `"name": "trungtamdaythemnhantri"` và `"build": { "command": "npm run build" }` để đảm bảo thư mục `dist` luôn được tạo trước khi upload assets).*
+3. Vào **Settings → Variables and Secrets**, thêm các biến bảo mật (Encrypted Secret):
+   - `GEMINI_API_KEY`: API key Gemini để chạy AI phân tích ảnh bài kiểm tra, OCR danh sách học sinh và trợ lý tư vấn 24/7.
+   - `SESSION_SECRET`: Chuỗi bí mật ngẫu nhiên (32+ ký tự) dùng ký phiên làm việc API.
+4. Vào **Settings → Domains & Routes → Add Custom Domain** và gắn tên miền **`daythemnhantri.com`**.
+5. Trong **Firebase Console → Authentication → Settings → Authorized domains**, thêm **`daythemnhantri.com`** để đăng nhập Gmail (`duyweb5@gmail.com` — SuperAdmin, `lethituman2021@gmail.com` — Admin) hoạt động trên tên miền chính thức.
 
-### Cách 2: Cloudflare Pages (GitHub Integration)
-1. Chọn **Workers & Pages → Create → Pages → Connect to Git**.
-2. Cấu hình:
-   - **Build command**: `npm run build`
-   - **Build output directory**: `dist`
-3. Thêm các biến môi trường `GEMINI_API_KEY`, `SESSION_SECRET`, `ADMIN_PASSCODE` trong **Settings → Environment variables** (Production).
-4. Thư mục `functions/api/[[path]].ts` sẽ tự động chạy toàn bộ API `/api/v1/*` trên Cloudflare Edge.
-
-## Chạy thử cục bộ (Local Development)
+## Chạy cục bộ (Local Development)
 ```bash
 npm install
 npm run dev
