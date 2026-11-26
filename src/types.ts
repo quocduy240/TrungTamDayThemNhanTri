@@ -33,6 +33,7 @@ export interface SiteConfig {
   seoDescription: string;
   hotlineZalo: string;
   zaloUrl: string;
+  facebookUrl?: string;
   contactEmail: string;
   campus1: string;
   campus2: string;
@@ -262,6 +263,18 @@ export interface AppNotification {
   channel: 'APP' | 'ZALO' | 'EMAIL';
   targetRole: UserRole | 'ALL';
   read: boolean;
+}
+
+export interface FanpagePost {
+  id: string;
+  date: string;
+  type: 'REEL' | 'ADMISSIONS' | 'STRATEGY';
+  tagLabel: string;
+  title: string;
+  summary: string;
+  viewsLabel?: string;
+  url: string;
+  thumbnailUrl: string;
 }
 
 export interface DatabaseState {

@@ -1,6 +1,11 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import firebaseConfig from '../firebase-applet-config.json';
-import { INITIAL_DB, REAL_CENTER_GALLERY } from '../server/seedData.ts';
+import {
+  FANPAGE_POSTS_FEED,
+  INITIAL_DB,
+  OFFICIAL_FANPAGE_URL,
+  REAL_CENTER_GALLERY,
+} from '../server/seedData.ts';
 import { CLOUDFLARE_D1_SCHEMA_SQL } from '../server/schemaSql.ts';
 import type {
   AttendanceRecord,
@@ -101,9 +106,18 @@ const SHIFT_TIMES: Record<`${SessionPeriod}_${ShiftCode}`, string> = {
   TOI_CA_2: '19:00–20:30',
 };
 
-// Runtime fallback secret if SESSION_SECRET is not set in Cloudflare Secrets
-const FALLBACK_SECRET_BYTES = crypto.getRandomValues(new Uint8Array(32));
-const FALLBACK_SECRET = Array.from(FALLBACK_SECRET_BYTES, (b) => b.toString(16).padStart(2, '0')).join('');
+// Lazily initialized inside request handlers (Cloudflare Workers disallows crypto.getRandomValues in global scope)
+let runtimeFallbackSecret: string | null = null;
+
+function getSessionSecret(env: WorkerEnv): string {
+  const configured = env.SESSION_SECRET?.trim();
+  if (configured) return configured;
+  if (!runtimeFallbackSecret) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    runtimeFallbackSecret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return runtimeFallbackSecret;
+}
 
 let isolateMemoryDb: DatabaseState | null = null;
 let d1Initialized = false;
@@ -242,7 +256,7 @@ async function hmacSign(payload: string, secret: string): Promise<string> {
 }
 
 async function signToken(user: AuthUser, env: WorkerEnv): Promise<string> {
-  const secret = env.SESSION_SECRET?.trim() || FALLBACK_SECRET;
+  const secret = getSessionSecret(env);
   const payload = toBase64Url(
     new TextEncoder().encode(JSON.stringify({ ...user, exp: Date.now() + 1000 * 60 * 60 * 12 })),
   );
@@ -254,7 +268,7 @@ async function verifyToken(token: string, env: WorkerEnv): Promise<AuthUser | nu
   try {
     const [payload, sig] = token.split('.');
     if (!payload || !sig) return null;
-    const secret = env.SESSION_SECRET?.trim() || FALLBACK_SECRET;
+    const secret = getSessionSecret(env);
     const expected = await hmacSign(payload, secret);
     if (!timingSafeEqual(new TextEncoder().encode(sig), new TextEncoder().encode(expected))) {
       return null;
@@ -442,11 +456,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         philosophy:
           'Soạn bài, trả bài, làm bài tập theo thời khóa biểu trong lớp · Tận tâm, tận lực, tận tình',
         campuses: [
-          'Cơ sở 1: TP. Long Xuyên, Tỉnh An Giang',
+          'Cơ sở 1: 35 Lý Thường Kiệt, TP. Long Xuyên, Tỉnh An Giang',
           'Cơ sở 2: Trung Tâm Nhân Trí 2 — TP. Long Xuyên, Tỉnh An Giang',
         ],
-        hotlineZalo: '0918 990 999',
-        email: 'lienhe@daythemnhantri.com',
+        hotlineZalo: '0947 376 444 (Cô Tâm)',
+        email: 'trungtamnhantri.lxag@gmail.com',
+        facebookUrl: OFFICIAL_FANPAGE_URL,
         domain: 'daythemnhantri.com',
       },
       courses: db.courses,
@@ -454,6 +469,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       timetable: db.timetable,
       exams: db.exams,
       gallery: REAL_CENTER_GALLERY,
+      fanpagePosts: FANPAGE_POSTS_FEED,
       examsSummary: db.exams.map(
         ({
           id,
@@ -1341,8 +1357,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       const lang = b.language === 'en' ? 'en' : 'vi';
       const systemInstruction =
         lang === 'en'
-          ? 'You are the 24/7 Academic Advisor of Trung Tâm Dạy Thêm Học Thêm Nhân Trí (Long Xuyên). Answer concisely in English based on center tuition: Primary 1.1M VND/month, Middle School all-in-one 1.85M VND/month (+950k boarding, +450k shuttle), High School 650k/subject/month, 10% annual prepayment discount, automatic evening makeup (17:30-19:00) for PE conflicts.'
-          : 'Bạn là Trợ lý Học vụ & Tư vấn 24/7 của Trung Tâm Dạy Thêm Học Thêm Nhân Trí (Long Xuyên — Trao tri thức, Gửi yêu thương). Trả lời rõ ràng, ngắn gọn: Cấp 1 dạy kèm 1.100.000đ/tháng; Cấp 2 trọn gói 1.850.000đ/tháng (có trả bài, tùy chọn bán trú +950k, đưa rước +450k); Cấp 3 theo môn 650.000đ/môn/tháng; đóng nguyên năm giảm 10%; trùng Thể dục tự xếp bù tối 17h30–19h00.';
+          ? 'You are the 24/7 Academic Advisor of Trung Tâm Dạy Thêm Học Thêm Nhân Trí (35 Lý Thường Kiệt, Long Xuyên, An Giang · Hotline/Zalo Cô Tâm: 0947 376 444). Answer concisely in English: Primary (Grades 3-5) small-group Math/English/Vietnamese 1.1M VND/month with FREE makeup tutoring; Middle School (Grades 6-9) all-in-one 1.85M VND/month (+950k boarding, +450k shuttle) with Grade 10 entrance prep; High School (Grades 10-12) 650k/subject/month for all 6 subjects (Math, Literature, English, Physics, Chemistry, Biology) + V-ACT/V-SAT/BCA/HCMUE aptitude prep; 10% annual prepayment discount; automatic 17:30-19:00 makeup for PE conflicts.'
+          : 'Bạn là Trợ lý Học vụ & Tư vấn 24/7 của Trung Tâm Dạy Thêm Học Thêm Nhân Trí (Cơ sở 1: 35 Lý Thường Kiệt, TP. Long Xuyên, An Giang · Hotline/Zalo Cô Tâm: 0947 376 444 · Email: trungtamnhantri.lxag@gmail.com). Trả lời rõ ràng, ngắn gọn: Cấp 1 (Lớp 3-5) nhóm nhỏ tích hợp Toán - Anh - Việt 1.100.000đ/tháng, phụ đạo bù bài MIỄN PHÍ khi lỡ buổi; Cấp 2 (Lớp 6-9) trọn gói 1.850.000đ/tháng (có trả bài, lộ trình Thời điểm vàng lớp 8-9 luyện thi vào Lớp 10, tùy chọn bán trú +950k, đưa rước +450k); Cấp 3 (Lớp 10-12) theo môn 650.000đ/môn/tháng đủ 6 môn Toán, Văn, Anh, Lý, Hóa, Sinh + luyện thi ĐGNL (V-ACT, V-SAT, Bộ Công an, HCMUE); đóng nguyên năm giảm 10%; trùng Thể dục tự xếp bù tối 17h30–19h00.';
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
         contents: `Hiện có ${db.students.length} học sinh, ${db.teachers.length} giáo viên, ${db.exams.length} đề thi mẫu.\nCâu hỏi: ${question}`,

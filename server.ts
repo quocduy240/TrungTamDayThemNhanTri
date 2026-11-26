@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { loadDb, saveDb, CLOUDFLARE_D1_SCHEMA_SQL } from './server/db.ts';
-import { REAL_CENTER_GALLERY } from './server/seedData.ts';
+import { FANPAGE_POSTS_FEED, OFFICIAL_FANPAGE_URL, REAL_CENTER_GALLERY } from './server/seedData.ts';
 import {
   ADMIN_EMAIL,
   DEMO_ACCOUNTS,
@@ -80,11 +80,12 @@ app.get('/api/v1/bootstrap', (_req, res) => {
       slogan: 'Trao tri thức – Gửi yêu thương',
       philosophy: 'Soạn bài, trả bài, làm bài tập theo thời khóa biểu trong lớp · Tận tâm, tận lực, tận tình',
       campuses: [
-        'Cơ sở 1: TP. Long Xuyên, Tỉnh An Giang',
+        'Cơ sở 1: 35 Lý Thường Kiệt, TP. Long Xuyên, Tỉnh An Giang',
         'Cơ sở 2: Trung Tâm Nhân Trí 2 — TP. Long Xuyên, Tỉnh An Giang',
       ],
-      hotlineZalo: '0918 990 999',
-      email: 'lienhe@daythemnhantri.com',
+      hotlineZalo: '0947 376 444 (Cô Tâm)',
+      email: 'trungtamnhantri.lxag@gmail.com',
+      facebookUrl: OFFICIAL_FANPAGE_URL,
       domain: 'daythemnhantri.com',
     },
     courses: db.courses,
@@ -92,6 +93,7 @@ app.get('/api/v1/bootstrap', (_req, res) => {
     timetable: db.timetable,
     exams: db.exams,
     gallery: REAL_CENTER_GALLERY,
+    fanpagePosts: FANPAGE_POSTS_FEED,
     examsSummary: db.exams.map(({ id, title, level, grade, subject, durationMinutes, curriculumStandard, difficulty, attemptsCount, questions }) => ({
       id,
       title,

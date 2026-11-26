@@ -93,7 +93,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'domain', 'centerName', 'shortName', 'slogan', 'philosophy',
-          'seoTitle', 'seoDescription', 'hotlineZalo', 'zaloUrl', 'contactEmail',
+          'seoTitle', 'seoDescription', 'hotlineZalo', 'zaloUrl', 'facebookUrl', 'contactEmail',
           'campus1', 'campus2', 'announcementBanner', 'showAnnouncement',
           'defaultFrontendMode',
           'heroTitleTeacherStudent', 'heroSubtitleTeacherStudent',
@@ -113,6 +113,7 @@ service cloud.firestore {
         && isOptionalString(data, 'seoDescription', 320)
         && isNonEmptyString(data.hotlineZalo, 40)
         && isOptionalString(data, 'zaloUrl', 200)
+        && isOptionalString(data, 'facebookUrl', 240)
         && isOptionalString(data, 'contactEmail', 120)
         && isOptionalString(data, 'campus1', 200)
         && isOptionalString(data, 'campus2', 200)
@@ -415,7 +416,7 @@ service cloud.firestore {
           isAdmin() &&
           incoming().diff(existing()).affectedKeys().hasOnly([
             'centerName', 'shortName', 'slogan', 'philosophy',
-            'hotlineZalo', 'zaloUrl', 'contactEmail', 'campus1', 'campus2',
+            'hotlineZalo', 'zaloUrl', 'facebookUrl', 'contactEmail', 'campus1', 'campus2',
             'announcementBanner', 'showAnnouncement', 'defaultFrontendMode',
             'heroTitleTeacherStudent', 'heroSubtitleTeacherStudent',
             'heroTitleParent', 'heroSubtitleParent',

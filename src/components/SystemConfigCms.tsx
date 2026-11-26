@@ -311,6 +311,16 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
                   className="w-full h-9 px-3 text-sm border border-slate-300 rounded-lg"
                 />
               </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Đường dẫn Fanpage Facebook chính thức</label>
+                <input
+                  type="url"
+                  value={form.facebookUrl || ''}
+                  onChange={(e) => setForm({ ...form, facebookUrl: e.target.value })}
+                  placeholder="https://www.facebook.com/..."
+                  className="w-full h-9 px-3 text-sm border border-slate-300 rounded-lg"
+                />
+              </div>
             </div>
 
             <div className="pt-3 border-t border-slate-100 space-y-3">

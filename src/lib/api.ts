@@ -4,6 +4,7 @@ import type {
   AuthUser,
   CoursePackage,
   ExpenseRecord,
+  FanpagePost,
   FeedbackTicket,
   NationalExam,
   ScoreRecord,
@@ -65,6 +66,7 @@ export interface BootstrapPayload {
     campuses: string[];
     hotlineZalo: string;
     email: string;
+    facebookUrl?: string;
     domain?: string;
   };
   courses: CoursePackage[];
@@ -72,6 +74,7 @@ export interface BootstrapPayload {
   timetable?: TimetableSlot[];
   exams?: NationalExam[];
   gallery: { id: string; url: string; title: string; caption: string }[];
+  fanpagePosts?: FanpagePost[];
   examsSummary: {
     id: string;
     title: string;
