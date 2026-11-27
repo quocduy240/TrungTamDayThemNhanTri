@@ -10,9 +10,11 @@ import {
   Clock,
   Copy,
   Download,
+  FileSpreadsheet,
   GripVertical,
   Pencil,
   Plus,
+  Printer,
   RefreshCw,
   RotateCcw,
   Save,
@@ -28,6 +30,7 @@ import type {
   SessionPeriod,
   ShiftCode,
   SiteConfig,
+  SmartImportEntityType,
   Teacher,
   TeacherGroup,
   TeacherLeave,
@@ -55,6 +58,8 @@ import {
   type MoveOrSwapEvaluation,
 } from '../lib/timetableEngine';
 import { ParentTimetableView } from './ParentTimetableView';
+import { UniversalSmartImportModal } from './UniversalSmartImportModal';
+import { TimetablePdfDispatchModal } from './TimetablePdfDispatchModal';
 
 interface TimetableModuleProps {
   workspace: WorkspacePayload;
@@ -122,6 +127,10 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
   const [classFilter, setClassFilter] = useState('Tất cả lớp');
   const [teacherFilter, setTeacherFilter] = useState('ALL');
   const [groupFilter, setGroupFilter] = useState<'ALL' | TeacherGroup>('ALL');
+
+  // Smart Multi-Dimensional Import & Personalized PDF Dispatch Modals
+  const [smartImportEntity, setSmartImportEntity] = useState<SmartImportEntityType | null>(null);
+  const [pdfDispatchOpen, setPdfDispatchOpen] = useState(false);
 
   // Drag-and-drop & Undo state
   const [draggedSlotId, setDraggedSlotId] = useState<string | null>(null);
@@ -869,14 +878,32 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           {canEdit && (
-            <button
-              type="button"
-              onClick={() => openCreateModal()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg whitespace-nowrap cursor-pointer"
-            >
-              <CalendarPlus className="w-4 h-4" />
-              <span>Thêm ca học mới</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setSmartImportEntity('TIMETABLE')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-blue-950 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg whitespace-nowrap cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-blue-900" />
+                <span>Nhập TKB đa chiều (Excel / Ảnh / PDF)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPdfDispatchOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-950 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg whitespace-nowrap cursor-pointer"
+              >
+                <Printer className="w-4 h-4 text-amber-700" />
+                <span>Xuất &amp; Gửi PDF Cá nhân hóa</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openCreateModal()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg whitespace-nowrap cursor-pointer"
+              >
+                <CalendarPlus className="w-4 h-4" />
+                <span>Thêm ca học mới</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -1521,14 +1548,24 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                 ))}
               </div>
 
-              <button
-                type="button"
-                onClick={startNewTeacher}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Thêm giáo viên mới</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSmartImportEntity('TEACHERS')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-blue-950 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-blue-900" />
+                  <span>Nhập GV đa chiều (Excel / Ảnh / AI)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={startNewTeacher}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Thêm giáo viên mới</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -2655,6 +2692,32 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
           </div>
         </div>
       )}
+
+      {/* Multi-Dimensional Smart Ingestion Studio (Timetable / Teachers) */}
+      {smartImportEntity && (
+        <UniversalSmartImportModal
+          open={Boolean(smartImportEntity)}
+          entityType={smartImportEntity}
+          workspace={workspace}
+          onClose={() => setSmartImportEntity(null)}
+          onSuccess={async (msg) => {
+            await onRefresh();
+            setStatusMessage(msg);
+          }}
+        />
+      )}
+
+      {/* Personalized Branded A4 Timetable PDF & Batch Dispatch Hub */}
+      <TimetablePdfDispatchModal
+        open={pdfDispatchOpen}
+        workspace={workspace}
+        siteConfig={siteConfig}
+        onClose={() => setPdfDispatchOpen(false)}
+        onDispatched={async () => {
+          await onRefresh();
+          setStatusMessage('Đã ghi nhận gửi Thời khóa biểu cá nhân hóa tới Phụ huynh / Học sinh / Giáo viên.');
+        }}
+      />
     </div>
   );
 };

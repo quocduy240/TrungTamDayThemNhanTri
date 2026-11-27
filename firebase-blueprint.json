@@ -211,6 +211,7 @@
         "ownerUid": { "type": "string", "maxLength": 128 },
         "familyId": { "type": "string", "maxLength": 128 },
         "code": { "type": "string", "maxLength": 40 },
+        "qrToken": { "type": "string", "maxLength": 64 },
         "parentLinkCode": { "type": "string", "maxLength": 24 },
         "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
         "grade": { "type": "number" },

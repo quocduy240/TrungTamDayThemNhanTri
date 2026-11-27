@@ -4,6 +4,7 @@ import {
   Check,
   Copy,
   FilePlus2,
+  FileSpreadsheet,
   Printer,
   Sparkles,
   Upload,
@@ -18,6 +19,7 @@ import {
 import { compressImageFile } from '../lib/imageOptimizer';
 import { buildReportCardDocumentHtml } from '../lib/brandedDocumentExporter';
 import { BrandedPrintModal } from './BrandedPrintModal';
+import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 
 interface ScoresAiModuleProps {
   workspace: WorkspacePayload;
@@ -43,8 +45,15 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
   siteConfig,
   onRefresh,
 }) => {
+  const canBulkImport =
+    workspace.user.role === 'SUPER_ADMIN' ||
+    workspace.user.role === 'ADMIN' ||
+    workspace.user.role === 'MANAGER' ||
+    workspace.user.role === 'TEACHER';
+
   const [selectedStudentId, setSelectedStudentId] = useState<string>(workspace.students[0]?.id || '');
   const [printReportOpen, setPrintReportOpen] = useState(false);
+  const [smartImportOpen, setSmartImportOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
   const [aiResult, setAiResult] = useState<AnalyzedResult | null>(null);
@@ -184,7 +193,17 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {canBulkImport && (
+            <button
+              type="button"
+              onClick={() => setSmartImportOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg whitespace-nowrap cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Nhập điểm hàng loạt (Excel / Camera / PDF)</span>
+            </button>
+          )}
           <span className="text-slate-600 font-medium">Học sinh:</span>
           <select
             value={selectedStudentId}
@@ -542,6 +561,18 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
           onClose={() => setPrintReportOpen(false)}
         />
       )}
+
+      {/* Multi-Dimensional Smart Ingestion Studio (Scores) */}
+      <UniversalSmartImportModal
+        open={smartImportOpen}
+        entityType="SCORES"
+        workspace={workspace}
+        onClose={() => setSmartImportOpen(false)}
+        onSuccess={async (msg) => {
+          await onRefresh();
+          setSuccessMsg(msg);
+        }}
+      />
     </div>
   );
 };

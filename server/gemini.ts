@@ -204,3 +204,174 @@ export async function askNhanTriAdvisor(
 
   return (response.text ?? '').trim() || 'Trung Tâm Nhân Trí đã tiếp nhận câu hỏi. Vui lòng thử lại sau giây lát.';
 }
+
+export interface SmartExtractPayload {
+  entityType: 'STUDENTS' | 'TEACHERS' | 'SCORES' | 'TIMETABLE';
+  fileBase64?: string;
+  mimeType?: string;
+  rawText?: string;
+  canonicalContext?: {
+    teachers?: string[];
+    rooms?: string[];
+    classes?: string[];
+  };
+}
+
+/**
+ * Universal Multimodal AI Document Extractor (Image / Camera / PDF / Word Text / Non-standard Excel Text)
+ * Powered by gemini-4-hydrogen with strict JSON responseSchema for each entity type.
+ */
+export async function smartExtractWithGemini(
+  payload: SmartExtractPayload,
+  aiOverride?: GoogleGenAI,
+): Promise<Record<string, unknown>[]> {
+  const ai = aiOverride || getClient();
+
+  const parts: Array<{ inlineData: { mimeType: string; data: string } } | { text: string }> = [];
+  if (payload.fileBase64) {
+    const cleaned = payload.fileBase64.includes(',')
+      ? payload.fileBase64.split(',')[1]
+      : payload.fileBase64;
+    parts.push({
+      inlineData: {
+        mimeType: payload.mimeType || 'image/jpeg',
+        data: cleaned,
+      },
+    });
+  }
+
+  let prompt = '';
+  let schema: Record<string, unknown>;
+
+  if (payload.entityType === 'STUDENTS') {
+    prompt =
+      'Bạn là trợ lý học vụ Trung Tâm Nhân Trí. Hãy trích xuất toàn bộ danh sách HỌC SINH từ tài liệu/ảnh/bảng này. ' +
+      'Trả về mảng JSON chuẩn gồm: fullName (họ tên đầy đủ), centerClass (VD: Lớp 7A1, Lớp 4,5), grade (số nguyên 3-12), ' +
+      'schoolClass (lớp ở trường), school (tên trường), parentName (tên phụ huynh), parentPhone (giữ nguyên đầy đủ số điện thoại 10 số nếu có), ' +
+      'parentEmail (nếu có), homeroomTeacher (GV phụ trách), room (Phòng 1..6), hasBoarding ("Có" hoặc "Không"), hasShuttle ("Có" hoặc "Không"), enrolledSubjects (chuỗi môn cách nhau dấu phẩy).';
+    schema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          fullName: { type: Type.STRING },
+          centerClass: { type: Type.STRING },
+          grade: { type: Type.STRING },
+          schoolClass: { type: Type.STRING },
+          school: { type: Type.STRING },
+          parentName: { type: Type.STRING },
+          parentPhone: { type: Type.STRING },
+          parentEmail: { type: Type.STRING },
+          homeroomTeacher: { type: Type.STRING },
+          room: { type: Type.STRING },
+          hasBoarding: { type: Type.STRING },
+          hasShuttle: { type: Type.STRING },
+          enrolledSubjects: { type: Type.STRING },
+        },
+        required: ['fullName'],
+      },
+    };
+  } else if (payload.entityType === 'TEACHERS') {
+    prompt =
+      'Bạn là trợ lý nhân sự học vụ Trung Tâm Nhân Trí. Hãy trích xuất toàn bộ danh sách GIÁO VIÊN từ ảnh/tài liệu/bảng này. ' +
+      'Trả về mảng JSON gồm: name (họ tên đầy đủ), shortName (tên gọi tắt VD Cô Mẫn, Thầy Bảo), ' +
+      'teacherGroup ("SUBJECT" nếu dạy bộ môn chính hoặc "TUTOR_REVIEW" nếu là GV trả bài/kèm bài), ' +
+      'subjects (chuỗi các môn cách nhau dấu phẩy), degree (trình độ/bằng cấp), experienceYears (số năm kinh nghiệm), phone, email, roomDefault (Phòng mặc định).';
+    schema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          name: { type: Type.STRING },
+          shortName: { type: Type.STRING },
+          teacherGroup: { type: Type.STRING },
+          subjects: { type: Type.STRING },
+          degree: { type: Type.STRING },
+          experienceYears: { type: Type.STRING },
+          phone: { type: Type.STRING },
+          email: { type: Type.STRING },
+          roomDefault: { type: Type.STRING },
+        },
+        required: ['name'],
+      },
+    };
+  } else if (payload.entityType === 'SCORES') {
+    prompt =
+      'Bạn là trợ lý học vụ Trung Tâm Nhân Trí. Hãy trích xuất toàn bộ ĐIỂM SỐ KIỂM TRA từ ảnh bài làm / bảng điểm / file PDF / Word này (có thể là 1 bài kiểm tra hoặc bảng điểm nhiều học sinh). ' +
+      'Trả về mảng JSON gồm: studentCode (mã HS nếu có), studentName (họ tên HS), centerClass (lớp), subject (môn học), ' +
+      'examType (một trong: 15_PHUT, 1_TIET, GIUA_KY, CUOI_KY), score (số điểm thang 10), date (YYYY-MM-DD nếu có), aiSummary (nhận xét ngắn gọn).';
+    schema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          studentCode: { type: Type.STRING },
+          studentName: { type: Type.STRING },
+          centerClass: { type: Type.STRING },
+          subject: { type: Type.STRING },
+          examType: { type: Type.STRING },
+          score: { type: Type.STRING },
+          date: { type: Type.STRING },
+          aiSummary: { type: Type.STRING },
+        },
+        required: ['studentName', 'subject', 'score'],
+      },
+    };
+  } else {
+    const tList = (payload.canonicalContext?.teachers || []).join(', ');
+    const rList = (payload.canonicalContext?.rooms || []).join(', ');
+    const cList = (payload.canonicalContext?.classes || []).join(', ');
+    prompt =
+      'Bạn là chuyên gia chuẩn hóa Thời khóa biểu Trung Tâm Nhân Trí. Tài liệu/ảnh đầu vào có thể ở bất kỳ bố cục bảng biểu nào (lịch ngang, lịch dọc, chia buổi, ô gộp). ' +
+      'Hãy bóc tách từng ca học thành danh sách phẳng chuẩn hóa theo CSDL gồm: ' +
+      'day (bắt buộc một trong: T2, T3, T4, T5, T6, T7), ' +
+      'period (bắt buộc một trong: SANG, CHIEU, TOI), ' +
+      'shift (bắt buộc một trong: CA_1, CA_2), ' +
+      'timeRange (VD: 07:15–08:45, 14:00–15:30, 17:30–19:00), ' +
+      'centerClass (tên lớp VD: Lớp 6A1, Lớp 7A1, Lớp 4,5), ' +
+      'subject (tên môn học), teacherName (ưu tiên khớp tên giáo viên có sẵn), room (ưu tiên khớp phòng học có sẵn), ' +
+      'slotType (một trong: MAIN, TRA_BAI, PHU_DAO, BU_THE_DUC), note (ghi chú nếu có).\n' +
+      (tList ? `Danh sách Giáo viên chốt cứng hiện tại: ${tList}\n` : '') +
+      (rList ? `Danh sách Phòng học chốt cứng hiện tại: ${rList}\n` : '') +
+      (cList ? `Danh sách Lớp học hiện có: ${cList}\n` : '');
+    schema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          day: { type: Type.STRING },
+          period: { type: Type.STRING },
+          shift: { type: Type.STRING },
+          timeRange: { type: Type.STRING },
+          centerClass: { type: Type.STRING },
+          subject: { type: Type.STRING },
+          teacherName: { type: Type.STRING },
+          room: { type: Type.STRING },
+          slotType: { type: Type.STRING },
+          note: { type: Type.STRING },
+        },
+        required: ['day', 'period', 'shift', 'centerClass', 'subject'],
+      },
+    };
+  }
+
+  if (payload.rawText && payload.rawText.trim()) {
+    prompt += `\n\n--- NỘI DUNG VĂN BẢN / BẢNG ĐÃ TRÍCH XUẤT ---\n${payload.rawText.slice(0, 18000)}`;
+  }
+
+  parts.push({ text: prompt });
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-4-hydrogen',
+    contents: { parts },
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: schema,
+    },
+  });
+
+  const raw = (response.text ?? '[]').trim();
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? (parsed as Record<string, unknown>[]).slice(0, 150) : [];
+}
+

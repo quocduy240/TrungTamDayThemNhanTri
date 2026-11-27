@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Camera,
   Check,
   Copy,
   Download,
   FileSpreadsheet,
   Image as ImageIcon,
   KeyRound,
+  Printer,
+  QrCode,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -14,7 +17,7 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
-import type { StudentAccessStatus, StudentRecord } from '../types';
+import type { SiteConfig, StudentAccessStatus, StudentRecord } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
 import {
   buildZaloAccessCardText,
@@ -22,9 +25,20 @@ import {
   generateAccessPin,
 } from '../lib/identityPolicy';
 import { compressImageFile } from '../lib/imageOptimizer';
+import {
+  buildDeterministicQrToken,
+  buildStudentQrUrl,
+  generateSmartStudentCode,
+  renderQrDataUrl,
+} from '../lib/smartCodeAndQr';
+import { buildStudentQrCardsHtml } from '../lib/brandedDocumentExporter';
+import { BrandedPrintModal } from './BrandedPrintModal';
+import { UniversalSmartImportModal } from './UniversalSmartImportModal';
+import { QrAttendanceScannerModal, StudentQrCardModal } from './StudentQrHub';
 
 interface StudentsAttendanceModuleProps {
   workspace: WorkspacePayload;
+  siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
   initialClassFilter?: string;
   initialShiftLabel?: string;
@@ -81,6 +95,7 @@ function parseDelimitedText(text: string): Record<string, string>[] {
 
 export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> = ({
   workspace,
+  siteConfig,
   onRefresh,
   initialClassFilter,
   initialShiftLabel,
@@ -148,6 +163,18 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
     hasShuttle: false,
   });
 
+  // Multi-Dimensional Smart Import, Dynamic QR Card & Camera Attendance Scanner
+  const [smartImportOpen, setSmartImportOpen] = useState(false);
+  const [qrCardStudent, setQrCardStudent] = useState<StudentRecord | null>(null);
+  const [qrScannerOpen, setQrScannerOpen] = useState(false);
+  const [classQrPrintHtml, setClassQrPrintHtml] = useState<string | null>(null);
+  const [buildingClassQr, setBuildingClassQr] = useState(false);
+
+  const previewSmartCode = useMemo(
+    () => generateSmartStudentCode(newStudent.centerClass, workspace.students),
+    [newStudent.centerClass, workspace.students],
+  );
+
   const filteredStudents = useMemo(() => {
     const q = search.trim().toLowerCase();
     return workspace.students.filter((st) => {
@@ -161,6 +188,30 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
       );
     });
   }, [workspace.students, search, gradeFilter]);
+
+  async function handlePrintFilteredQrCards() {
+    if (filteredStudents.length === 0) return;
+    setBuildingClassQr(true);
+    setErrorMsg('');
+    try {
+      const qrMap: Record<string, string> = {};
+      for (const st of filteredStudents) {
+        const token = st.qrToken || buildDeterministicQrToken(st.id, st.code);
+        qrMap[st.id] = await renderQrDataUrl(buildStudentQrUrl(token), 240);
+      }
+      const html = buildStudentQrCardsHtml({
+        students: filteredStudents,
+        qrDataUrlByStudentId: qrMap,
+        siteConfig,
+        title: `Bộ Thẻ QR Học sinh (${filteredStudents.length} em)`,
+      });
+      setClassQrPrintHtml(html);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo bộ thẻ QR in A4.');
+    } finally {
+      setBuildingClassQr(false);
+    }
+  }
 
   async function handleQuickAttendance(
     studentId: string,
@@ -382,13 +433,31 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
             <button
               type="button"
               onClick={() => {
-                setShowImport((v) => !v);
+                setSmartImportOpen(true);
                 setShowAdd(false);
+                setShowImport(false);
               }}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 rounded-lg hover:bg-blue-800 whitespace-nowrap cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4" />
-              <span>Nhập thông minh (Excel / Ảnh AI)</span>
+              <span>Nhập đa chiều (Excel / Camera / PDF)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setQrScannerOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-600 whitespace-nowrap cursor-pointer"
+            >
+              <Camera className="w-4 h-4" />
+              <span>Quét QR Điểm danh</span>
+            </button>
+            <button
+              type="button"
+              disabled={buildingClassQr || filteredStudents.length === 0}
+              onClick={() => void handlePrintFilteredQrCards()}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-950 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 whitespace-nowrap cursor-pointer disabled:opacity-50"
+            >
+              <Printer className="w-4 h-4 text-amber-700" />
+              <span>{buildingClassQr ? 'Đang tạo thẻ...' : `In Bộ Thẻ QR (${filteredStudents.length})`}</span>
             </button>
             <button
               type="button"
@@ -399,7 +468,7 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap cursor-pointer"
             >
               <UserPlus className="w-4 h-4" />
-              <span>Thêm học sinh</span>
+              <span>Thêm nhanh 1 HS</span>
             </button>
           </div>
         )}
@@ -546,7 +615,13 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           onSubmit={handleCreateStudent}
           className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
         >
-          <h2 className="text-sm font-bold text-slate-950">Thêm hồ sơ học sinh mới</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-slate-950">Thêm hồ sơ học sinh mới</h2>
+            <span className="text-xs text-slate-600">
+              Mã HS thông minh tự cấp:{' '}
+              <strong className="font-mono-num text-blue-900">{previewSmartCode}</strong> + QR động
+            </span>
+          </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <input
               required
@@ -721,6 +796,14 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                 {isStaff && (
                   <td className="py-3 px-4 text-right whitespace-nowrap">
                     <div className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setQrCardStudent(st)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md cursor-pointer"
+                      >
+                        <QrCode className="w-3 h-3 text-blue-900" />
+                        <span>Thẻ QR</span>
+                      </button>
                       {isAdmin && (
                         <button
                           type="button"
@@ -972,6 +1055,51 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
             </div>
           </form>
         </div>
+      )}
+
+      {/* Multi-Dimensional Smart Ingestion Studio (Students) */}
+      <UniversalSmartImportModal
+        open={smartImportOpen}
+        entityType="STUDENTS"
+        workspace={workspace}
+        onClose={() => setSmartImportOpen(false)}
+        onSuccess={async (msg) => {
+          await onRefresh();
+          setFeedbackMsg(msg);
+        }}
+      />
+
+      {/* Dynamic Student QR ID Card Modal */}
+      <StudentQrCardModal
+        student={qrCardStudent}
+        allStudents={workspace.students}
+        canManage={isAdmin}
+        siteConfig={siteConfig}
+        onClose={() => setQrCardStudent(null)}
+        onRotated={async () => {
+          await onRefresh();
+          setFeedbackMsg('Đã cấp lại Mã QR động & bảo mật mới cho học sinh.');
+        }}
+      />
+
+      {/* Live Camera QR Attendance Scanner Modal */}
+      <QrAttendanceScannerModal
+        open={qrScannerOpen}
+        defaultShiftLabel={shiftLabel}
+        onClose={() => setQrScannerOpen(false)}
+        onAttendanceLogged={onRefresh}
+      />
+
+      {/* Batch A4 Branded QR Cards Print Modal */}
+      {classQrPrintHtml && (
+        <BrandedPrintModal
+          open={Boolean(classQrPrintHtml)}
+          title={`Bộ Thẻ QR Học sinh (${filteredStudents.length} em)`}
+          subtitle="Logo & Watermark chính thức Trung Tâm Nhân Trí · 6 thẻ/trang A4"
+          htmlContent={classQrPrintHtml}
+          fileName={`Bo_The_QR_NhanTri_${filteredStudents.length}HS.html`}
+          onClose={() => setClassQrPrintHtml(null)}
+        />
       )}
     </div>
   );

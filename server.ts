@@ -21,7 +21,21 @@ import {
   analyzeTestPaperImage,
   askNhanTriAdvisor,
   extractStudentsFromRosterImage,
+  smartExtractWithGemini,
 } from './server/gemini.ts';
+import {
+  generateQrToken,
+  generateSmartStudentCode,
+} from './src/lib/smartCodeAndQr.ts';
+import {
+  buildUnlockedQrStudentData,
+  bulkImportScores,
+  bulkUpsertStudents,
+  bulkUpsertTeachers,
+  findStudentByQrTokenOrCode,
+  recordQrAttendanceCheckIn,
+  smartSyncTimetable,
+} from './src/lib/smartBulkOperations.ts';
 import {
   canStudentUsePersonalGmail,
   DEFAULT_AUTH_POLICY,
@@ -96,7 +110,7 @@ app.use((_req, res, next) => {
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
-app.use(express.json({ limit: '6mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.use(extractAuth);
 
 // Lightweight sliding-window rate limiter for public write/AI routes
@@ -1102,7 +1116,10 @@ app.post('/api/v1/enrollments', (req, res) => {
   const newStudent: Student = {
     id: newStudentId,
     familyId: family?.id,
-    code: `NT-${numericGrade}-${String(db.students.length + 1).padStart(2, '0')}`,
+    code: generateSmartStudentCode(centerClass, db.students.map((s) => s.code), {
+      fallbackGrade: numericGrade,
+    }),
+    qrToken: generateQrToken(),
     parentLinkCode: generateParentLinkCode(numericGrade),
     fullName: studentName.trim(),
     grade: numericGrade,
@@ -1201,14 +1218,22 @@ app.post('/api/v1/students', requireAuth(['MANAGER', 'TEACHER']), (req, res) => 
   }
   const db = loadDb();
   const grade = Math.min(12, Math.max(3, Number(b.grade) || 7));
+  const centerClass = String(b.centerClass || `Lớp ${grade}A1`);
+  const requestedCode = typeof b.code === 'string' ? b.code.trim().toUpperCase() : '';
+  const existingCodes = db.students.map((s) => s.code);
+  const smartCode =
+    requestedCode && !existingCodes.some((c) => c.toUpperCase() === requestedCode)
+      ? requestedCode
+      : generateSmartStudentCode(centerClass, existingCodes, { fallbackGrade: grade });
   const student: Student = {
     id: `st-${Date.now()}`,
-    code: `NT-${grade}-${String(db.students.length + 1).padStart(2, '0')}`,
+    code: smartCode,
+    qrToken: generateQrToken(),
     parentLinkCode: generateParentLinkCode(grade),
     fullName: b.fullName.trim(),
     grade,
     level: grade <= 5 ? 'CAP_1' : grade <= 9 ? 'CAP_2' : 'CAP_3',
-    centerClass: String(b.centerClass || `Lớp ${grade}A1`),
+    centerClass,
     schoolClass: String(b.schoolClass || `${grade}A1`),
     school: String(b.school || 'THCS Lý Thường Kiệt'),
     homeroomTeacher: String(b.homeroomTeacher || 'Cô Nghi'),
@@ -3147,6 +3172,297 @@ app.post('/api/v1/ai/consult', async (req, res) => {
     const message = err instanceof Error ? err.message : 'Không thể kết nối trợ lý AI ngay lúc này.';
     res.status(500).json({ error: message });
   }
+});
+
+// ============================================================
+// UNIVERSAL MULTIMODAL AI EXTRACTION + BULK UPSERT + DYNAMIC QR
+// ============================================================
+
+app.post('/api/v1/ai/smart-extract', requireAuth(['MANAGER', 'TEACHER']), async (req, res) => {
+  try {
+    const b = (req.body || {}) as Record<string, unknown>;
+    const entityType = String(b.entityType || '').toUpperCase();
+    if (!['STUDENTS', 'TEACHERS', 'SCORES', 'TIMETABLE'].includes(entityType)) {
+      res.status(400).json({ error: 'Loại dữ liệu trích xuất không hợp lệ.' });
+      return;
+    }
+    const fileBase64 = typeof b.fileBase64 === 'string' ? b.fileBase64 : undefined;
+    const mimeType = typeof b.mimeType === 'string' ? b.mimeType : undefined;
+    const rawText = typeof b.rawText === 'string' ? b.rawText : undefined;
+    if (!fileBase64 && (!rawText || !rawText.trim())) {
+      res.status(400).json({ error: 'Vui lòng cung cấp ảnh, PDF, file Word hoặc bảng dữ liệu để AI phân tích.' });
+      return;
+    }
+
+    const db = loadDb();
+    const rows = await smartExtractWithGemini({
+      entityType: entityType as 'STUDENTS' | 'TEACHERS' | 'SCORES' | 'TIMETABLE',
+      fileBase64,
+      mimeType,
+      rawText,
+      canonicalContext: {
+        teachers: db.teachers.map((t) => `${t.shortName} (${t.name})`),
+        rooms: db.rooms.map((r) => `${r.name} (${r.code})`),
+        classes: Array.from(new Set(db.timetable.map((s) => s.centerClass))),
+      },
+    });
+    res.json({ rows, count: rows.length });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Lỗi AI trích xuất tài liệu đa phương thức.';
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/v1/teachers/bulk-import', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const rows = Array.isArray(req.body?.rows) ? (req.body.rows as Record<string, unknown>[]) : [];
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'Chưa có dòng dữ liệu giáo viên nào để nhập.' });
+    return;
+  }
+  const db = loadDb();
+  const result = bulkUpsertTeachers(db, rows);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'TEACHERS_BULK_IMPORT',
+    targetLabel: `${result.added} mới · ${result.updated} cập nhật`,
+    detail: `Nhập hàng loạt giáo viên (Bỏ qua: ${result.skipped}).`,
+  });
+  saveDb(db);
+  res.json(result);
+});
+
+app.post('/api/v1/students/bulk-import', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const rows = Array.isArray(req.body?.rows) ? (req.body.rows as Record<string, unknown>[]) : [];
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'Chưa có dòng dữ liệu học sinh nào để nhập.' });
+    return;
+  }
+  const db = loadDb();
+  const result = bulkUpsertStudents(db, rows);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'STUDENTS_BULK_IMPORT',
+    targetLabel: `${result.added} mới · ${result.updated} cập nhật · ${result.familiesLinked} GĐ ghép`,
+    detail: `Nhập hàng loạt học sinh kèm mã NT26 + QR động (Bỏ qua: ${result.skipped}).`,
+  });
+  saveDb(db);
+  res.json(result);
+});
+
+app.post('/api/v1/scores/bulk-import', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
+  const rows = Array.isArray(req.body?.rows) ? (req.body.rows as Record<string, unknown>[]) : [];
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'Chưa có dòng dữ liệu điểm số nào để nhập.' });
+    return;
+  }
+  const db = loadDb();
+  const result = bulkImportScores(db, rows, req.user!.role);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'SCORES_BULK_IMPORT',
+    targetLabel: `${result.added} cột điểm đã lưu`,
+    detail: `Nhập điểm hàng loạt (Chưa khớp: ${result.unmatched}).`,
+  });
+  saveDb(db);
+  res.json(result);
+});
+
+app.post('/api/v1/timetable/smart-sync', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const rows = Array.isArray(req.body?.rows) ? (req.body.rows as Record<string, unknown>[]) : [];
+  const rawMode = String(req.body?.mode || 'UPSERT').toUpperCase();
+  const mode = (['UPSERT', 'APPEND', 'REPLACE_ALL'].includes(rawMode) ? rawMode : 'UPSERT') as
+    | 'UPSERT'
+    | 'APPEND'
+    | 'REPLACE_ALL';
+  if (rows.length === 0) {
+    res.status(400).json({ error: 'Chưa có ca học nào để đồng bộ Thời khóa biểu.' });
+    return;
+  }
+  const db = loadDb();
+  const result = smartSyncTimetable(db, rows, mode);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'TIMETABLE_SMART_SYNC',
+    targetLabel: `Chế độ ${mode}: +${result.added} / cập nhật ${result.updated}`,
+    detail: `Đồng bộ TKB đa chiều (Bỏ qua: ${result.skipped}, Cảnh báo: ${result.warnings.length}).`,
+  });
+  saveDb(db);
+  res.json(result);
+});
+
+app.post('/api/v1/students/:id/regenerate-qr', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = db.students.find((s) => s.id === req.params.id);
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy hồ sơ học sinh.' });
+    return;
+  }
+  student.qrToken = generateQrToken();
+  if (req.body?.regeneratePin) {
+    student.accessPin = generateAccessPin();
+  }
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'STUDENT_QR_ROTATED',
+    targetLabel: `${student.fullName} (${student.code})`,
+    detail: 'Cấp lại Token QR động (vô hiệu hóa thẻ QR cũ).',
+  });
+  saveDb(db);
+  res.json({ student });
+});
+
+// Public minimal QR Lookup (+ Staff instant bundle if caller has valid Staff Bearer token)
+app.get('/api/v1/qr/:token', (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = findStudentByQrTokenOrCode(db, req.params.token);
+  if (!student) {
+    res.status(404).json({ error: 'Mã QR học sinh không tồn tại hoặc đã bị thu hồi. Vui lòng liên hệ Trung Tâm Nhân Trí.' });
+    return;
+  }
+  const isStaff = Boolean(
+    req.user && ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER'].includes(req.user.role),
+  );
+  res.json({
+    publicPreview: {
+      code: student.code,
+      centerClass: student.centerClass,
+      school: student.school,
+      grade: student.grade,
+      accessStatus: student.accessStatus || 'ACTIVE',
+      hasPin: Boolean(student.accessPin),
+    },
+    isStaff,
+    staffBundle: isStaff ? buildUnlockedQrStudentData(db, student) : undefined,
+  });
+});
+
+// Public PIN Unlock for Parent / Student scanning QR card
+app.post('/api/v1/qr/:token/unlock', (req, res) => {
+  const clientIp = req.ip || 'local';
+  if (isRateLimited(clientIp, 'qr-unlock', 12, 5 * 60_000)) {
+    res.status(429).json({ error: 'Bạn đã nhập sai mã PIN quá nhiều lần. Vui lòng thử lại sau 5 phút.' });
+    return;
+  }
+  const db = loadDb();
+  const student = findStudentByQrTokenOrCode(db, req.params.token);
+  if (!student || student.accessStatus === 'LOCKED') {
+    res.status(404).json({ error: 'Mã QR không hợp lệ hoặc hồ sơ đang tạm khóa.' });
+    return;
+  }
+  const pin = String(req.body?.pin || '').trim();
+  if (!pin || !studentMatchesSecret(student, pin)) {
+    res.status(401).json({ error: 'Mã PIN xác thực chưa chính xác. Vui lòng kiểm tra trên thẻ hoặc nhắn Zalo Cô Tâm (0947 376 444).' });
+    return;
+  }
+  res.json({
+    unlocked: true,
+    bundle: buildUnlockedQrStudentData(db, student),
+  });
+});
+
+// Teacher / Manager / Admin 1-Tap QR Attendance Check-in
+app.post('/api/v1/qr/:token/attendance', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = findStudentByQrTokenOrCode(db, req.params.token);
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy học sinh khớp với mã QR / Mã HS này.' });
+    return;
+  }
+  const result = recordQrAttendanceCheckIn(db, student, {
+    shiftLabel: typeof req.body?.shiftLabel === 'string' ? req.body.shiftLabel : undefined,
+    status: req.body?.status as AttendanceRecord['status'] | undefined,
+    note: typeof req.body?.note === 'string' ? req.body.note : undefined,
+    actorName: req.user!.name,
+  });
+  saveDb(db);
+  res.json({
+    student,
+    attendance: result.record,
+    alreadyCheckedInToday: result.alreadyCheckedInToday,
+  });
+});
+
+// Personalized Timetable Batch Dispatch (Logs + Optional Webhook Push)
+app.post('/api/v1/timetable/dispatch-personal', requireAuth(['MANAGER']), async (req: AuthedRequest, res) => {
+  const b = (req.body || {}) as Record<string, unknown>;
+  const items = Array.isArray(b.items)
+    ? (b.items as Array<{
+        recipientName: string;
+        recipientRole: UserRole;
+        channel?: 'ZALO' | 'EMAIL' | 'APP';
+        targetPhone?: string;
+        targetEmail?: string;
+        summary: string;
+      }>)
+    : [];
+  if (items.length === 0) {
+    res.status(400).json({ error: 'Chưa chọn người nhận nào để gửi Thời khóa biểu cá nhân hóa.' });
+    return;
+  }
+
+  const db = loadDb();
+  if (!Array.isArray(db.reminderDispatchLogs)) db.reminderDispatchLogs = [];
+  const webhookUrl = db.notificationConfig?.unifiedWebhookUrl || db.notificationConfig?.zaloWebhookUrl;
+  const webhookSafe = webhookUrl ? validateWebhookUrl(webhookUrl).ok : false;
+
+  let webhookDelivered = 0;
+  const nowStr = nowFormatted();
+  const createdLogs = [];
+
+  for (const item of items.slice(0, 80)) {
+    let status: 'SENT' | 'QUEUED_WEBHOOK' | 'SIMULATED' | 'FAILED' = 'SENT';
+    if (webhookSafe && webhookUrl) {
+      try {
+        const hookRes = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'PERSONAL_TIMETABLE_DISPATCH',
+            recipientName: item.recipientName,
+            recipientRole: item.recipientRole,
+            phone: item.targetPhone,
+            email: item.targetEmail,
+            message: item.summary,
+            sentBy: req.user!.name,
+            sentAt: nowStr,
+          }),
+        });
+        status = hookRes.ok ? 'QUEUED_WEBHOOK' : 'FAILED';
+        if (hookRes.ok) webhookDelivered += 1;
+      } catch {
+        status = 'FAILED';
+      }
+    }
+
+    const log = {
+      id: `dsp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+      sentAt: nowStr,
+      slotId: 'personal-pdf',
+      slotLabel: 'Gửi TKB Cá nhân hóa',
+      recipientName: String(item.recipientName || 'Phụ huynh').slice(0, 120),
+      recipientRole: item.recipientRole || 'PARENT',
+      channel: (item.channel || 'ZALO') as 'ZALO' | 'EMAIL' | 'APP',
+      status,
+      detail: String(item.summary || '').slice(0, 260),
+    };
+    db.reminderDispatchLogs.unshift(log);
+    createdLogs.push(log);
+  }
+
+  if (db.reminderDispatchLogs.length > 200) {
+    db.reminderDispatchLogs = db.reminderDispatchLogs.slice(0, 200);
+  }
+  saveDb(db);
+  res.json({
+    dispatched: createdLogs.length,
+    webhookDelivered,
+    logs: createdLogs,
+  });
 });
 
 // ============================================================

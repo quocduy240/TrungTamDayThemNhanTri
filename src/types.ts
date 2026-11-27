@@ -200,6 +200,7 @@ export interface Student {
   ownerUid?: string;
   familyId?: string;
   code: string;
+  qrToken?: string;
   parentLinkCode?: string;
   fullName: string;
   grade: number;
@@ -231,6 +232,10 @@ export interface Student {
   enrolledSubjects: string[];
   status: 'ACTIVE' | 'PAUSED';
 }
+
+export type SmartImportEntityType = 'STUDENTS' | 'TEACHERS' | 'SCORES' | 'TIMETABLE';
+
+export type TimetableSyncMode = 'UPSERT' | 'APPEND' | 'REPLACE_ALL';
 
 export type StudentRecord = Student;
 

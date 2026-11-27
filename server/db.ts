@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { DatabaseState } from '../src/types.ts';
 import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
+import { buildDeterministicQrToken } from '../src/lib/smartCodeAndQr.ts';
 import { INITIAL_DB } from './seedData.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -48,6 +49,10 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
     teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
     availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
   }));
+  parsed.students = (parsed.students || []).map((st) => ({
+    ...st,
+    qrToken: st.qrToken || buildDeterministicQrToken(st.id, st.code),
+  }));
   return parsed;
 }
 
@@ -66,7 +71,7 @@ export function loadDb(): DatabaseState {
       // Fallback to fresh seed if file is corrupted
     }
   }
-  memoryDb = structuredClone(INITIAL_DB);
+  memoryDb = normalizeDbState(structuredClone(INITIAL_DB));
   saveDb(memoryDb);
   return memoryDb;
 }

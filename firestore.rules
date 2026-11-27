@@ -291,7 +291,7 @@ service cloud.firestore {
           'school', 'parentName', 'parentPhone', 'packageType', 'status'
         ])
         && data.keys().hasOnly([
-          'id', 'ownerUid', 'familyId', 'code', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass', 'enrolledClasses',
+          'id', 'ownerUid', 'familyId', 'code', 'qrToken', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass', 'enrolledClasses',
           'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
           'parentPhone', 'parentSecondaryPhone', 'parentZalo', 'parentEmails', 'studentEmail',
           'allowPersonalGmailOverride', 'accessPin', 'accessStatus', 'accessNote', 'lastLoginAt',
@@ -303,6 +303,7 @@ service cloud.firestore {
         && isOptionalString(data, 'ownerUid', 128)
         && isOptionalString(data, 'familyId', 128)
         && isNonEmptyString(data.code, 40)
+        && isOptionalString(data, 'qrToken', 64)
         && isOptionalString(data, 'parentLinkCode', 24)
         && isNonEmptyString(data.fullName, 120)
         && data.grade is number && data.grade >= 3 && data.grade <= 12
