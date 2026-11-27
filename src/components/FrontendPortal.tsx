@@ -73,7 +73,7 @@ import { SocialActivityLibrary } from './SocialActivityLibrary';
 import { ShareMenu } from './ShareMenu';
 import { ZpdFrontendManualModal } from './ZpdFrontendManualModal';
 import { FrontendBannerSlot, FrontendEditorialFeed } from './FrontendPromoLayer';
-import { isBannerVisibleNow } from '../lib/contentStudioEngine';
+import { isBannerVisibleNow, sanitizeSafeUrl } from '../lib/contentStudioEngine';
 
 interface FrontendPortalProps {
   bootstrap: BootstrapPayload;
@@ -90,7 +90,7 @@ interface FrontendPortalProps {
   onToggleEditMode: () => void;
   onQuickSaveConfig: (patch: Partial<SiteConfig>) => Promise<void>;
   onQuickSaveCourse: (course: CoursePackage) => Promise<void>;
-  onLinkStudent?: (linkCode: string) => Promise<{ studentName: string }>;
+  onLinkStudent?: (linkCode: string, verifySecret?: string) => Promise<{ studentName: string }>;
   onRefreshWorkspace?: () => Promise<void>;
   onParentPhoneLogin: (phone: string, secret: string) => Promise<void>;
   onStudentLogin: (payload: {
@@ -282,6 +282,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
   const [parentQuery, setParentQuery] = useState('');
   const [selectedChildId, setSelectedChildId] = useState<string>('');
   const [linkCodeInput, setLinkCodeInput] = useState('');
+  const [linkSecretInput, setLinkSecretInput] = useState('');
   const [linkBusy, setLinkBusy] = useState(false);
   const [linkNotice, setLinkNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
@@ -462,9 +463,13 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     setLinkBusy(true);
     setLinkNotice(null);
     try {
-      const res = await onLinkStudent(linkCodeInput.trim().toUpperCase());
+      const res = await onLinkStudent(
+        linkCodeInput.trim().toUpperCase(),
+        linkSecretInput.trim() || undefined,
+      );
       setLinkNotice({ ok: true, text: `Đã liên kết thành công hồ sơ em ${res.studentName}.` });
       setLinkCodeInput('');
+      setLinkSecretInput('');
     } catch (err: unknown) {
       setLinkNotice({
         ok: false,
@@ -682,7 +687,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               />
             </div>
             <a
-              href={siteConfig.zaloUrl || `tel:${hotlineDigits}`}
+              href={sanitizeSafeUrl(siteConfig.zaloUrl, false) || `tel:${hotlineDigits}`}
               target="_blank"
               rel="noopener noreferrer"
               className="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-200 hover:text-white shrink-0 whitespace-nowrap"
@@ -1493,7 +1498,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                           className="w-full sm:max-w-xs h-9 px-3 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
                         />
                         {onLinkStudent && (
-                          <form onSubmit={handleParentLinkSubmit} className="flex items-center gap-1.5">
+                          <form onSubmit={handleParentLinkSubmit} className="flex flex-wrap items-center gap-1.5">
                             <div className="relative">
                               <Link2 className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                               <input
@@ -1501,10 +1506,18 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                                 value={linkCodeInput}
                                 onChange={(e) => setLinkCodeInput(e.target.value.toUpperCase())}
                                 placeholder="Mã PH (VD: NT7A1T)"
-                                maxLength={10}
-                                className="h-9 pl-8 pr-2.5 w-44 text-xs font-mono-num uppercase border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
+                                maxLength={12}
+                                className="h-9 pl-8 pr-2.5 w-36 text-xs font-mono-num uppercase border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
                               />
                             </div>
+                            <input
+                              type="password"
+                              value={linkSecretInput}
+                              onChange={(e) => setLinkSecretInput(e.target.value)}
+                              placeholder="PIN / 4 số cuối SĐT"
+                              maxLength={12}
+                              className="h-9 px-2.5 w-36 text-xs font-mono-num border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
+                            />
                             <button
                               type="submit"
                               disabled={linkBusy || !linkCodeInput.trim()}
@@ -2580,7 +2593,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                       <span>{estimateCopied ? 'Đã chép dự toán' : 'Chép gửi Zalo Cô Tâm'}</span>
                     </button>
                     <a
-                      href={siteConfig.zaloUrl || `https://zalo.me/${hotlineDigits}`}
+                      href={sanitizeSafeUrl(siteConfig.zaloUrl, false) || `https://zalo.me/${hotlineDigits}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-700 whitespace-nowrap"
@@ -2698,18 +2711,22 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                     url: fanpageUrl,
                   },
                 ]
-            ).map((ch) => (
-              <a
-                key={ch.platform}
-                href={ch.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 font-semibold text-blue-900 hover:underline whitespace-nowrap"
-              >
-                <span>{ch.platform === 'FACEBOOK' ? 'Facebook' : ch.platform === 'YOUTUBE' ? 'YouTube' : ch.platform === 'TIKTOK' ? 'TikTok' : 'Zalo OA'}</span>
-                <ExternalLink className="w-3 h-3" />
-              </a>
-            ))}
+            ).map((ch) => {
+              const safeUrl = sanitizeSafeUrl(ch.url, false);
+              if (!safeUrl) return null;
+              return (
+                <a
+                  key={ch.platform}
+                  href={safeUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-semibold text-blue-900 hover:underline whitespace-nowrap"
+                >
+                  <span>{ch.platform === 'FACEBOOK' ? 'Facebook' : ch.platform === 'YOUTUBE' ? 'YouTube' : ch.platform === 'TIKTOK' ? 'TikTok' : 'Zalo OA'}</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              );
+            })}
             <span>
               Zalo:{' '}
               <InlineEditable

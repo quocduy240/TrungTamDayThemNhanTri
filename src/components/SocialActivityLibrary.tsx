@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api';
+import { sanitizeSafeEmbedUrl, sanitizeSafeUrl } from '../lib/contentStudioEngine';
 import type { SocialActivityPost, SocialChannelConfig, SocialPlatform } from '../types';
 import { ShareMenu } from './ShareMenu';
 
@@ -178,10 +179,12 @@ export const SocialActivityLibrary: React.FC<SocialActivityLibraryProps> = ({
             .filter((c) => c.active)
             .map((ch) => {
               const meta = PLATFORM_META[ch.platform];
+              const safeChannelUrl = sanitizeSafeUrl(ch.url, false);
+              if (!safeChannelUrl) return null;
               return (
                 <a
                   key={ch.id}
-                  href={ch.url}
+                  href={safeChannelUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-slate-200 hover:border-[#1E3A8A]/40 hover:shadow-xs text-xs font-semibold text-slate-700 transition-all whitespace-nowrap"
@@ -255,7 +258,7 @@ export const SocialActivityLibrary: React.FC<SocialActivityLibraryProps> = ({
             >
               <div className="lg:col-span-7 relative aspect-video lg:aspect-auto lg:min-h-[300px] bg-slate-100 overflow-hidden">
                 <img
-                  src={spotlightPost.thumbnailUrl}
+                  src={sanitizeSafeUrl(spotlightPost.thumbnailUrl, true) || '/assets/aistudio/IMG_9559_62d21d91.webp'}
                   alt={spotlightPost.title}
                   className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-500"
                   loading="lazy"
@@ -329,7 +332,7 @@ export const SocialActivityLibrary: React.FC<SocialActivityLibraryProps> = ({
                   >
                     <div className="relative aspect-video bg-slate-100 overflow-hidden">
                       <img
-                        src={post.thumbnailUrl}
+                        src={sanitizeSafeUrl(post.thumbnailUrl, true) || '/assets/aistudio/IMG_9559_62d21d91.webp'}
                         alt={post.title}
                         className="w-full h-full object-cover group-hover:scale-[1.04] transition-transform duration-500"
                         loading="lazy"
@@ -415,21 +418,28 @@ export const SocialActivityLibrary: React.FC<SocialActivityLibraryProps> = ({
 
             <div className="overflow-y-auto">
               <div className="bg-slate-950 aspect-video w-full flex items-center justify-center">
-                {activePost.embedUrl ? (
-                  <iframe
-                    src={activePost.embedUrl}
-                    title={activePost.title}
-                    className="w-full h-full border-0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  />
-                ) : (
-                  <img
-                    src={activePost.thumbnailUrl}
-                    alt={activePost.title}
-                    className="w-full h-full object-contain max-h-[460px]"
-                  />
-                )}
+                {(() => {
+                  const safeEmbed = sanitizeSafeEmbedUrl(activePost.embedUrl || '');
+                  if (safeEmbed) {
+                    return (
+                      <iframe
+                        src={safeEmbed}
+                        title={activePost.title}
+                        className="w-full h-full border-0"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                        referrerPolicy="strict-origin-when-cross-origin"
+                      />
+                    );
+                  }
+                  return (
+                    <img
+                      src={sanitizeSafeUrl(activePost.thumbnailUrl, true) || '/assets/aistudio/IMG_9559_62d21d91.webp'}
+                      alt={activePost.title}
+                      className="w-full h-full object-contain max-h-[460px]"
+                    />
+                  );
+                })()}
               </div>
 
               <div className="p-6 space-y-4">
@@ -463,15 +473,17 @@ export const SocialActivityLibrary: React.FC<SocialActivityLibraryProps> = ({
                     variant="outline"
                   />
 
-                  <a
-                    href={activePost.sourceUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold transition-colors whitespace-nowrap"
-                  >
-                    Xem bài gốc trên {PLATFORM_META[activePost.platform].label}
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
+                  {sanitizeSafeUrl(activePost.sourceUrl, false) && (
+                    <a
+                      href={sanitizeSafeUrl(activePost.sourceUrl, false)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold transition-colors whitespace-nowrap"
+                    >
+                      Xem bài gốc trên {PLATFORM_META[activePost.platform].label}
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
                 </div>
               </div>
             </div>

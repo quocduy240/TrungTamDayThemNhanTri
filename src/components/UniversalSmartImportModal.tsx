@@ -600,7 +600,13 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
 
           <button
             type="button"
-            onClick={() => downloadOfficialExcelTemplate(entityType)}
+            onClick={() => {
+              downloadOfficialExcelTemplate(entityType).catch((err) => {
+                setErrorMsg(
+                  err instanceof Error ? err.message : 'Không thể tạo file mẫu Excel lúc này.',
+                );
+              });
+            }}
             className="min-h-[40px] px-3.5 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-900 text-xs font-semibold hover:bg-blue-100 flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />

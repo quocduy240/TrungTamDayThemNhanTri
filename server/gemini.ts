@@ -1,5 +1,54 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
+const ALLOWED_AI_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'application/pdf',
+]);
+const MAX_AI_BASE64_CHARS = 14_000_000; // ~10.5 MB decoded
+
+export function validateAiMediaPayload(base64Data: string, mimeType: string): { data: string; mimeType: string } {
+  const normalizedMime = String(mimeType || 'image/jpeg').trim().toLowerCase();
+  if (!ALLOWED_AI_MIME_TYPES.has(normalizedMime)) {
+    throw new Error('Định dạng tệp tải lên chưa được hỗ trợ (chỉ nhận ảnh JPG/PNG/WEBP/GIF hoặc PDF).');
+  }
+  const cleaned = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+  const compact = cleaned.replace(/\s+/g, '');
+  if (!compact || compact.length > MAX_AI_BASE64_CHARS) {
+    throw new Error('Dung lượng tệp vượt quá giới hạn 10 MB cho phép khi phân tích bằng AI.');
+  }
+  return {
+    data: compact,
+    mimeType: normalizedMime === 'image/jpg' ? 'image/jpeg' : normalizedMime,
+  };
+}
+
+export function parseGeminiJsonSafely<T>(rawText: string | undefined, fallback: T): T {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) return fallback;
+  const unfenced = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(unfenced) as T;
+  } catch {
+    const firstBracket = unfenced.search(/[\[{]/);
+    const lastBracket = Math.max(unfenced.lastIndexOf(']'), unfenced.lastIndexOf('}'));
+    if (firstBracket >= 0 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(unfenced.slice(firstBracket, lastBracket + 1)) as T;
+      } catch {
+        return fallback;
+      }
+    }
+    return fallback;
+  }
+}
+
 function getClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
@@ -33,6 +82,7 @@ export async function analyzeTestPaperImage(
   mimeType: string,
 ): Promise<AnalyzedTestResult> {
   const ai = getClient();
+  const safeMedia = validateAiMediaPayload(base64Data, mimeType);
 
   const response = await ai.models.generateContent({
     model: 'gemini-4-hydrogen',
@@ -40,8 +90,8 @@ export async function analyzeTestPaperImage(
       parts: [
         {
           inlineData: {
-            mimeType,
-            data: base64Data,
+            mimeType: safeMedia.mimeType,
+            data: safeMedia.data,
           },
         },
         {
@@ -94,10 +144,10 @@ export async function analyzeTestPaperImage(
     },
   });
 
-  const raw = (response.text ?? '{}').trim();
-  const parsed = JSON.parse(raw) as AnalyzedTestResult;
+  const parsed = parseGeminiJsonSafely<Partial<AnalyzedTestResult>>(response.text, {});
   const validTypes = ['15_PHUT', '1_TIET', 'GIUA_KY', 'CUOI_KY'] as const;
-  const examType = validTypes.includes(parsed.examType) ? parsed.examType : '15_PHUT';
+  const examType =
+    parsed.examType && validTypes.includes(parsed.examType) ? parsed.examType : '15_PHUT';
 
   return {
     studentName: parsed.studentName || 'Chưa rõ tên học sinh',
@@ -127,6 +177,7 @@ export async function extractStudentsFromRosterImage(
   mimeType: string,
 ): Promise<ExtractedStudentRow[]> {
   const ai = getClient();
+  const safeMedia = validateAiMediaPayload(base64Data, mimeType);
 
   const response = await ai.models.generateContent({
     model: 'gemini-4-hydrogen',
@@ -134,8 +185,8 @@ export async function extractStudentsFromRosterImage(
       parts: [
         {
           inlineData: {
-            mimeType,
-            data: base64Data,
+            mimeType: safeMedia.mimeType,
+            data: safeMedia.data,
           },
         },
         {
@@ -165,8 +216,7 @@ export async function extractStudentsFromRosterImage(
     },
   });
 
-  const raw = (response.text ?? '[]').trim();
-  const rows = JSON.parse(raw) as ExtractedStudentRow[];
+  const rows = parseGeminiJsonSafely<ExtractedStudentRow[]>(response.text, []);
   return Array.isArray(rows) ? rows.slice(0, 50) : [];
 }
 
@@ -229,13 +279,11 @@ export async function smartExtractWithGemini(
 
   const parts: Array<{ inlineData: { mimeType: string; data: string } } | { text: string }> = [];
   if (payload.fileBase64) {
-    const cleaned = payload.fileBase64.includes(',')
-      ? payload.fileBase64.split(',')[1]
-      : payload.fileBase64;
+    const safeMedia = validateAiMediaPayload(payload.fileBase64, payload.mimeType || 'image/jpeg');
     parts.push({
       inlineData: {
-        mimeType: payload.mimeType || 'image/jpeg',
-        data: cleaned,
+        mimeType: safeMedia.mimeType,
+        data: safeMedia.data,
       },
     });
   }
@@ -370,8 +418,7 @@ export async function smartExtractWithGemini(
     },
   });
 
-  const raw = (response.text ?? '[]').trim();
-  const parsed = JSON.parse(raw);
+  const parsed = parseGeminiJsonSafely<unknown>(response.text, []);
   return Array.isArray(parsed) ? (parsed as Record<string, unknown>[]).slice(0, 150) : [];
 }
 

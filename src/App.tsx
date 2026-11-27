@@ -72,19 +72,41 @@ import {
 import { buildWorkspaceIndexes } from './lib/workspaceIntegrity';
 import { FrontendPortal } from './components/FrontendPortal';
 import type { StudentLoginResult } from './components/PortalAuthGates';
-import { NotificationPrefsModal } from './components/NotificationPrefsModal';
 import {
   ContextualReloginModal,
   SessionExpiredBanner,
 } from './components/ContextualReloginBanner';
-import {
-  EntityQuickDrawer,
-  type CrossNavIntent,
-  type QuickDrawerTarget,
+import type {
+  CrossNavIntent,
+  QuickDrawerTarget,
 } from './components/EntityQuickDrawer';
-import { DynamicQrLandingView, StudentQrCardModal } from './components/StudentQrHub';
-import { ZpdBackendManualDrawer } from './components/ZpdBackendManualDrawer';
 import { computeQuickClassSnapshot, formatCountdownSeconds } from './lib/quickClassEngine';
+
+const NotificationPrefsModal = lazy(() =>
+  import('./components/NotificationPrefsModal').then((m) => ({
+    default: m.NotificationPrefsModal,
+  })),
+);
+const EntityQuickDrawer = lazy(() =>
+  import('./components/EntityQuickDrawer').then((m) => ({
+    default: m.EntityQuickDrawer,
+  })),
+);
+const DynamicQrLandingView = lazy(() =>
+  import('./components/StudentQrHub').then((m) => ({
+    default: m.DynamicQrLandingView,
+  })),
+);
+const StudentQrCardModal = lazy(() =>
+  import('./components/StudentQrHub').then((m) => ({
+    default: m.StudentQrCardModal,
+  })),
+);
+const ZpdBackendManualDrawer = lazy(() =>
+  import('./components/ZpdBackendManualDrawer').then((m) => ({
+    default: m.ZpdBackendManualDrawer,
+  })),
+);
 
 const CmsOverview = lazy(() =>
   import('./components/CmsOverview').then((m) => ({ default: m.CmsOverview })),
@@ -143,11 +165,21 @@ type CmsTab =
 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
+  const [bootstrapError, setBootstrapError] = useState('');
   const [workspace, setWorkspace] = useState<WorkspacePayload | null>(null);
   const [siteConfig, setSiteConfig] = useState<SiteConfig>(DEFAULT_SITE_CONFIG);
   const [liveCourses, setLiveCourses] = useState<CoursePackage[]>([]);
   const [liveTimetable, setLiveTimetable] = useState<TimetableSlot[]>([]);
   const [liveExams, setLiveExams] = useState<NationalExam[]>([]);
+
+  // Detect explicit /admin or /?view=frontend route intent
+  const routeIntentRef = useRef<{ isAdminPath: boolean; forceFrontend: boolean }>({
+    isAdminPath:
+      typeof window !== 'undefined' && window.location.pathname.replace(/\/+$/, '') === '/admin',
+    forceFrontend:
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('view') === 'frontend',
+  });
 
   // Default Frontend Display Mode: Always New Customer (Khách hàng mới) on initial visit
   const [frontendMode, setFrontendMode] = useState<FrontendMode>('NEW_CUSTOMER');
@@ -160,11 +192,17 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
-  const [showRoleModal, setShowRoleModal] = useState(false);
+  const [showRoleModal, setShowRoleModal] = useState(
+    () => routeIntentRef.current.isAdminPath && !routeIntentRef.current.forceFrontend,
+  );
+  const [pendingStaffPreviewRole, setPendingStaffPreviewRole] = useState<UserRole | null>(null);
+  const [staffPasscodeInput, setStaffPasscodeInput] = useState('');
+  const [needsAdminClaimSetup, setNeedsAdminClaimSetup] = useState(false);
 
   // 1-Click Visual Inline Editing State (SuperAdmin & Admin only)
   const [editMode, setEditMode] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
+  const toastTimerRef = useRef<number | null>(null);
 
   // Dynamic QR landing token from URL (?qr=...)
   const [activeQrToken, setActiveQrToken] = useState<string | null>(() => {
@@ -212,7 +250,21 @@ export default function App() {
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(''), 3200);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage('');
+      toastTimerRef.current = null;
+    }, 3200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
 
   const handleJumpToAttendance = useCallback((centerClass: string, shiftLabel: string) => {
@@ -325,10 +377,30 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [currentUser, workspace]);
 
+  const bootstrapFallbackRef = useRef<{
+    courses: CoursePackage[];
+    exams: NationalExam[];
+    timetable: TimetableSlot[];
+  }>({ courses: [], exams: [], timetable: [] });
+
   const loadBootstrap = useCallback(async () => {
-    const data = await apiRequest<BootstrapPayload>('/api/v1/bootstrap');
-    setBootstrap(data);
-    setLiveCourses((prev) => (prev.length > 0 ? prev : data.courses));
+    setBootstrapError('');
+    try {
+      const data = await apiRequest<BootstrapPayload>('/api/v1/bootstrap');
+      bootstrapFallbackRef.current = {
+        courses: data.courses || [],
+        exams: data.exams || [],
+        timetable: data.timetable || [],
+      };
+      setBootstrap(data);
+      setLiveCourses((prev) => (prev.length > 0 ? prev : data.courses));
+    } catch (err: unknown) {
+      setBootstrapError(
+        err instanceof Error
+          ? err.message
+          : 'Không thể kết nối máy chủ Trung Tâm Nhân Trí. Vui lòng thử lại.',
+      );
+    }
   }, []);
 
   const refreshWorkspace = useCallback(async () => {
@@ -341,7 +413,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadBootstrap();
+    void loadBootstrap();
   }, [loadBootstrap]);
 
   // Subscribe to live Firestore SiteConfig (keep guest landing strictly on NEW_CUSTOMER)
@@ -355,30 +427,32 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Subscribe to live Firestore Courses & Exams (public catalog)
+  const bootstrapReady = Boolean(bootstrap);
+
+  // Subscribe to live Firestore Courses & Exams (public catalog — stable across bootstrap refreshes)
   useEffect(() => {
-    if (!bootstrap) return;
-    const unsubCourses = subscribeCourses(bootstrap.courses, setLiveCourses);
-    const unsubExams = subscribePublicExams(bootstrap.exams || [], setLiveExams);
+    if (!bootstrapReady) return;
+    const unsubCourses = subscribeCourses(bootstrapFallbackRef.current.courses, setLiveCourses);
+    const unsubExams = subscribePublicExams(bootstrapFallbackRef.current.exams, setLiveExams);
     return () => {
       unsubCourses();
       unsubExams();
     };
-  }, [bootstrap]);
+  }, [bootstrapReady]);
 
   // Subscribe to Firestore timetable ONLY when authenticated (strict privacy for guests)
   useEffect(() => {
-    if (!bootstrap || !currentUser) {
+    if (!bootstrapReady || !currentUser) {
       setLiveTimetable([]);
       return;
     }
     const unsubTimetable = subscribePublicTimetable(
-      bootstrap.timetable || [],
+      bootstrapFallbackRef.current.timetable,
       setLiveTimetable,
       true,
     );
     return () => unsubTimetable();
-  }, [bootstrap, currentUser]);
+  }, [bootstrapReady, currentUser]);
 
   const mergedBootstrap = useMemo<BootstrapPayload | null>(() => {
     if (!bootstrap) return null;
@@ -495,6 +569,17 @@ export default function App() {
           const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
           if (!cancelled) {
             setWorkspace({ ...ws, user: resolvedUser });
+            if (
+              routeIntentRef.current.isAdminPath &&
+              !routeIntentRef.current.forceFrontend &&
+              ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'TEACHER'].includes(resolvedUser.role)
+            ) {
+              setShowRoleModal(false);
+              setActiveTab(resolvedUser.role === 'TEACHER' ? 'teacher-portal' : 'overview');
+              setViewShell('CMS');
+            } else if (routeIntentRef.current.forceFrontend) {
+              setViewShell('FRONTEND');
+            }
           }
           ensureUserProfileFromGmail(fbUser).catch(() => {});
         }
@@ -699,13 +784,13 @@ export default function App() {
     showToast('Đã lưu Chính sách Định danh & Xác thực toàn hệ thống.');
   }
 
-  async function signInPreviewRole(role: UserRole) {
+  async function signInPreviewRole(role: UserRole, passcode?: string) {
     setAuthBusy(true);
     setAuthError('');
     try {
       const res = await apiRequest<{ token: string; user: AuthUser }>('/api/v1/auth/role-session', {
         method: 'POST',
-        body: JSON.stringify({ role }),
+        body: JSON.stringify({ role, passcode }),
       });
       setAuthToken(res.token);
       const localUser: AuthUser = { ...res.user, authProvider: 'LOCAL_SESSION' };
@@ -713,6 +798,9 @@ export default function App() {
       const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
       setWorkspace({ ...ws, user: localUser });
       setShowRoleModal(false);
+      setPendingStaffPreviewRole(null);
+      setStaffPasscodeInput('');
+      setNeedsAdminClaimSetup(false);
       if (role === 'PARENT') {
         setFrontendMode('PARENT');
         setViewShell('FRONTEND');
@@ -727,7 +815,38 @@ export default function App() {
       }
       showToast(`Đã chuyển phiên xem thử: ${roleLabel(role, 'vi')}`);
     } catch (err: unknown) {
-      setAuthError(err instanceof Error ? err.message : 'Không thể chuyển vai trò.');
+      const msg = err instanceof Error ? err.message : 'Không thể chuyển vai trò.';
+      if (role === 'ADMIN' || role === 'MANAGER' || role === 'TEACHER') {
+        setPendingStaffPreviewRole(role);
+        setNeedsAdminClaimSetup(msg.includes('chưa thiết lập mật khẩu Quản trị'));
+      }
+      setAuthError(msg);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleClaimFirstAdminPasscode(passcode: string) {
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const res = await apiRequest<{ token: string; user: AuthUser }>('/api/v1/auth/admin-claim', {
+        method: 'POST',
+        body: JSON.stringify({ passcode }),
+      });
+      setAuthToken(res.token);
+      const localUser: AuthUser = { ...res.user, authProvider: 'LOCAL_SESSION' };
+      setCurrentUser(localUser);
+      const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
+      setWorkspace({ ...ws, user: localUser });
+      setShowRoleModal(false);
+      setPendingStaffPreviewRole(null);
+      setStaffPasscodeInput('');
+      setNeedsAdminClaimSetup(false);
+      setViewShell('CMS');
+      showToast('Đã thiết lập mật khẩu Quản trị viên và vào hệ thống CMS.');
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : 'Không thể thiết lập mật khẩu quản trị.');
     } finally {
       setAuthBusy(false);
     }
@@ -780,14 +899,17 @@ export default function App() {
     await refreshWorkspace();
   }
 
-  async function handleLinkStudent(linkCode: string): Promise<{ studentName: string }> {
+  async function handleLinkStudent(
+    linkCode: string,
+    verifySecret?: string,
+  ): Promise<{ studentName: string }> {
     const res = await apiRequest<{
       token: string;
       user: AuthUser;
       student: { id: string; fullName: string; centerClass: string };
     }>('/api/v1/auth/link-student', {
       method: 'POST',
-      body: JSON.stringify({ linkCode }),
+      body: JSON.stringify({ linkCode, verifySecret }),
     });
     setAuthToken(res.token);
     setCurrentUser((prev) =>
@@ -807,13 +929,31 @@ export default function App() {
   if (!bootstrap) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="text-center space-y-2.5">
+        <div className="text-center space-y-3 max-w-md">
           <div className="flex justify-center">
             <BrandLogo size="lg" />
           </div>
-          <p className="text-sm font-semibold text-slate-900">
-            Đang khởi tạo daythemnhantri.com...
-          </p>
+          {bootstrapError ? (
+            <>
+              <p className="text-sm font-bold text-slate-900">
+                Chưa thể tải dữ liệu Trung Tâm Nhân Trí
+              </p>
+              <p className="text-xs text-slate-600">{bootstrapError}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  void loadBootstrap();
+                }}
+                className="inline-flex items-center justify-center px-4 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
+              >
+                Thử kết nối lại ngay
+              </button>
+            </>
+          ) : (
+            <p className="text-sm font-semibold text-slate-900">
+              Đang khởi tạo daythemnhantri.com...
+            </p>
+          )}
         </div>
       </div>
     );
@@ -951,12 +1091,20 @@ export default function App() {
   // Dynamic QR Student Card Landing View (?qr=<token>)
   if (activeQrToken) {
     return (
-      <DynamicQrLandingView
-        qrToken={activeQrToken}
-        currentUser={currentUser}
-        siteConfig={siteConfig}
-        onExitQr={handleExitQrView}
-      />
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 text-xs text-slate-500">
+            Đang mở thẻ QR học sinh Nhân Trí...
+          </div>
+        }
+      >
+        <DynamicQrLandingView
+          qrToken={activeQrToken}
+          currentUser={currentUser}
+          siteConfig={siteConfig}
+          onExitQr={handleExitQrView}
+        />
+      </Suspense>
     );
   }
 
@@ -1358,10 +1506,12 @@ export default function App() {
           </div>
 
           {/* Right-Edge Docked 2-Level ZPD Backend Admin Manual (Collapsed by default) */}
-          <ZpdBackendManualDrawer
-            activeTab={activeTab}
-            onNavigateTab={(tabId) => setActiveTab(tabId as CmsTab)}
-          />
+          <Suspense fallback={null}>
+            <ZpdBackendManualDrawer
+              activeTab={activeTab}
+              onNavigateTab={(tabId) => setActiveTab(tabId as CmsTab)}
+            />
+          </Suspense>
         </div>
       )}
 
@@ -1426,27 +1576,76 @@ export default function App() {
             {activeAuthPolicy.allowDemoPreview && (
               <div className="space-y-2.5 pt-2 border-t border-slate-200">
                 <p className="text-xs font-semibold text-slate-500">
-                  Hoặc trải nghiệm nhanh giao diện theo vai trò (chế độ xem thử):
+                  Hoặc trải nghiệm nhanh giao diện theo vai trò (vai trò nội bộ yêu cầu mã quản trị):
                 </p>
                 <div className="grid sm:grid-cols-2 gap-2.5">
                   {[
-                    { role: 'MANAGER' as UserRole, label: 'Người quản lý', desc: 'Sửa TKB, Phòng, GV & HS' },
-                    { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Lịch rảnh, Xin nghỉ & Điểm danh' },
-                    { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'TKB, Học bạ & Học phí các con' },
-                    { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'TKB lớp, Đề thi & AI chấm' },
+                    { role: 'MANAGER' as UserRole, label: 'Người quản lý', desc: 'Yêu cầu mã quản trị · TKB, GV & HS' },
+                    { role: 'TEACHER' as UserRole, label: 'Giáo viên', desc: 'Yêu cầu mã quản trị · Lịch & Điểm danh' },
+                    { role: 'PARENT' as UserRole, label: 'Phụ huynh', desc: 'Xem thử TKB, Học bạ & Học phí' },
+                    { role: 'STUDENT' as UserRole, label: 'Học sinh', desc: 'Xem thử TKB lớp, Đề thi & AI chấm' },
                   ].map((item) => (
                     <button
                       key={item.role}
                       type="button"
                       disabled={authBusy}
-                      onClick={() => signInPreviewRole(item.role)}
-                      className="text-left p-3 border border-slate-200 hover:border-blue-900 hover:bg-blue-50/40 rounded-lg cursor-pointer"
+                      onClick={() => {
+                        if (item.role === 'MANAGER' || item.role === 'TEACHER') {
+                          setPendingStaffPreviewRole(item.role);
+                          setAuthError('');
+                        } else {
+                          setPendingStaffPreviewRole(null);
+                          void signInPreviewRole(item.role);
+                        }
+                      }}
+                      className={`text-left p-3 border rounded-lg cursor-pointer ${
+                        pendingStaffPreviewRole === item.role
+                          ? 'border-blue-900 bg-blue-50/70'
+                          : 'border-slate-200 hover:border-blue-900 hover:bg-blue-50/40'
+                      }`}
                     >
                       <p className="text-xs font-bold text-slate-950">{item.label}</p>
                       <p className="text-[11px] text-slate-500 mt-0.5">{item.desc}</p>
                     </button>
                   ))}
                 </div>
+
+                {pendingStaffPreviewRole && (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!staffPasscodeInput.trim()) return;
+                      if (needsAdminClaimSetup) {
+                        void handleClaimFirstAdminPasscode(staffPasscodeInput.trim());
+                      } else {
+                        void signInPreviewRole(pendingStaffPreviewRole, staffPasscodeInput.trim());
+                      }
+                    }}
+                    className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2"
+                  >
+                    <p className="text-[11px] font-semibold text-slate-700">
+                      {needsAdminClaimSetup
+                        ? 'Thiết lập mật khẩu Quản trị lần đầu (tối thiểu 6 ký tự):'
+                        : `Nhập mật khẩu Quản trị viên để vào phiên ${roleLabel(pendingStaffPreviewRole, 'vi')}:`}
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="password"
+                        value={staffPasscodeInput}
+                        onChange={(e) => setStaffPasscodeInput(e.target.value)}
+                        placeholder={needsAdminClaimSetup ? 'Tạo mật khẩu mới (≥ 6 ký tự)' : 'Mật khẩu Quản trị viên'}
+                        className="flex-1 h-9 px-3 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-900"
+                      />
+                      <button
+                        type="submit"
+                        disabled={authBusy || staffPasscodeInput.trim().length < 4}
+                        className="h-9 px-3.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 disabled:opacity-50 rounded-lg cursor-pointer whitespace-nowrap"
+                      >
+                        {needsAdminClaimSetup ? 'Thiết lập & Vào' : 'Xác nhận'}
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             )}
           </div>
@@ -1493,16 +1692,18 @@ export default function App() {
       )}
 
       {/* Account Notification Preferences Modal (Zalo / Email / Facebook / Web) */}
-      {currentUser && (
-        <NotificationPrefsModal
-          open={showNotifPrefsModal}
-          onClose={() => setShowNotifPrefsModal(false)}
-          initialPref={workspace?.myNotificationPref}
-          onSaved={() => {
-            refreshWorkspace();
-            showToast('Đã lưu cài đặt nhận nhắc lịch trước ca học.');
-          }}
-        />
+      {currentUser && showNotifPrefsModal && (
+        <Suspense fallback={null}>
+          <NotificationPrefsModal
+            open={showNotifPrefsModal}
+            onClose={() => setShowNotifPrefsModal(false)}
+            initialPref={workspace?.myNotificationPref}
+            onSaved={() => {
+              refreshWorkspace();
+              showToast('Đã lưu cài đặt nhận nhắc lịch trước ca học.');
+            }}
+          />
+        </Suspense>
       )}
 
       {/* Live T-10m Pre-Class Reminder Floating Alert */}
@@ -1593,36 +1794,40 @@ export default function App() {
       />
 
       {/* Cross-Entity Quick-Inspect & Inline-Edit Slide-Over Drawer */}
-      {workspace && (
-        <EntityQuickDrawer
-          target={drawerTarget}
-          workspace={workspace}
-          indexes={workspaceIndexes}
-          canEdit={
-            isAdminOrSuper(activeRole) || activeRole === 'MANAGER'
-          }
-          canSeeFinance={canManageFinance(activeRole)}
-          onClose={() => setDrawerTarget(null)}
-          onSaved={refreshWorkspace}
-          onCrossNavigate={handleCrossNavigate}
-          onOpenQrCard={(st) => setDrawerQrStudent(st)}
-          onRequestRelogin={() => setShowReloginModal(true)}
-        />
+      {workspace && drawerTarget && (
+        <Suspense fallback={null}>
+          <EntityQuickDrawer
+            target={drawerTarget}
+            workspace={workspace}
+            indexes={workspaceIndexes}
+            canEdit={
+              isAdminOrSuper(activeRole) || activeRole === 'MANAGER'
+            }
+            canSeeFinance={canManageFinance(activeRole)}
+            onClose={() => setDrawerTarget(null)}
+            onSaved={refreshWorkspace}
+            onCrossNavigate={handleCrossNavigate}
+            onOpenQrCard={(st) => setDrawerQrStudent(st)}
+            onRequestRelogin={() => setShowReloginModal(true)}
+          />
+        </Suspense>
       )}
 
       {/* Quick QR Modal triggered from EntityQuickDrawer */}
-      {workspace && (
-        <StudentQrCardModal
-          student={drawerQrStudent}
-          allStudents={workspace.students}
-          canManage={isAdminOrSuper(activeRole)}
-          siteConfig={siteConfig}
-          onClose={() => setDrawerQrStudent(null)}
-          onRotated={async () => {
-            await refreshWorkspace();
-            showToast('Đã cấp lại Mã QR động mới cho học sinh.');
-          }}
-        />
+      {workspace && drawerQrStudent && (
+        <Suspense fallback={null}>
+          <StudentQrCardModal
+            student={drawerQrStudent}
+            allStudents={workspace.students}
+            canManage={isAdminOrSuper(activeRole)}
+            siteConfig={siteConfig}
+            onClose={() => setDrawerQrStudent(null)}
+            onRotated={async () => {
+              await refreshWorkspace();
+              showToast('Đã cấp lại Mã QR động mới cho học sinh.');
+            }}
+          />
+        </Suspense>
       )}
 
       {/* Subtle Toast Confirmation */}

@@ -43,6 +43,15 @@ export default defineConfig(() => {
             if (id.includes('node_modules/recharts') || id.includes('node_modules/d3-')) {
               return 'vendor-recharts';
             }
+            if (id.includes('node_modules/xlsx')) {
+              return 'vendor-xlsx';
+            }
+            if (id.includes('node_modules/mammoth') || id.includes('node_modules/jszip')) {
+              return 'vendor-mammoth';
+            }
+            if (id.includes('node_modules/qrcode') || id.includes('node_modules/jsqr')) {
+              return 'vendor-qr';
+            }
             if (id.includes('node_modules/lucide-react')) {
               return 'vendor-lucide';
             }

@@ -89,6 +89,10 @@ service cloud.firestore {
       return val is list && val.size() <= maxItems && (val.size() == 0 || (val[0] is string && val[0].size() <= 200));
     }
 
+    function isBoundedNumberList(val, maxItems, minVal, maxVal) {
+      return val is list && val.size() <= maxItems && (val.size() == 0 || (val[0] is number && val[0] >= minVal && val[0] <= maxVal));
+    }
+
     // =========================================================================
     // VALIDATION BLUEPRINTS (Anti-Update-Gap Helpers)
     // =========================================================================
@@ -256,15 +260,18 @@ service cloud.firestore {
     function isValidPublicTeacher(data) {
       return data.keys().hasAll(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'status'])
         && data.keys().hasOnly([
-          'id', 'name', 'shortName', 'teacherGroup', 'subjects', 'degree', 'experienceYears',
-          'roomDefault', 'status', 'availability',
+          'id', 'name', 'shortName', 'teacherGroup', 'subjects', 'teachableGrades', 'campuses', 'multiSubjectSupport',
+          'degree', 'experienceYears', 'roomDefault', 'status', 'availability',
           'scheduleAlertEnabled', 'scheduleAlertSound', 'lastTimetableAckAt', 'profileUpdatedAt', 'profileUpdatedBy'
         ])
         && isValidId(data.id)
         && isNonEmptyString(data.name, 120)
         && isNonEmptyString(data.shortName, 60)
         && (!('teacherGroup' in data) || data.teacherGroup in ['SUBJECT', 'TUTOR_REVIEW'])
-        && isBoundedStringList(data.subjects, 10)
+        && isBoundedStringList(data.subjects, 12)
+        && (!('teachableGrades' in data) || isBoundedNumberList(data.teachableGrades, 12, 1, 12))
+        && (!('campuses' in data) || isBoundedStringList(data.campuses, 4))
+        && (!('multiSubjectSupport' in data) || data.multiSubjectSupport is bool)
         && isNonEmptyString(data.degree, 140)
         && data.experienceYears is number && data.experienceYears >= 0 && data.experienceYears <= 60
         && isOptionalString(data, 'roomDefault', 60)
@@ -284,6 +291,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'weekLabel', 'period', 'shift', 'timeRange', 'day', 'centerClass',
+          'groupLabel', 'studentIds', 'campus',
           'subject', 'teacherId', 'teacherName', 'roomId', 'room', 'slotType', 'status', 'note'
         ])
         && isValidId(data.id)
@@ -293,6 +301,9 @@ service cloud.firestore {
         && isNonEmptyString(data.timeRange, 40)
         && data.day in ['T2', 'T3', 'T4', 'T5', 'T6', 'T7']
         && isNonEmptyString(data.centerClass, 60)
+        && isOptionalString(data, 'groupLabel', 60)
+        && (!('studentIds' in data) || isBoundedStringList(data.studentIds, 40))
+        && (!('campus' in data) || data.campus in ['CS1', 'CS2'])
         && isNonEmptyString(data.subject, 100)
         && isNonEmptyString(data.teacherId, 128)
         && isNonEmptyString(data.teacherName, 80)

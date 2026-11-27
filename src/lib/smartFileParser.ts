@@ -1,6 +1,21 @@
-import * as XLSX from 'xlsx';
-import mammoth from 'mammoth';
 import type { SmartImportEntityType } from '../types';
+
+const MAX_SPREADSHEET_BYTES = 10 * 1024 * 1024; // 10 MB safety ceiling
+const MAX_DOCX_BYTES = 12 * 1024 * 1024; // 12 MB safety ceiling
+const MAX_PARSED_ROWS = 600;
+const MAX_PARSED_COLS = 40;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function sanitizeCellHeader(raw: unknown, idx: number): string {
+  const label = String(raw ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 80);
+  if (!label || FORBIDDEN_KEYS.has(label.toLowerCase())) {
+    return `Cột ${idx + 1}`;
+  }
+  return label;
+}
 
 export interface FieldSchemaDef {
   key: string;
@@ -304,15 +319,20 @@ export async function parseExcelOrCsvFile(
   file: File,
   preferredSheet?: string,
 ): Promise<ParsedSpreadsheet> {
+  if (file.size > MAX_SPREADSHEET_BYTES) {
+    throw new Error('File bảng tính vượt quá giới hạn an toàn 10 MB. Vui lòng chia nhỏ tệp trước khi nhập.');
+  }
+  const XLSX = await import('xlsx');
   const buf = await file.arrayBuffer();
-  const workbook = XLSX.read(buf, { type: 'array' });
-  const sheetNames = workbook.SheetNames;
+  const workbook = XLSX.read(buf, { type: 'array', sheetRows: MAX_PARSED_ROWS + 15 });
+  const sheetNames = workbook.SheetNames.slice(0, 20);
   if (sheetNames.length === 0) {
     throw new Error('File bảng tính không có sheet dữ liệu nào.');
   }
-  const activeSheet = preferredSheet && sheetNames.includes(preferredSheet)
-    ? preferredSheet
-    : sheetNames[0];
+  const activeSheet =
+    preferredSheet && sheetNames.includes(preferredSheet)
+      ? preferredSheet
+      : sheetNames[0];
   const sheet = workbook.Sheets[activeSheet];
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' });
 
@@ -329,33 +349,36 @@ export async function parseExcelOrCsvFile(
     }
   }
 
-  const rawHeaders = (matrix[headerRowIdx] || []) as unknown[];
-  const headers = rawHeaders.map((h, idx) => {
-    const label = String(h ?? '').trim();
-    return label || `Cột ${idx + 1}`;
-  });
+  const rawHeaders = ((matrix[headerRowIdx] || []) as unknown[]).slice(0, MAX_PARSED_COLS);
+  const headers = rawHeaders.map((h, idx) => sanitizeCellHeader(h, idx));
 
   const rows: Record<string, string>[] = [];
-  for (let r = headerRowIdx + 1; r < matrix.length; r++) {
+  const rowLimit = Math.min(matrix.length, headerRowIdx + 1 + MAX_PARSED_ROWS);
+  for (let r = headerRowIdx + 1; r < rowLimit; r++) {
     const rawRow = matrix[r];
     if (!Array.isArray(rawRow)) continue;
-    const obj: Record<string, string> = {};
+    const obj: Record<string, string> = Object.create(null);
     let hasValue = false;
     headers.forEach((h, idx) => {
-      const val = String(rawRow[idx] ?? '').trim();
+      const val = String(rawRow[idx] ?? '').trim().slice(0, 500);
       obj[h] = val;
       if (val) hasValue = true;
     });
-    if (hasValue) rows.push(obj);
+    if (hasValue) rows.push({ ...obj });
   }
 
   return { headers, rows, sheetNames, activeSheet };
 }
 
 /**
- * Extracts clean text from a .docx Word document in the browser using mammoth.
+ * Extracts clean text from a .docx Word document in the browser using dynamically loaded mammoth.
  */
 export async function extractTextFromDocxFile(file: File): Promise<string> {
+  if (file.size > MAX_DOCX_BYTES) {
+    throw new Error('File Word (.docx) vượt quá giới hạn an toàn 12 MB.');
+  }
+  const mammothModule = await import('mammoth');
+  const mammoth = mammothModule.default ?? mammothModule;
   const arrayBuffer = await file.arrayBuffer();
   const result = await mammoth.extractRawText({ arrayBuffer });
   const text = (result.value || '').trim();
@@ -490,7 +513,8 @@ export function applyColumnMapping(
 /**
  * Generates and downloads an official Nhân Trí .xlsx template for any of the 4 modules.
  */
-export function downloadOfficialExcelTemplate(entityType: SmartImportEntityType): void {
+export async function downloadOfficialExcelTemplate(entityType: SmartImportEntityType): Promise<void> {
+  const XLSX = await import('xlsx');
   const schema = ENTITY_FIELD_SCHEMAS[entityType];
   const sampleRow: Record<string, string> = {};
   schema.forEach((f) => {

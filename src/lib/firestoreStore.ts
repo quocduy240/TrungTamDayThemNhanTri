@@ -586,7 +586,15 @@ export async function syncInitialSeedToFirestore(
         id: teacher.id,
         name: clampStr(teacher.name, 120),
         shortName: clampStr(teacher.shortName, 60),
-        subjects: teacher.subjects.slice(0, 10).map((s) => clampStr(s, 200)),
+        ...(teacher.teacherGroup ? { teacherGroup: teacher.teacherGroup } : {}),
+        subjects: teacher.subjects.slice(0, 12).map((s) => clampStr(s, 200)),
+        ...(Array.isArray(teacher.teachableGrades)
+          ? { teachableGrades: teacher.teachableGrades.slice(0, 12) }
+          : {}),
+        ...(Array.isArray(teacher.campuses) ? { campuses: teacher.campuses.slice(0, 4) } : {}),
+        ...(typeof teacher.multiSubjectSupport === 'boolean'
+          ? { multiSubjectSupport: teacher.multiSubjectSupport }
+          : {}),
         degree: clampStr(teacher.degree, 140),
         experienceYears: Number(teacher.experienceYears) || 1,
         roomDefault: clampStr(teacher.roomDefault, 60),
@@ -609,6 +617,11 @@ export async function syncInitialSeedToFirestore(
         timeRange: clampStr(slot.timeRange, 40),
         day: slot.day,
         centerClass: clampStr(slot.centerClass, 60),
+        ...(slot.groupLabel ? { groupLabel: clampStr(slot.groupLabel, 60) } : {}),
+        ...(Array.isArray(slot.studentIds) && slot.studentIds.length > 0
+          ? { studentIds: slot.studentIds.slice(0, 40) }
+          : {}),
+        ...(slot.campus ? { campus: slot.campus } : {}),
         subject: clampStr(slot.subject, 100),
         teacherId: clampStr(slot.teacherId, 128),
         teacherName: clampStr(slot.teacherName, 80),

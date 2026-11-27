@@ -103,6 +103,12 @@ export function hashPassword(password: string): string {
   return `${salt}:${hash}`;
 }
 
+export function timingSafeStringEqual(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(String(a)).digest();
+  const hashB = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
 export function verifyPassword(password: string, stored: string): boolean {
   const [salt, key] = stored.split(':');
   if (!salt || !key) return false;

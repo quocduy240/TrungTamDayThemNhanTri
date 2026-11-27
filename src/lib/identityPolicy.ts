@@ -48,9 +48,14 @@ export function canStudentUsePersonalGmail(
 }
 
 /**
- * Generate a 6-digit family access PIN (must only be called inside a request/click handler).
+ * Generate a 6-digit family access PIN using CSPRNG (must only be called inside a request/click handler).
  */
 export function generateAccessPin(): string {
+  if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.getRandomValues === 'function') {
+    const arr = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(arr);
+    return String(100000 + (arr[0] % 900000));
+  }
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 

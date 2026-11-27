@@ -1,4 +1,4 @@
-import QRCode from 'qrcode';
+// QRCode is imported dynamically inside renderQrDataUrl so Edge Workers stay zero-Node-dependency.
 
 /**
  * Normalizes a Vietnamese center class string into a clean alphanumeric code segment.
@@ -156,6 +156,8 @@ export function parseScannedQrPayload(rawText: string): {
  * Renders a crisp high-contrast PNG Data URL for offline / print / card embedding.
  */
 export async function renderQrDataUrl(text: string, width = 280): Promise<string> {
+  const mod = await import('qrcode');
+  const QRCode = mod.default || mod;
   return QRCode.toDataURL(text, {
     width,
     margin: 1,

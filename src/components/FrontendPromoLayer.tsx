@@ -77,7 +77,26 @@ export const FrontendBannerSlot: React.FC<FrontendBannerSlotProps> = ({
       }
       return;
     }
-    window.location.href = safeHref;
+    if (safeHref.startsWith('/')) {
+      if (onNavigateAnchor) {
+        onNavigateAnchor(safeHref);
+        return;
+      }
+      window.history.pushState({}, '', safeHref);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    }
+    // External https/http/mailto/tel link: open safely without wiping SPA RAM session token
+    const anchor = document.createElement('a');
+    anchor.href = safeHref;
+    if (/^https?:\/\//i.test(safeHref)) {
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+    }
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
   };
 
   // 1. TOP_BAR placement

@@ -48,7 +48,11 @@ import {
   resolvePrefKey,
   validateWebhookUrl,
 } from '../src/lib/reminderDispatcher.ts';
-import { smartExtractWithGemini } from '../server/gemini.ts';
+import {
+  parseGeminiJsonSafely,
+  smartExtractWithGemini,
+  validateAiMediaPayload,
+} from '../server/gemini.ts';
 import {
   buildDeterministicQrToken,
   generateQrToken,
@@ -235,7 +239,7 @@ function getSessionSecret(env: WorkerEnv): string {
 
 let isolateMemoryDb: DatabaseState | null = null;
 let d1Initialized = false;
-const workerRateBuckets = new Map<string, number[]>();
+const workerRateBuckets = new Map<string, { timestamps: number[]; expiresAt: number }>();
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
@@ -248,13 +252,19 @@ function isWorkerRateLimited(req: Request, key: string, maxRequests: number, win
   const ip = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'edge';
   const bucketKey = `${key}:${ip}`;
   const now = Date.now();
-  const recent = (workerRateBuckets.get(bucketKey) || []).filter((ts) => now - ts < windowMs);
+  if (workerRateBuckets.size > 500) {
+    for (const [k, entry] of workerRateBuckets.entries()) {
+      if (entry.expiresAt <= now) workerRateBuckets.delete(k);
+    }
+  }
+  const existing = workerRateBuckets.get(bucketKey);
+  const recent = (existing?.timestamps || []).filter((ts) => now - ts < windowMs);
   if (recent.length >= maxRequests) {
-    workerRateBuckets.set(bucketKey, recent);
+    workerRateBuckets.set(bucketKey, { timestamps: recent, expiresAt: now + windowMs });
     return true;
   }
   recent.push(now);
-  workerRateBuckets.set(bucketKey, recent);
+  workerRateBuckets.set(bucketKey, { timestamps: recent, expiresAt: now + windowMs });
   return false;
 }
 
@@ -272,12 +282,56 @@ function getAllowedStudentIds(user: AuthUser | null): string[] {
 
 function generateParentLinkCode(grade: number): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(3));
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
   let suffix = '';
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     suffix += chars[bytes[i] % chars.length];
   }
   return `NT${grade}${suffix}`;
+}
+
+function formatIcsSafeText(val: string): string {
+  return String(val || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n');
+}
+
+function parseTimeRangeParts(timeRange: string): [string, string] {
+  const parts = String(timeRange || '')
+    .split(/[-–—]/)
+    .map((p) => p.trim());
+  const toHm = (raw: string | undefined, fallback: string) => {
+    const m = (raw || '').match(/(\d{1,2})\s*[:hH]\s*(\d{2})/);
+    if (!m) return fallback;
+    return `${m[1].padStart(2, '0')}${m[2]}00`;
+  };
+  return [toHm(parts[0], '071500'), toHm(parts[1], '084500')];
+}
+
+function computeCurrentWeekYmdForDay(day: DayOfWeek): string {
+  const clock = getVietnamClock();
+  const [y, m, d] = clock.isoDate.split('-').map(Number);
+  const baseUtc = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+  const jsDow = baseUtc.getUTCDay(); // 0=Sun..6=Sat
+  const mondayOffset = jsDow === 0 ? -6 : 1 - jsDow;
+  const dayIndexMap: Record<DayOfWeek, number> = { T2: 0, T3: 1, T4: 2, T5: 3, T6: 4, T7: 5 };
+  baseUtc.setUTCDate(baseUtc.getUTCDate() + mondayOffset + (dayIndexMap[day] ?? 0));
+  const yy = baseUtc.getUTCFullYear();
+  const mm = String(baseUtc.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(baseUtc.getUTCDate()).padStart(2, '0');
+  return `${yy}${mm}${dd}`;
+}
+
+function computeDynamicBillingPeriod(): { monthText: string; dueDate: string } {
+  const clock = getVietnamClock();
+  const [y, m] = clock.isoDate.split('-').map(Number);
+  const monthText = `Tháng ${m}/${y}`;
+  const nextMonth = m === 12 ? 1 : m + 1;
+  const nextYear = m === 12 ? y + 1 : y;
+  const dueDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-05`;
+  return { monthText, dueDate };
 }
 
 function json(data: unknown, status = 200): Response {
@@ -546,6 +600,15 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+async function timingSafeStringEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  return timingSafeEqual(new Uint8Array(ha), new Uint8Array(hb));
+}
+
 async function hmacSign(payload: string, secret: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -790,6 +853,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   // 2. AUTH ROUTES
   if (method === 'POST' && pathname === '/api/v1/auth/role-session') {
+    if (isWorkerRateLimited(request, 'role-session', 10, 5 * 60_000)) {
+      return json({ error: 'Bạn đã thử xác thực quá nhiều lần. Vui lòng thử lại sau 5 phút.' }, 429);
+    }
     const db = await loadState(env);
     const policy = getPolicy(db);
     if (env.ALLOW_DEMO_LOGIN === 'false' || !policy.allowDemoPreview) {
@@ -806,18 +872,34 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const account = DEMO_ACCOUNTS[role];
     if (!account) return json({ error: 'Vai trò không hợp lệ.' }, 400);
 
-    if (role === 'ADMIN') {
+    // Require admin passcode verification for ALL privileged staff roles (ADMIN, MANAGER, TEACHER)
+    if (role === 'ADMIN' || role === 'MANAGER' || role === 'TEACHER') {
       const envPass = env.ADMIN_PASSCODE?.trim();
       const submitted = typeof body.passcode === 'string' ? body.passcode : '';
       if (envPass) {
-        if (submitted !== envPass) {
-          return json({ error: 'Vui lòng nhập mật khẩu Quản trị viên (ADMIN_PASSCODE).', requiresPasscode: true }, 401);
+        if (!submitted || !(await timingSafeStringEqual(submitted, envPass))) {
+          return json(
+            {
+              error: 'Vai trò nội bộ yêu cầu xác thực bằng Gmail hoặc nhập mật khẩu Quản trị viên.',
+              requiresPasscode: true,
+            },
+            401,
+          );
         }
       } else if (db.adminPasscodeHash) {
         const ok = submitted ? await verifyPasscode(submitted, db.adminPasscodeHash) : false;
         if (!ok) {
           return json({ error: 'Mật khẩu Quản trị viên không chính xác.', requiresPasscode: true }, 401);
         }
+      } else {
+        return json(
+          {
+            error: 'Hệ thống chưa thiết lập mật khẩu Quản trị viên. Vui lòng đăng nhập bằng Gmail hoặc thiết lập mật khẩu Quản trị lần đầu.',
+            requiresPasscode: true,
+            needsAdminClaim: true,
+          },
+          401,
+        );
       }
     }
 
@@ -1035,6 +1117,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   }
 
   if (method === 'POST' && pathname === '/api/v1/auth/admin-claim') {
+    if (isWorkerRateLimited(request, 'admin-claim', 6, 15 * 60_000)) {
+      return json({ error: 'Thử quá nhiều lần. Vui lòng thử lại sau 15 phút.' }, 429);
+    }
     if (env.ADMIN_PASSCODE?.trim()) {
       return json({ error: 'Mật khẩu quản trị đã được cấu hình qua biến môi trường ADMIN_PASSCODE.' }, 409);
     }
@@ -1299,19 +1384,47 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
   if (method === 'POST' && pathname === '/api/v1/auth/link-student') {
     const denied = requireRole();
     if (denied) return denied;
-    const b = await readJson<{ linkCode?: string }>();
+    if (isWorkerRateLimited(request, 'link-student', 8, 5 * 60_000)) {
+      return json({ error: 'Bạn đã thử liên kết học sinh quá nhiều lần. Vui lòng thử lại sau 5 phút.' }, 429);
+    }
+    const b = await readJson<{ linkCode?: string; verifySecret?: string; pin?: string; phoneLast4?: string }>();
     const code = String(b.linkCode || '').trim().toUpperCase();
+    const verifySecret = String(b.verifySecret || b.pin || b.phoneLast4 || '').trim().toUpperCase();
     if (!code || code.length < 4) {
       return json({ error: 'Vui lòng nhập Mã liên kết Phụ huynh hợp lệ (VD: NT7A1T).' }, 400);
     }
     const db = await loadState(env);
     const student = db.students.find(
       (s) =>
-        (s.parentLinkCode && s.parentLinkCode.toUpperCase() === code) ||
-        s.code.toUpperCase() === code,
+        s.accessStatus !== 'LOCKED' &&
+        ((s.parentLinkCode && s.parentLinkCode.toUpperCase() === code) || s.code.toUpperCase() === code),
     );
     if (!student) {
-      return json({ error: 'Không tìm thấy học sinh khớp với mã liên kết này.' }, 404);
+      return json({ error: 'Không tìm thấy học sinh khớp với mã liên kết này hoặc hồ sơ đang tạm khóa.' }, 404);
+    }
+    const isStaffCaller =
+      user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'MANAGER' || user!.role === 'TEACHER';
+    const userEmailLower = (user!.email || '').toLowerCase();
+    const emailPreRegistered =
+      Boolean(userEmailLower) &&
+      ((student.parentEmails || []).some((e) => e.toLowerCase() === userEmailLower) ||
+        (student.studentEmail && student.studentEmail.toLowerCase() === userEmailLower));
+    if (!isStaffCaller && !emailPreRegistered) {
+      const digits4 = verifySecret.replace(/\D/g, '');
+      const p1 = normalizePhoneVN(student.parentPhone);
+      const p2 = normalizePhoneVN(student.parentSecondaryPhone);
+      const matchesPin = Boolean(student.accessPin && verifySecret === student.accessPin.trim().toUpperCase());
+      const matchesPhoneLast4 =
+        digits4.length === 4 && (p1.endsWith(digits4) || (p2.length >= 4 && p2.endsWith(digits4)));
+      if (!matchesPin && !matchesPhoneLast4) {
+        return json(
+          {
+            error: 'Để bảo mật hồ sơ con, vui lòng nhập kèm Mã PIN gia đình hoặc 4 số cuối SĐT Phụ huynh đã đăng ký.',
+            requiresVerification: true,
+          },
+          401,
+        );
+      }
     }
     const mergedIds = Array.from(new Set([...getAllowedStudentIds(user), student.id]));
     const updatedUser: AuthUser = {
@@ -1320,7 +1433,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       linkedStudentIds: mergedIds,
     };
     const token = await signToken(updatedUser, env);
-    return json({ token, user: updatedUser, student });
+    const { accessPin: _omitPin, ...safeStudent } = student;
+    return json({ token, user: updatedUser, student: safeStudent });
   }
 
   if (method === 'GET' && pathname === '/api/v1/auth/me') {
@@ -1412,11 +1526,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       tickets: isStaff
         ? db.tickets
         : db.tickets.filter(
-            (t) =>
-              t.authorUid === user!.id ||
-              t.authorName === user!.name ||
-              (t.authorRole === user!.role &&
-                scopedStudents.some((st) => t.authorName.includes(st.fullName.split(' ').slice(-1)[0]))),
+            (t) => t.authorUid === user!.id || (!t.authorUid && t.authorName === user!.name),
           ),
       notifications: db.notifications.filter(
         (n) =>
@@ -1462,17 +1572,18 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       return json({ error: 'Bạn thao tác quá nhanh. Vui lòng thử lại sau 1 phút.' }, 429);
     }
     const b = await readJson<Record<string, unknown>>();
-    const studentName = String(b.studentName || '').trim();
-    const parentPhone = String(b.parentPhone || '').trim();
+    const studentName = String(b.studentName || '').trim().slice(0, 120);
+    const parentPhone = String(b.parentPhone || '').trim().slice(0, 30);
     if (studentName.length < 2) return json({ error: 'Vui lòng nhập họ tên học sinh.' }, 400);
     if (parentPhone.length < 8) return json({ error: 'Vui lòng nhập số điện thoại Zalo phụ huynh hợp lệ.' }, 400);
 
     const db = await loadState(env);
-    const course = db.courses.find((c) => c.id === b.courseId) || db.courses[1];
+    const course = db.courses.find((c) => c.id === b.courseId) || db.courses[1] || db.courses[0];
+    if (!course) return json({ error: 'Hệ thống chưa có khóa học nào được cấu hình.' }, 400);
     const numericGrade = Math.min(12, Math.max(3, Number(b.grade) || 6));
     const subjectsArray =
       Array.isArray(b.selectedSubjects) && b.selectedSubjects.length > 0
-        ? b.selectedSubjects.map(String)
+        ? b.selectedSubjects.map((s) => String(s || '').trim().slice(0, 60)).filter(Boolean).slice(0, 12)
         : course.subjects.slice(0, 3);
 
     const normalizedPhone = normalizePhoneVN(parentPhone) || parentPhone;
@@ -1481,7 +1592,10 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     if (!family && existingSiblings.length > 0) {
       family = {
         id: `fam-${Date.now()}`,
-        parentName: typeof b.parentName === 'string' && b.parentName.trim() ? b.parentName.trim() : existingSiblings[0].parentName,
+        parentName:
+          typeof b.parentName === 'string' && b.parentName.trim()
+            ? b.parentName.trim().slice(0, 120)
+            : existingSiblings[0].parentName,
         parentPhone: normalizedPhone,
         parentEmails: existingSiblings[0].parentEmails || [],
         siblingDiscountPercent: 5,
@@ -1516,6 +1630,14 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       numericGrade <= 5 ? 'Lớp 4,5' : numericGrade <= 9 ? `Lớp ${numericGrade}A1` : `Lớp ${numericGrade}`;
     const validPeDays: DayOfWeek[] = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
     const peDay = validPeDays.includes(b.peConflictDay as DayOfWeek) ? (b.peConflictDay as DayOfWeek) : undefined;
+    const activeTeacher =
+      db.teachers.find(
+        (t) =>
+          t.status === 'ACTIVE' &&
+          (!Array.isArray(t.teachableGrades) || t.teachableGrades.length === 0 || t.teachableGrades.includes(numericGrade)),
+      ) || db.teachers[0];
+    const activeRoom = db.rooms.find((r) => r.active) || db.rooms[0];
+    const billingPeriod = computeDynamicBillingPeriod();
 
     const newStudent: Student = {
       id: newStudentId,
@@ -1531,10 +1653,18 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       centerClass,
       enrolledClasses: [centerClass],
       schoolClass: `${numericGrade}A`,
-      school: typeof b.school === 'string' && b.school.trim() ? b.school.trim() : 'THCS Lý Thường Kiệt',
-      homeroomTeacher: numericGrade <= 5 ? 'Cô Tâm' : numericGrade <= 9 ? 'Cô Nghi' : 'Cô Mẫn',
-      room: numericGrade <= 5 ? 'Phòng 1' : 'Phòng 2',
-      parentName: typeof b.parentName === 'string' && b.parentName.trim() ? b.parentName.trim() : 'Phụ huynh mới',
+      school:
+        typeof b.school === 'string' && b.school.trim()
+          ? b.school.trim().slice(0, 140)
+          : 'THCS Lý Thường Kiệt',
+      homeroomTeacherId: activeTeacher?.id,
+      homeroomTeacher: activeTeacher?.shortName || 'Chưa phân công',
+      roomId: activeRoom?.id,
+      room: activeRoom?.name || 'Phòng 1',
+      parentName:
+        typeof b.parentName === 'string' && b.parentName.trim()
+          ? b.parentName.trim().slice(0, 120)
+          : 'Phụ huynh mới',
       parentPhone: normalizedPhone,
       parentZalo: normalizedPhone,
       accessPin: generateAccessPin(),
@@ -1563,7 +1693,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       monthLabel:
         billingCycle === 'ANNUAL_12M'
           ? `Gói nguyên năm 12 tháng (${discountNotes.join(' + ') || 'Chuẩn'})`
-          : `Tháng 12/2026${discountNotes.length ? ` (${discountNotes.join(' + ')})` : ''}`,
+          : `${billingPeriod.monthText}${discountNotes.length ? ` (${discountNotes.join(' + ')})` : ''}`,
       billingCycle,
       monthsCount: calc.monthsCount,
       baseAmount: calc.baseAmount,
@@ -1576,7 +1706,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       discountAmount: calc.discountAmount,
       totalAmount: calc.totalAmount,
       paidAmount: 0,
-      dueDate: '2026-12-05',
+      dueDate: billingPeriod.dueDate,
       status: 'DUE_SOON',
       remindersSent: 0,
     };
@@ -2896,21 +3026,20 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const db = await loadState(env);
     const student = db.students.find((s) => s.id === icsMatch[1]);
     if (!student) return json({ error: 'Không tìm thấy học sinh.' }, 404);
-    const slots = db.timetable.filter((s) => studentBelongsToClass(student, s.centerClass));
-    const dayToOffset: Record<DayOfWeek, number> = { T2: 23, T3: 24, T4: 25, T5: 26, T6: 27, T7: 28 };
+    const slots = db.timetable.filter(
+      (s) => s.status !== 'OFF' && studentBelongsToClass(student, s.centerClass),
+    );
     const events = slots.map((slot) => {
-      const [startRaw, endRaw] = slot.timeRange.split('–');
-      const startHm = (startRaw || '07:15').replace(':', '') + '00';
-      const endHm = (endRaw || '08:45').replace(':', '') + '00';
-      const dayNum = String(dayToOffset[slot.day] || 23).padStart(2, '0');
+      const [startHm, endHm] = parseTimeRangeParts(slot.timeRange);
+      const ymd = computeCurrentWeekYmdForDay(slot.day);
       return [
         'BEGIN:VEVENT',
-        `UID:${slot.id}-${student.id}@nhantri.edu.vn`,
-        `DTSTART;TZID=Asia/Ho_Chi_Minh:202611${dayNum}T${startHm}`,
-        `DTEND;TZID=Asia/Ho_Chi_Minh:202611${dayNum}T${endHm}`,
-        `SUMMARY:[Nhân Trí] ${slot.subject} (${slot.teacherName})`,
-        `LOCATION:Trung Tâm Nhân Trí - ${slot.room}`,
-        `DESCRIPTION:Lớp ${slot.centerClass} · Học sinh ${student.fullName}`,
+        `UID:${formatIcsSafeText(`${slot.id}-${student.id}@nhantri.edu.vn`)}`,
+        `DTSTART;TZID=Asia/Ho_Chi_Minh:${ymd}T${startHm}`,
+        `DTEND;TZID=Asia/Ho_Chi_Minh:${ymd}T${endHm}`,
+        `SUMMARY:${formatIcsSafeText(`[Nhân Trí] ${slot.subject} (${slot.teacherName})`)}`,
+        `LOCATION:${formatIcsSafeText(`Trung Tâm Nhân Trí - ${slot.room}`)}`,
+        `DESCRIPTION:${formatIcsSafeText(`Lớp ${slot.centerClass} · Học sinh ${student.fullName}`)}`,
         'RRULE:FREQ=WEEKLY;COUNT=12',
         'END:VEVENT',
       ].join('\r\n');
@@ -2923,11 +3052,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       ...events,
       'END:VCALENDAR',
     ].join('\r\n');
+    const safeFileCode = student.code.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'HocSinh';
     return new Response(ics, {
       status: 200,
       headers: {
         'Content-Type': 'text/calendar; charset=utf-8',
-        'Content-Disposition': `attachment; filename="TKB-NhanTri-${student.code}.ics"`,
+        'Content-Disposition': `attachment; filename="TKB-NhanTri-${safeFileCode}.ics"`,
+        ...SECURITY_HEADERS,
       },
     });
   }
@@ -3044,13 +3175,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const db = await loadState(env);
     const rec = db.tuition.find((t) => t.id === transferConfirmMatch[1]);
     if (!rec) return json({ error: 'Không tìm thấy phiếu học phí.' }, 404);
-    const isStaff = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'TEACHER';
+    const isStaff =
+      user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'MANAGER' || user!.role === 'TEACHER';
     if (!isStaff && !getAllowedStudentIds(user).includes(rec.studentId)) {
       return json({ error: 'Không có quyền gửi xác nhận cho phiếu học phí này.' }, 403);
     }
     const b = await readJson<{ paymentMethod?: string; note?: string }>();
-    const methodLabel = String(b.paymentMethod || 'VIETQR');
-    const note = String(b.note || '').trim();
+    const rawMethod = String(b.paymentMethod || 'VIETQR').toUpperCase();
+    const methodLabel = ['VIETQR', 'MOMO', 'ZALOPAY', 'CASH'].includes(rawMethod) ? rawMethod : 'VIETQR';
+    const note = String(b.note || '').trim().slice(0, 300);
     const remaining = Math.max(0, rec.totalAmount - rec.paidAmount);
     db.tickets.unshift({
       id: `tk-pay-${Date.now()}`,
@@ -3211,10 +3344,25 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         explanation: q.explanation,
       };
     });
-    const score = Math.round((correctCount / exam.questions.length) * 10 * 100) / 100;
+    const totalQ = exam.questions.length;
+    const score = totalQ > 0 ? Math.round((correctCount / totalQ) * 10 * 100) / 100 : 0;
     exam.attemptsCount += 1;
-    const targetStudentId = b.studentId || user!.linkedStudentId || db.students[0]?.id;
-    const student = db.students.find((s) => s.id === targetStudentId);
+    const isStaff =
+      user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'MANAGER' || user!.role === 'TEACHER';
+    const allowedIds = getAllowedStudentIds(user);
+    const requestedStudentId = typeof b.studentId === 'string' ? b.studentId.trim() : '';
+    let targetStudentId: string | undefined;
+    if (isStaff) {
+      targetStudentId = requestedStudentId || user!.linkedStudentId;
+    } else if (requestedStudentId) {
+      if (!allowedIds.includes(requestedStudentId)) {
+        return json({ error: 'Bạn chỉ có thể lưu kết quả bài thi cho học sinh thuộc tài khoản của mình.' }, 403);
+      }
+      targetStudentId = requestedStudentId;
+    } else {
+      targetStudentId = user!.linkedStudentId || allowedIds[0];
+    }
+    const student = targetStudentId ? db.students.find((s) => s.id === targetStudentId) : undefined;
     let savedScore: ScoreRecord | null = null;
     if (student) {
       savedScore = {
@@ -3230,12 +3378,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         school: student.school,
         source: 'ONLINE_QUIZ',
         verified: true,
-        aiSummary: `Hoàn thành ${exam.title}: đúng ${correctCount}/${exam.questions.length} câu.`,
+        aiSummary: `Hoàn thành ${exam.title}: đúng ${correctCount}/${totalQ} câu.`,
       };
       db.scores.unshift(savedScore);
     }
     await saveState(env, db);
-    return json({ correctCount, totalQuestions: exam.questions.length, score, breakdown, savedScore });
+    return json({ correctCount, totalQuestions: totalQ, score, breakdown, savedScore });
   }
 
   // 10. TICKETS, NOTIFICATIONS & CLOUDFLARE SCHEMA
@@ -3244,9 +3392,11 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       return json({ error: 'Bạn gửi quá nhiều yêu cầu. Vui lòng thử lại sau 1 phút.' }, 429);
     }
     const b = await readJson<Record<string, unknown>>();
-    const authorName = String(b.authorName || '').trim();
-    const message = String(b.message || '').trim();
+    const authorName = String(b.authorName || '').trim().slice(0, 120);
+    const message = String(b.message || '').trim().slice(0, 1000);
     if (!authorName || !message) return json({ error: 'Vui lòng nhập họ tên và nội dung.' }, 400);
+    const validCategories: FeedbackTicket['category'][] = ['CONSULTATION', 'FEEDBACK', 'SCHEDULE_CHANGE', 'TUITION'];
+    const rawCat = String(b.category || 'FEEDBACK').toUpperCase() as FeedbackTicket['category'];
     const db = await loadState(env);
     const ticket: FeedbackTicket = {
       id: `tk-${Date.now()}`,
@@ -3254,9 +3404,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       createdAt: nowFormatted(),
       authorName,
       authorRole: user?.role || 'GUEST',
-      phone: b.phone ? String(b.phone).trim() : undefined,
-      category: (b.category as FeedbackTicket['category']) || 'FEEDBACK',
-      subject: String(b.subject || 'Yêu cầu hỗ trợ').trim(),
+      phone: b.phone ? String(b.phone).trim().slice(0, 30) : undefined,
+      category: validCategories.includes(rawCat) ? rawCat : 'FEEDBACK',
+      subject: String(b.subject || 'Yêu cầu hỗ trợ').trim().slice(0, 180) || 'Yêu cầu hỗ trợ',
       message,
       status: 'OPEN',
     };
@@ -3273,7 +3423,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const ticket = db.tickets.find((t) => t.id === ticketReplyMatch[1]);
     if (!ticket) return json({ error: 'Không tìm thấy yêu cầu.' }, 404);
     const b = await readJson<{ reply?: string }>();
-    ticket.reply = String(b.reply || '').trim();
+    const replyText = String(b.reply || '').trim().slice(0, 1000);
+    if (!replyText) return json({ error: 'Vui lòng nhập nội dung phản hồi.' }, 400);
+    ticket.reply = replyText;
     ticket.status = 'RESOLVED';
     await saveState(env, db);
     return json({ ticket });
@@ -3283,8 +3435,11 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const denied = requireRole();
     if (denied) return denied;
     const db = await loadState(env);
+    const isAdminUser = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN';
     db.notifications.forEach((n) => {
-      n.read = true;
+      if (isAdminUser || n.targetRole === 'ALL' || n.targetRole === user!.role) {
+        n.read = true;
+      }
     });
     await saveState(env, db);
     return json({ ok: true });
@@ -3340,8 +3495,25 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const db = await loadState(env);
     const slot = db.timetable.find((s) => s.id === slotId);
     if (!slot) return json({ error: 'Không tìm thấy ca học này trong Thời khóa biểu.' }, 404);
+    if (slot.status === 'OFF') {
+      return json({ error: 'Ca học này hiện đang ở trạng thái Nghỉ / Tạm hoãn.' }, 400);
+    }
     if (!Array.isArray(db.classCheckins)) db.classCheckins = [];
     const clock = getVietnamClock();
+    if (user!.role === 'STUDENT') {
+      const student = db.students.find((s) => s.id === user!.linkedStudentId);
+      if (!student) {
+        return json({ error: 'Tài khoản chưa liên kết hồ sơ học sinh hợp lệ.' }, 403);
+      }
+      const inClass = studentBelongsToClass(student, slot.centerClass);
+      const inGroup = !slot.studentIds?.length || slot.studentIds.includes(student.id);
+      if (!inClass || !inGroup) {
+        return json({ error: 'Bạn không thuộc lớp hoặc nhóm học của ca này.' }, 403);
+      }
+      if (slot.day !== clock.day) {
+        return json({ error: 'Chỉ có thể xác nhận vào lớp cho ca học diễn ra trong ngày hôm nay.' }, 400);
+      }
+    }
     const actorId =
       user!.role === 'STUDENT' && user!.linkedStudentId
         ? user!.linkedStudentId
@@ -3737,13 +3909,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         mimeType = sample.mimeType;
       }
       if (!base64Data) return json({ error: 'Vui lòng tải ảnh bài kiểm tra hoặc chọn ảnh mẫu.' }, 400);
-      const cleaned = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+      const media = validateAiMediaPayload(base64Data, mimeType);
       const ai = getGeminiClient(env);
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
         contents: {
           parts: [
-            { inlineData: { mimeType, data: cleaned } },
+            { inlineData: { mimeType: media.mimeType, data: media.data } },
             {
               text:
                 'Bạn là trợ lý học vụ tại Trung Tâm Dạy Thêm Học Thêm Nhân Trí (Long Xuyên). ' +
@@ -3771,7 +3943,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           },
         },
       });
-      const analysis = JSON.parse((response.text ?? '{}').trim());
+      const analysis = parseGeminiJsonSafely<Record<string, unknown>>(response.text, {});
       return json({ analysis });
     } catch (err: unknown) {
       return json({ error: err instanceof Error ? err.message : 'Lỗi phân tích ảnh bài kiểm tra.' }, 500);
@@ -3792,13 +3964,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         mimeType = sample.mimeType;
       }
       if (!base64Data) return json({ error: 'Vui lòng tải ảnh danh sách học sinh.' }, 400);
-      const cleaned = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+      const media = validateAiMediaPayload(base64Data, mimeType);
       const ai = getGeminiClient(env);
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
         contents: {
           parts: [
-            { inlineData: { mimeType, data: cleaned } },
+            { inlineData: { mimeType: media.mimeType, data: media.data } },
             {
               text:
                 'Trích xuất danh sách học sinh từ ảnh bảng danh sách của Trung Tâm Dạy Thêm Nhân Trí gồm fullName, schoolClass, school, centerClass, parentPhone (ẩn 3 số giữa bằng ***), homeroomTeacher.',
@@ -3824,7 +3996,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           },
         },
       });
-      const rows = JSON.parse((response.text ?? '[]').trim());
+      const rows = parseGeminiJsonSafely<unknown[]>(response.text, []);
       return json({ rows: Array.isArray(rows) ? rows.slice(0, 50) : [] });
     } catch (err: unknown) {
       return json({ error: err instanceof Error ? err.message : 'Lỗi nhận dạng danh sách học sinh.' }, 500);
@@ -4050,6 +4222,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
 
   const qrLookupMatch = pathname.match(/^\/api\/v1\/qr\/([^/]+)$/);
   if (method === 'GET' && qrLookupMatch) {
+    if (isWorkerRateLimited(request, 'qr-lookup', 30, 60_000)) {
+      return json({ error: 'Bạn tra cứu QR quá nhanh. Vui lòng thử lại sau 1 phút.' }, 429);
+    }
     const db = await loadState(env);
     const student = findStudentByQrTokenOrCode(db, decodeURIComponent(qrLookupMatch[1]));
     if (!student) {
@@ -4096,44 +4271,53 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     let webhookDelivered = 0;
     const nowStr = nowFormatted();
     const createdLogs = [];
+    const batch = items.slice(0, 80);
 
-    for (const item of items.slice(0, 80)) {
-      let status: 'SENT' | 'QUEUED_WEBHOOK' | 'SIMULATED' | 'FAILED' = 'SENT';
-      if (webhookSafe && webhookUrl) {
-        try {
-          const hookRes = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: 'PERSONAL_TIMETABLE_DISPATCH',
-              recipientName: item.recipientName,
-              recipientRole: item.recipientRole,
-              phone: item.targetPhone,
-              email: item.targetEmail,
-              message: item.summary,
-              sentBy: user!.name,
-              sentAt: nowStr,
-            }),
-          });
-          status = hookRes.ok ? 'QUEUED_WEBHOOK' : 'FAILED';
-          if (hookRes.ok) webhookDelivered += 1;
-        } catch {
-          status = 'FAILED';
-        }
+    for (let i = 0; i < batch.length; i += 5) {
+      const chunk = batch.slice(i, i + 5);
+      const chunkLogs = await Promise.all(
+        chunk.map(async (item) => {
+          let status: 'SENT' | 'QUEUED_WEBHOOK' | 'SIMULATED' | 'FAILED' = 'SENT';
+          if (webhookSafe && webhookUrl) {
+            try {
+              const hookRes = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: AbortSignal.timeout(5000),
+                body: JSON.stringify({
+                  type: 'PERSONAL_TIMETABLE_DISPATCH',
+                  recipientName: item.recipientName,
+                  recipientRole: item.recipientRole,
+                  phone: item.targetPhone,
+                  email: item.targetEmail,
+                  message: item.summary,
+                  sentBy: user!.name,
+                  sentAt: nowStr,
+                }),
+              });
+              status = hookRes.ok ? 'QUEUED_WEBHOOK' : 'FAILED';
+              if (hookRes.ok) webhookDelivered += 1;
+            } catch {
+              status = 'FAILED';
+            }
+          }
+          return {
+            id: `dsp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+            sentAt: nowStr,
+            slotId: 'personal-pdf',
+            slotLabel: 'Gửi TKB Cá nhân hóa',
+            recipientName: String(item.recipientName || 'Phụ huynh').slice(0, 120),
+            recipientRole: item.recipientRole || 'PARENT',
+            channel: (item.channel || 'ZALO') as 'ZALO' | 'EMAIL' | 'APP',
+            status,
+            detail: String(item.summary || '').slice(0, 260),
+          };
+        }),
+      );
+      for (const log of chunkLogs) {
+        db.reminderDispatchLogs.unshift(log);
+        createdLogs.push(log);
       }
-      const log = {
-        id: `dsp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
-        sentAt: nowStr,
-        slotId: 'personal-pdf',
-        slotLabel: 'Gửi TKB Cá nhân hóa',
-        recipientName: String(item.recipientName || 'Phụ huynh').slice(0, 120),
-        recipientRole: item.recipientRole || 'PARENT',
-        channel: (item.channel || 'ZALO') as 'ZALO' | 'EMAIL' | 'APP',
-        status,
-        detail: String(item.summary || '').slice(0, 260),
-      };
-      db.reminderDispatchLogs.unshift(log);
-      createdLogs.push(log);
     }
     if (db.reminderDispatchLogs.length > 200) {
       db.reminderDispatchLogs = db.reminderDispatchLogs.slice(0, 200);
