@@ -19,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Tv,
+  UserCheck,
   Users,
   Wallet,
   X,
@@ -81,6 +82,7 @@ import {
   type QuickDrawerTarget,
 } from './components/EntityQuickDrawer';
 import { DynamicQrLandingView, StudentQrCardModal } from './components/StudentQrHub';
+import { ZpdBackendManualDrawer } from './components/ZpdBackendManualDrawer';
 import { computeQuickClassSnapshot, formatCountdownSeconds } from './lib/quickClassEngine';
 
 const CmsOverview = lazy(() =>
@@ -119,9 +121,15 @@ const SocialNotificationCms = lazy(() =>
     default: m.SocialNotificationCms,
   })),
 );
+const TeacherSelfServiceHub = lazy(() =>
+  import('./components/TeacherSelfServiceHub').then((m) => ({
+    default: m.TeacherSelfServiceHub,
+  })),
+);
 
 type CmsTab =
   | 'overview'
+  | 'teacher-portal'
   | 'system'
   | 'social'
   | 'timetable'
@@ -536,6 +544,10 @@ export default function App() {
       if (portalIntent === 'PARENT') {
         setFrontendMode('PARENT');
         setViewShell('FRONTEND');
+      } else if (resolvedUser.role === 'TEACHER') {
+        setActiveTab('teacher-portal');
+        setFrontendMode('TEACHER_STUDENT');
+        setViewShell('CMS');
       } else if (portalIntent === 'STUDENT' || portalIntent === 'TEACHER') {
         setFrontendMode('TEACHER_STUDENT');
         setViewShell('FRONTEND');
@@ -668,6 +680,9 @@ export default function App() {
       } else if (role === 'STUDENT') {
         setFrontendMode('TEACHER_STUDENT');
         setViewShell('FRONTEND');
+      } else if (role === 'TEACHER') {
+        setActiveTab('teacher-portal');
+        setViewShell('CMS');
       } else {
         setViewShell('CMS');
       }
@@ -774,6 +789,9 @@ export default function App() {
   const showTuitionNav =
     canManageFinance(activeRole) || activeRole === 'PARENT' || activeRole === 'STUDENT';
 
+  const showTeacherPortalNav =
+    activeRole === 'TEACHER' || activeRole === 'MANAGER' || isAdminOrSuper(activeRole);
+
   const rawNavGroups: {
     id: string;
     title: string;
@@ -788,6 +806,22 @@ export default function App() {
           label: lang === 'vi' ? 'Tổng quan & Phân tích' : 'Analytics Overview',
           icon: <LayoutDashboard className="w-4 h-4 shrink-0" />,
         },
+        ...(showTeacherPortalNav
+          ? [
+              {
+                id: 'teacher-portal' as CmsTab,
+                label:
+                  activeRole === 'TEACHER'
+                    ? lang === 'vi'
+                      ? 'Lịch & Hồ sơ của tôi'
+                      : 'My Schedule & Profile'
+                    : lang === 'vi'
+                      ? 'Không gian Giáo viên'
+                      : 'Teacher Self-Service',
+                icon: <UserCheck className="w-4 h-4 shrink-0" />,
+              },
+            ]
+          : []),
         {
           id: 'timetable',
           label: lang === 'vi' ? 'Thời khóa biểu & Phòng học' : 'Timetable & Rooms',
@@ -1149,6 +1183,19 @@ export default function App() {
                     onRefresh={refreshWorkspace}
                   />
                 )}
+                {activeTab === 'teacher-portal' && showTeacherPortalNav && (
+                  <TeacherSelfServiceHub
+                    currentUser={currentUser}
+                    teachers={workspace.teachers}
+                    timetable={workspace.timetable}
+                    teacherLeaves={workspace.teacherLeaves}
+                    timetableUpdatedAt={workspace.timetableUpdatedAt}
+                    timetableVersion={workspace.timetableVersion}
+                    timetableChanges={workspace.timetableChanges}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                  />
+                )}
                 {activeTab === 'system' && showSystemCmsNav && (
                   <SystemConfigCms
                     currentUser={currentUser}
@@ -1251,6 +1298,12 @@ export default function App() {
               </Suspense>
             </main>
           </div>
+
+          {/* Right-Edge Docked 2-Level ZPD Backend Admin Manual (Collapsed by default) */}
+          <ZpdBackendManualDrawer
+            activeTab={activeTab}
+            onNavigateTab={(tabId) => setActiveTab(tabId as CmsTab)}
+          />
         </div>
       )}
 

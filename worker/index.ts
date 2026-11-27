@@ -59,6 +59,16 @@ import {
   smartSyncTimetable,
 } from '../src/lib/smartBulkOperations.ts';
 import {
+  buildParentClassCancelNotice,
+  computeSubstituteSuggestions,
+  diffTeacherProfileFields,
+  findAffectedSlotsForLeave,
+  formatShiftLabel,
+  makeShiftKey,
+  recordTimetableChange,
+  slotToSnapshot,
+} from '../src/lib/teacherSelfService.ts';
+import {
   auditDatabaseHealth,
   cascadeSyncRoomUpdate,
   cascadeSyncStudentUpdate,
@@ -1400,6 +1410,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       classCheckins: scopedCheckins,
       reminderDispatchLogs: isAdminUser ? (db.reminderDispatchLogs || []) : [],
       printTemplates: isStaff ? ensureSystemPrintTemplates(db.printTemplates) : [],
+      timetableUpdatedAt: db.timetableUpdatedAt || new Date().toISOString(),
+      timetableVersion: db.timetableVersion || 1,
+      timetableChanges: isManagerUser
+        ? (db.timetableChanges || []).slice(0, 60)
+        : isTeacherUser && user!.linkedTeacherId
+          ? (db.timetableChanges || [])
+              .filter((ev) => ev.affectedTeacherIds.includes(user!.linkedTeacherId!))
+              .slice(0, 40)
+          : [],
     });
   }
 
@@ -1842,10 +1861,164 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const teacher = db.teachers.find((t) => t.id === teacherAvailMatch[1]);
     if (!teacher) return json({ error: 'Không tìm thấy giáo viên.' }, 404);
     const b = await readJson<{ availability?: unknown[] }>();
+    const prevCount = (teacher.availability || []).length;
     const rawList = Array.isArray(b.availability) ? b.availability : [];
-    teacher.availability = rawList.map(String).filter((k) => ALL_SHIFT_KEYS.includes(k));
+    const nextAvail = Array.from(new Set(rawList.map(String).filter((k) => ALL_SHIFT_KEYS.includes(k))));
+    teacher.availability = nextAvail;
+    const availSet = new Set(nextAvail);
+    const conflictingSlots = db.timetable.filter(
+      (sl) =>
+        sl.status !== 'OFF' &&
+        sl.teacherId === teacher.id &&
+        !availSet.has(makeShiftKey(sl.day, sl.period, sl.shift)),
+    );
+    if (user!.role === 'TEACHER') {
+      const busyCount = ALL_SHIFT_KEYS.length - nextAvail.length;
+      appendAuditLog(db, {
+        actorEmail: user!.email,
+        actorRole: user!.role,
+        action: 'TEACHER_AVAILABILITY_UPDATED',
+        target: teacher.id,
+        targetLabel: teacher.shortName,
+        detail: `Cập nhật lịch rảnh/bận (${prevCount} → ${nextAvail.length} ca rảnh, ${busyCount} ca bận).`,
+        status: 'UPDATED',
+      });
+      db.notifications.unshift({
+        id: `ntf-avail-${Date.now().toString(36)}`,
+        createdAt: nowFormatted(),
+        title: `Cập nhật ca rảnh/bận · ${teacher.shortName}`,
+        body: `${teacher.shortName} vừa cập nhật lịch tuần (${nextAvail.length} ca rảnh, ${busyCount} ca bận).`,
+        channel: 'APP',
+        targetRole: 'MANAGER',
+        read: false,
+      });
+    }
+    await saveState(env, db);
+    return json({ teacher, conflictingSlots });
+  }
+
+  if (method === 'PATCH' && pathname === '/api/v1/teachers/me/profile') {
+    const denied = requireRole(['TEACHER', 'MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<Record<string, unknown>>();
+    const isManager = user!.role === 'SUPER_ADMIN' || user!.role === 'ADMIN' || user!.role === 'MANAGER';
+    const targetTeacherId =
+      user!.role === 'TEACHER'
+        ? String(user!.linkedTeacherId || '')
+        : String(b.teacherId || user!.linkedTeacherId || '');
+    if (!targetTeacherId) return json({ error: 'Tài khoản chưa được liên kết với hồ sơ giáo viên.' }, 400);
+    if (user!.role === 'TEACHER' && targetTeacherId !== user!.linkedTeacherId) {
+      return json({ error: 'Giáo viên chỉ có thể chỉnh sửa hồ sơ cá nhân của chính mình.' }, 403);
+    }
+    const teacher = db.teachers.find((t) => t.id === targetTeacherId);
+    if (!teacher) return json({ error: 'Không tìm thấy hồ sơ giáo viên.' }, 404);
+
+    const before = {
+      name: teacher.name,
+      shortName: teacher.shortName,
+      phone: teacher.phone,
+      email: teacher.email,
+      degree: teacher.degree,
+      experienceYears: teacher.experienceYears,
+      subjects: [...(teacher.subjects || [])],
+    };
+
+    if (typeof b.name === 'string' && b.name.trim().length >= 2) teacher.name = b.name.trim().slice(0, 120);
+    if (typeof b.shortName === 'string' && b.shortName.trim().length >= 2) teacher.shortName = b.shortName.trim().slice(0, 60);
+    if (typeof b.phone === 'string') {
+      const cleanPhone = normalizePhoneVN(b.phone) || b.phone.trim().slice(0, 40);
+      if (cleanPhone.length >= 8) teacher.phone = cleanPhone;
+    }
+    if (typeof b.email === 'string') {
+      const cleaned = b.email.trim().toLowerCase();
+      teacher.email = cleaned && cleaned.includes('@') ? cleaned.slice(0, 160) : undefined;
+    }
+    if (typeof b.degree === 'string' && b.degree.trim().length >= 2) teacher.degree = b.degree.trim().slice(0, 140);
+    if (b.experienceYears !== undefined) {
+      const yrs = Number(b.experienceYears);
+      if (Number.isFinite(yrs)) teacher.experienceYears = Math.max(0, Math.min(60, Math.round(yrs)));
+    }
+    if (b.subjects !== undefined) {
+      const arr = Array.isArray(b.subjects) ? b.subjects : String(b.subjects).split(/[,;]/);
+      const cleaned = arr.map((s) => String(s || '').trim().slice(0, 80)).filter(Boolean).slice(0, 10);
+      if (cleaned.length > 0) teacher.subjects = cleaned;
+    }
+
+    const diffs = diffTeacherProfileFields(before, teacher);
+    teacher.profileUpdatedAt = new Date().toISOString();
+    teacher.profileUpdatedBy = user!.email;
+    const synced = cascadeSyncTeacherUpdate(db, teacher, before.name, before.shortName);
+
+    if (diffs.length > 0) {
+      const diffSummary = diffs.map((d) => `${d.label}: "${d.oldValue}" → "${d.newValue}"`).join(' | ');
+      const groupLabel = teacher.teacherGroup === 'TUTOR_REVIEW' ? 'GV Trả bài' : 'GV Bộ môn';
+      appendAuditLog(db, {
+        actorEmail: user!.email,
+        actorRole: user!.role,
+        action: 'TEACHER_SELF_PROFILE_UPDATE',
+        target: teacher.id,
+        targetLabel: `${groupLabel} · ${teacher.name}`,
+        detail: `Tự chuẩn hóa ${diffs.length} trường: ${diffSummary}`,
+        status: 'UPDATED',
+      });
+      if (!isManager || user!.linkedTeacherId === teacher.id) {
+        db.notifications.unshift({
+          id: `ntf-tprof-${Date.now().toString(36)}`,
+          createdAt: nowFormatted(),
+          title: `GV tự chuẩn hóa hồ sơ · ${teacher.shortName}`,
+          body: `${teacher.name} (${groupLabel} · ${user!.email}) vừa cập nhật thông tin cá nhân: ${diffSummary}`,
+          channel: 'APP',
+          targetRole: 'ADMIN',
+          read: false,
+        });
+      }
+    }
+    await saveState(env, db);
+    return json({ teacher, diffs, synced });
+  }
+
+  if (method === 'PATCH' && pathname === '/api/v1/teachers/me/alert-prefs') {
+    const denied = requireRole(['TEACHER', 'MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<Record<string, unknown>>();
+    const targetTeacherId =
+      user!.role === 'TEACHER'
+        ? String(user!.linkedTeacherId || '')
+        : String(b.teacherId || user!.linkedTeacherId || '');
+    const teacher = db.teachers.find((t) => t.id === targetTeacherId);
+    if (!teacher) return json({ error: 'Không tìm thấy hồ sơ giáo viên.' }, 404);
+    if (typeof b.scheduleAlertEnabled === 'boolean') teacher.scheduleAlertEnabled = b.scheduleAlertEnabled;
+    if (typeof b.scheduleAlertSound === 'boolean') teacher.scheduleAlertSound = b.scheduleAlertSound;
     await saveState(env, db);
     return json({ teacher });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/teachers/me/ack-timetable') {
+    const denied = requireRole(['TEACHER', 'MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<{ teacherId?: string; eventIds?: string[] }>();
+    const targetTeacherId =
+      user!.role === 'TEACHER'
+        ? String(user!.linkedTeacherId || '')
+        : String(b.teacherId || user!.linkedTeacherId || '');
+    const teacher = db.teachers.find((t) => t.id === targetTeacherId);
+    if (!teacher) return json({ error: 'Không tìm thấy hồ sơ giáo viên.' }, 404);
+    const eventIds = Array.isArray(b.eventIds) ? new Set(b.eventIds.map(String)) : null;
+    let ackCount = 0;
+    for (const ev of db.timetableChanges || []) {
+      if (!ev.affectedTeacherIds.includes(teacher.id)) continue;
+      if (eventIds && !eventIds.has(ev.id)) continue;
+      if (!ev.acknowledgedByTeacherIds.includes(teacher.id)) {
+        ev.acknowledgedByTeacherIds.push(teacher.id);
+        ackCount++;
+      }
+    }
+    teacher.lastTimetableAckAt = new Date().toISOString();
+    await saveState(env, db);
+    return json({ acknowledged: ackCount, lastTimetableAckAt: teacher.lastTimetableAckAt });
   }
 
   const teacherIdMatch = pathname.match(/^\/api\/v1\/teachers\/([^/]+)$/);
@@ -1903,6 +2076,12 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     if (!day || reason.length < 3) {
       return json({ error: 'Vui lòng chọn thứ/ca nghỉ và nhập lý do nghỉ (tối thiểu 3 ký tự).' }, 400);
     }
+    const affectedSlots = findAffectedSlotsForLeave(db.timetable, {
+      teacherId: teacher.id,
+      day,
+      period,
+      shift: period === 'ALL' ? undefined : shift,
+    });
     const leave: TeacherLeave = {
       id: `lv-${Date.now()}`,
       teacherId: teacher.id,
@@ -1916,32 +2095,134 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       createdBy: user!.email,
       reviewedBy: isManager && b.autoApprove ? user!.email : undefined,
       createdAt: nowFormatted(),
+      affectedSlotIds: affectedSlots.map((sl) => sl.id),
     };
     db.teacherLeaves.unshift(leave);
-    const affectedSlots = db.timetable.filter(
-      (sl) =>
-        sl.status !== 'OFF' &&
-        sl.teacherId === teacher.id &&
-        sl.day === leave.day &&
-        (leave.period === 'ALL' || (sl.period === leave.period && (!leave.shift || sl.shift === leave.shift))),
-    );
     if (leave.status === 'APPROVED') {
       affectedSlots.forEach((sl) => {
+        const before = slotToSnapshot(sl);
         sl.status = 'TEACHER_ABSENT';
         sl.note = `GV nghỉ phép (${leave.reason}) · Cần xếp GV dạy thay`;
+        recordTimetableChange(db, {
+          action: 'UPDATED',
+          updatedBy: user!.email,
+          slotId: sl.id,
+          summary: `${teacher.shortName} nghỉ phép ca ${formatShiftLabel(sl.day, sl.period, sl.shift)} (${sl.centerClass})`,
+          before,
+          after: slotToSnapshot(sl),
+          affectedTeacherIds: [teacher.id],
+        });
       });
     }
+    const { suggestions } = computeSubstituteSuggestions(db, leave);
     db.notifications.unshift({
       id: `ntf-${Date.now()}`,
       createdAt: nowFormatted(),
-      title: `Báo nghỉ đột xuất · ${teacher.shortName} (${leave.day})`,
-      body: `${teacher.shortName} báo nghỉ ${leave.dateLabel} — Lý do: ${leave.reason}. Ảnh hưởng ${affectedSlots.length} ca trên TKB.`,
+      title: `Đơn xin nghỉ · ${teacher.shortName} (${leave.day})`,
+      body: `${teacher.shortName} xin nghỉ ${leave.dateLabel} — Lý do: ${leave.reason}. Ảnh hưởng ${affectedSlots.length} ca trên TKB.`,
       channel: 'APP',
       targetRole: 'MANAGER',
       read: false,
     });
     await saveState(env, db);
-    return json({ leave, affectedCount: affectedSlots.length }, 201);
+    return json({ leave, affectedCount: affectedSlots.length, affectedSlots, topSuggestions: suggestions.slice(0, 5) }, 201);
+  }
+
+  const leaveSubMatch = pathname.match(/^\/api\/v1\/teacher-leaves\/([^/]+)\/substitutes$/);
+  if (method === 'GET' && leaveSubMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const leave = db.teacherLeaves.find((l) => l.id === leaveSubMatch[1]);
+    if (!leave) return json({ error: 'Không tìm thấy đơn xin nghỉ.' }, 404);
+    const { affectedSlots, suggestions } = computeSubstituteSuggestions(db, leave);
+    const cancelNotice = buildParentClassCancelNotice({ leave, affectedSlots, students: db.students });
+    return json({ leave, affectedSlots, suggestions: suggestions.slice(0, 10), cancelNotice });
+  }
+
+  const leaveResolveMatch = pathname.match(/^\/api\/v1\/teacher-leaves\/([^/]+)\/resolve$/);
+  if (method === 'POST' && leaveResolveMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const leave = db.teacherLeaves.find((l) => l.id === leaveResolveMatch[1]);
+    if (!leave) return json({ error: 'Không tìm thấy đơn xin nghỉ.' }, 404);
+    const b = await readJson<{ action?: string; substituteTeacherId?: string }>();
+    const action = String(b.action || '').toUpperCase();
+    const affectedSlots = findAffectedSlotsForLeave(db.timetable, leave);
+
+    if (action === 'ASSIGN_SUBSTITUTE') {
+      const subTeacher = db.teachers.find((t) => t.id === String(b.substituteTeacherId || '').trim());
+      if (!subTeacher) return json({ error: 'Vui lòng chọn giáo viên dạy thay hợp lệ.' }, 400);
+      if (subTeacher.id === leave.teacherId) {
+        return json({ error: 'Không thể chọn chính giáo viên đang xin nghỉ làm người dạy thay.' }, 400);
+      }
+      const updatedSlots: TimetableSlot[] = [];
+      for (const sl of affectedSlots) {
+        const before = slotToSnapshot(sl);
+        sl.teacherId = subTeacher.id;
+        sl.teacherName = subTeacher.shortName;
+        sl.status = 'SUBSTITUTED';
+        sl.note = `Dạy thay ${leave.teacherName} (${leave.reason})`;
+        updatedSlots.push(sl);
+        recordTimetableChange(db, {
+          action: 'SUBSTITUTED',
+          updatedBy: user!.email,
+          slotId: sl.id,
+          summary: `Phân công ${subTeacher.shortName} dạy thay ${leave.teacherName} · ${sl.centerClass} (${sl.subject}) vào ${formatShiftLabel(sl.day, sl.period, sl.shift)}`,
+          before,
+          after: slotToSnapshot(sl),
+          affectedTeacherIds: [leave.teacherId, subTeacher.id],
+        });
+      }
+      leave.status = 'APPROVED';
+      leave.reviewedBy = user!.email;
+      leave.resolutionType = 'SUBSTITUTE_ASSIGNED';
+      leave.substituteTeacherId = subTeacher.id;
+      leave.substituteTeacherName = subTeacher.shortName;
+      leave.affectedSlotIds = updatedSlots.map((s) => s.id);
+      await saveState(env, db);
+      return json({ leave, updatedSlots });
+    }
+
+    if (action === 'CANCEL_AND_NOTIFY_PARENTS') {
+      const cancelNotice = buildParentClassCancelNotice({ leave, affectedSlots, students: db.students });
+      const updatedSlots: TimetableSlot[] = [];
+      for (const sl of affectedSlots) {
+        const before = slotToSnapshot(sl);
+        sl.status = 'OFF';
+        sl.note = `Tạm nghỉ buổi (${leave.teacherName}: ${leave.reason}) · Đã báo sớm PH/HS`;
+        updatedSlots.push(sl);
+        recordTimetableChange(db, {
+          action: 'CANCELLED',
+          updatedBy: user!.email,
+          slotId: sl.id,
+          summary: `Tạm nghỉ buổi ${sl.centerClass} (${sl.subject}) vào ${formatShiftLabel(sl.day, sl.period, sl.shift)} — Đã gửi thông báo sớm tới Phụ huynh & Học sinh`,
+          before,
+          after: slotToSnapshot(sl),
+          affectedTeacherIds: [leave.teacherId],
+        });
+      }
+      leave.status = 'APPROVED';
+      leave.reviewedBy = user!.email;
+      leave.resolutionType = 'CLASS_CANCELLED_NOTIFIED';
+      leave.parentNoticeSentAt = new Date().toISOString();
+      leave.affectedSlotIds = updatedSlots.map((s) => s.id);
+      const classLabel = cancelNotice.affectedClasses.join(', ') || leave.day;
+      db.notifications.unshift({
+        id: `ntf-cancel-p-${Date.now().toString(36)}`,
+        createdAt: nowFormatted(),
+        title: `Thông báo tạm nghỉ buổi học · ${classLabel} (${leave.dateLabel})`,
+        body: cancelNotice.zaloMessage.slice(0, 560),
+        channel: 'ZALO',
+        targetRole: 'PARENT',
+        read: false,
+      });
+      await saveState(env, db);
+      return json({ leave, updatedSlots, cancelNotice });
+    }
+
+    return json({ error: 'Hành động xử lý đơn nghỉ không hợp lệ.' }, 400);
   }
 
   const leaveIdMatch = pathname.match(/^\/api\/v1\/teacher-leaves\/([^/]+)$/);
@@ -2087,10 +2368,21 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       targetSlot.room = srcCopy.room;
       targetSlot.roomId = srcCopy.roomId;
 
+      recordTimetableChange(db, {
+        action: 'UPDATED',
+        updatedBy: user!.email,
+        slotId: sourceSlot.id,
+        summary: `Hoán đổi 2 chiều: ${sourceSlot.centerClass} (${sourceSlot.subject}) ↔ ${targetSlot.centerClass} (${targetSlot.subject})`,
+        before: slotToSnapshot(srcCopy),
+        after: slotToSnapshot(sourceSlot),
+        affectedTeacherIds: [sourceSlot.teacherId, targetSlot.teacherId],
+      });
+
       await saveState(env, db);
       return json({ mode: 'SWAP', updatedSlots: [sourceSlot, targetSlot], previousSnapshots });
     }
 
+    const beforeMove = slotToSnapshot(sourceSlot);
     sourceSlot.day = targetDay;
     sourceSlot.period = targetPeriod;
     sourceSlot.shift = targetShift;
@@ -2105,6 +2397,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       sourceSlot.room = evalRes.autoRoom.name;
       sourceSlot.roomId = evalRes.autoRoom.id;
     }
+    recordTimetableChange(db, {
+      action: 'UPDATED',
+      updatedBy: user!.email,
+      slotId: sourceSlot.id,
+      summary: `Chuyển ca ${sourceSlot.centerClass} (${sourceSlot.subject}) từ ${formatShiftLabel(beforeMove.day, beforeMove.period, beforeMove.shift)} sang ${formatShiftLabel(sourceSlot.day, sourceSlot.period, sourceSlot.shift)} (${sourceSlot.room})`,
+      before: beforeMove,
+      after: slotToSnapshot(sourceSlot),
+      affectedTeacherIds: [sourceSlot.teacherId],
+    });
     await saveState(env, db);
     return json({ mode: evalRes.mode, updatedSlots: [sourceSlot], previousSnapshots, autoRoom: evalRes.autoRoom });
   }
@@ -2164,6 +2465,14 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       note: b.note ? String(b.note).trim() : undefined,
     };
     db.timetable.push(newSlot);
+    recordTimetableChange(db, {
+      action: 'ADDED',
+      updatedBy: user!.email,
+      slotId: newSlot.id,
+      summary: `Thêm ca mới ${newSlot.centerClass} (${newSlot.subject}) · ${formatShiftLabel(newSlot.day, newSlot.period, newSlot.shift)} tại ${newSlot.room}`,
+      after: slotToSnapshot(newSlot),
+      affectedTeacherIds: [newSlot.teacherId],
+    });
     await saveState(env, db);
     return json({ slot: newSlot }, 201);
   }
@@ -2213,6 +2522,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const slot = db.timetable.find((s) => s.id === subApplyMatch[1]);
     if (!slot) return json({ error: 'Không tìm thấy tiết học.' }, 404);
     const b = await readJson<{ newTeacherId?: string; action?: string }>();
+    const beforeSub = slotToSnapshot(slot);
+    const affectedTeacherIds = [slot.teacherId];
     if (b.action === 'MOVE_TO_EVENING_MAKEUP') {
       slot.period = 'TOI';
       slot.shift = 'CA_1';
@@ -2240,7 +2551,17 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       slot.teacherName = subTeacher.shortName;
       slot.status = 'SUBSTITUTED';
       slot.note = `Dạy thay ${oldName} nghỉ đột xuất`;
+      affectedTeacherIds.push(subTeacher.id);
     }
+    recordTimetableChange(db, {
+      action: 'SUBSTITUTED',
+      updatedBy: user!.email,
+      slotId: slot.id,
+      summary: `Điều phối thay thế ${slot.centerClass} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)}: ${slot.teacherName}`,
+      before: beforeSub,
+      after: slotToSnapshot(slot),
+      affectedTeacherIds,
+    });
     db.notifications.unshift({
       id: `ntf-${Date.now()}`,
       createdAt: nowFormatted(),
@@ -2303,6 +2624,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         return json({ error: check.hardConflicts[0], conflicts: check.hardConflicts, suggestedFreeRooms: check.suggestedFreeRooms }, 409);
       }
     }
+    const beforeSlot = slotToSnapshot(slot);
     slot.day = nextDay;
     slot.period = nextPeriod;
     slot.shift = nextShift;
@@ -2320,6 +2642,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     slot.status = nextStatus;
     if (b.note !== undefined) slot.note = String(b.note || '').trim() || undefined;
     if (typeof b.weekLabel === 'string' && b.weekLabel.trim()) slot.weekLabel = b.weekLabel.trim();
+    recordTimetableChange(db, {
+      action: nextStatus === 'OFF' ? 'CANCELLED' : 'UPDATED',
+      updatedBy: user!.email,
+      slotId: slot.id,
+      summary: `Cập nhật ca ${slot.centerClass} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)} tại ${slot.room}`,
+      before: beforeSlot,
+      after: slotToSnapshot(slot),
+      affectedTeacherIds: [beforeSlot.teacherId, slot.teacherId],
+    });
     await saveState(env, db);
     return json({ slot });
   }
@@ -2328,7 +2659,18 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const denied = requireRole(['MANAGER']);
     if (denied) return denied;
     const db = await loadState(env);
+    const target = db.timetable.find((s) => s.id === slotIdMatch[1]);
     db.timetable = db.timetable.filter((s) => s.id !== slotIdMatch[1]);
+    if (target) {
+      recordTimetableChange(db, {
+        action: 'REMOVED',
+        updatedBy: user!.email,
+        slotId: target.id,
+        summary: `Xóa ca ${target.centerClass} (${target.subject}) · ${formatShiftLabel(target.day, target.period, target.shift)}`,
+        before: slotToSnapshot(target),
+        affectedTeacherIds: [target.teacherId],
+      });
+    }
     await saveState(env, db);
     return json({ deleted: true });
   }
@@ -3416,6 +3758,15 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     if (rows.length === 0) return json({ error: 'Chưa có ca học nào để đồng bộ Thời khóa biểu.' }, 400);
     const db = await loadState(env);
     const result = smartSyncTimetable(db, rows, mode);
+    if (result.added > 0 || result.updated > 0) {
+      const allTeacherIds = Array.from(new Set(db.timetable.map((sl) => sl.teacherId).filter(Boolean)));
+      recordTimetableChange(db, {
+        action: 'BULK_IMPORT',
+        updatedBy: user!.email,
+        summary: `Đồng bộ TKB đa chiều (${mode}): +${result.added} ca mới, cập nhật ${result.updated} ca`,
+        affectedTeacherIds: allTeacherIds,
+      });
+    }
     appendAuditLog(db, {
       actorEmail: user!.email,
       actorRole: user!.role,

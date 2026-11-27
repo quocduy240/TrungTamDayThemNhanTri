@@ -71,6 +71,7 @@ import {
 import { QuickClassBanner, QuickClassLookupModal } from './QuickClassHub';
 import { SocialActivityLibrary } from './SocialActivityLibrary';
 import { ShareMenu } from './ShareMenu';
+import { ZpdFrontendManualModal } from './ZpdFrontendManualModal';
 
 interface FrontendPortalProps {
   bootstrap: BootstrapPayload;
@@ -204,6 +205,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
 }) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showQuickLookup, setShowQuickLookup] = useState(false);
+  const [showZpdManual, setShowZpdManual] = useState(false);
   const [frontendPrintDoc, setFrontendPrintDoc] = useState<{
     title: string;
     fileName: string;
@@ -767,8 +769,18 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
             )}
           </div>
 
-          {/* Zone 3: Language + Gmail Sign-In / CMS Entry */}
+          {/* Zone 3: ZPD Guide + Language + Gmail Sign-In / CMS Entry */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowZpdManual(true)}
+              title="Mở Cẩm nang hướng dẫn theo đối tượng"
+              className="inline-flex items-center gap-1.5 h-9 px-2.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-blue-900" />
+              <span className="hidden md:inline">Cẩm nang</span>
+            </button>
+
             <button
               type="button"
               onClick={onToggleLang}
@@ -781,11 +793,19 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => onOpenCms('overview')}
+                  onClick={() =>
+                    onOpenCms(currentUser.role === 'TEACHER' ? 'teacher-portal' : 'overview')
+                  }
                   className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs sm:text-sm font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
                   <LayoutDashboard className="w-3.5 h-3.5" />
-                  <span>{isAdminOrSuper(currentUser.role) ? 'Backend CMS' : 'Cổng CMS'}</span>
+                  <span>
+                    {currentUser.role === 'TEACHER'
+                      ? 'Cổng Giáo viên'
+                      : isAdminOrSuper(currentUser.role)
+                        ? 'Backend CMS'
+                        : 'Cổng CMS'}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -2727,6 +2747,30 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
         fileName={frontendPrintDoc?.fileName || 'tai-lieu-nhan-tri.html'}
         htmlContent={frontendPrintDoc?.html || ''}
         onClose={() => setFrontendPrintDoc(null)}
+      />
+
+      {/* Personalized Frontend ZPD Interactive Manual Modal */}
+      <ZpdFrontendManualModal
+        open={showZpdManual}
+        frontendMode={frontendMode}
+        userRole={currentUser?.role}
+        onClose={() => setShowZpdManual(false)}
+        onJumpToAnchor={(anchor, suggestedMode) => {
+          if (anchor === '#teacher-portal' && currentUser?.role === 'TEACHER') {
+            onOpenCms('teacher-portal');
+            return;
+          }
+          if (suggestedMode && suggestedMode !== frontendMode) {
+            onChangeFrontendMode(suggestedMode);
+          }
+          const cleanId = anchor.replace(/^#/, '');
+          setTimeout(() => {
+            const el = document.getElementById(cleanId);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          }, 120);
+        }}
       />
 
       {/* Enrollment Modal */}

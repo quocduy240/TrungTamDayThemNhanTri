@@ -46,10 +46,21 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
     parsed.reminderDispatchLogs = structuredClone(INITIAL_DB.reminderDispatchLogs);
   }
   parsed.printTemplates = ensureSystemPrintTemplates(parsed.printTemplates);
+  if (!parsed.timetableUpdatedAt) {
+    parsed.timetableUpdatedAt = new Date().toISOString();
+  }
+  if (typeof parsed.timetableVersion !== 'number' || !Number.isFinite(parsed.timetableVersion)) {
+    parsed.timetableVersion = 1;
+  }
+  if (!Array.isArray(parsed.timetableChanges)) {
+    parsed.timetableChanges = [];
+  }
   parsed.teachers = (parsed.teachers || []).map((t) => ({
     ...t,
     teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
     availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
+    scheduleAlertEnabled: typeof t.scheduleAlertEnabled === 'boolean' ? t.scheduleAlertEnabled : true,
+    scheduleAlertSound: typeof t.scheduleAlertSound === 'boolean' ? t.scheduleAlertSound : true,
   }));
   const teacherByKey = new Map<string, string>();
   parsed.teachers.forEach((t) => {

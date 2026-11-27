@@ -12,12 +12,15 @@ import {
   Download,
   FileSpreadsheet,
   GripVertical,
+  Mail,
   Pencil,
   Plus,
   Printer,
   RefreshCw,
   RotateCcw,
   Save,
+  Send,
+  Sparkles,
   Trash2,
   UserCheck,
   Users,
@@ -31,6 +34,7 @@ import type {
   ShiftCode,
   SiteConfig,
   SmartImportEntityType,
+  SubstituteSuggestion as RankedSubstituteSuggestion,
   Teacher,
   TeacherGroup,
   TeacherLeave,
@@ -819,6 +823,128 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
       setStatusMessage('Đã hủy đơn xin nghỉ.');
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : 'Không thể hủy đơn nghỉ.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Smart Leave Resolution Panel (Ranked Substitutes + 1-Click Parent Cancellation Notice)
+  const [resolvingLeaveId, setResolvingLeaveId] = useState<string | null>(null);
+  const [leavePlanLoading, setLeavePlanLoading] = useState(false);
+  const [leaveResolutionPlan, setLeaveResolutionPlan] = useState<{
+    leaveId: string;
+    affectedSlots: TimetableSlot[];
+    suggestions: RankedSubstituteSuggestion[];
+    cancelNotice: {
+      affectedClasses: string[];
+      zaloMessage: string;
+      emailSubject: string;
+      emailBody: string;
+      parentPhones: string[];
+      parentEmails: string[];
+    };
+  } | null>(null);
+  const [dispatchedCancelNotice, setDispatchedCancelNotice] = useState<{
+    leaveTeacherName: string;
+    affectedClasses: string[];
+    zaloMessage: string;
+    emailSubject: string;
+    emailBody: string;
+    parentPhones: string[];
+    parentEmails: string[];
+  } | null>(null);
+  const [copiedCancelZalo, setCopiedCancelZalo] = useState(false);
+
+  async function handleLoadLeaveResolution(leaveId: string) {
+    if (resolvingLeaveId === leaveId && leaveResolutionPlan?.leaveId === leaveId) {
+      setResolvingLeaveId(null);
+      return;
+    }
+    setResolvingLeaveId(leaveId);
+    setLeavePlanLoading(true);
+    setErrorMessage('');
+    try {
+      const data = await apiRequest<{
+        affectedSlots: TimetableSlot[];
+        suggestions: RankedSubstituteSuggestion[];
+        cancelNotice: {
+          affectedClasses: string[];
+          zaloMessage: string;
+          emailSubject: string;
+          emailBody: string;
+          parentPhones: string[];
+          parentEmails: string[];
+        };
+      }>(`/api/v1/teacher-leaves/${leaveId}/substitutes`);
+      setLeaveResolutionPlan({
+        leaveId,
+        affectedSlots: data.affectedSlots || [],
+        suggestions: data.suggestions || [],
+        cancelNotice: data.cancelNotice,
+      });
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Không tải được gợi ý xử lý đơn nghỉ.');
+      setResolvingLeaveId(null);
+    } finally {
+      setLeavePlanLoading(false);
+    }
+  }
+
+  async function handleAssignSubstituteForLeave(leaveId: string, substituteTeacherId: string, subName: string) {
+    setBusy(true);
+    setErrorMessage('');
+    try {
+      await apiRequest(`/api/v1/teacher-leaves/${leaveId}/resolve`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'ASSIGN_SUBSTITUTE',
+          substituteTeacherId,
+        }),
+      });
+      await onRefresh();
+      setResolvingLeaveId(null);
+      setLeaveResolutionPlan(null);
+      setStatusMessage(
+        `Đã duyệt đơn và phân công ${subName} dạy thay. Hệ thống đã bắn chuông báo TKB kèm bảng đối chiếu Cũ → Mới cho cả hai giáo viên.`,
+      );
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Không gán được giáo viên dạy thay.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCancelAndNotifyParents(leave: TeacherLeave) {
+    setBusy(true);
+    setErrorMessage('');
+    try {
+      const res = await apiRequest<{
+        cancelNotice?: {
+          affectedClasses: string[];
+          zaloMessage: string;
+          emailSubject: string;
+          emailBody: string;
+          parentPhones: string[];
+          parentEmails: string[];
+        };
+      }>(`/api/v1/teacher-leaves/${leave.id}/resolve`, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'CANCEL_AND_NOTIFY_PARENTS' }),
+      });
+      await onRefresh();
+      setResolvingLeaveId(null);
+      setLeaveResolutionPlan(null);
+      if (res.cancelNotice) {
+        setDispatchedCancelNotice({
+          leaveTeacherName: leave.teacherName,
+          ...res.cancelNotice,
+        });
+      }
+      setStatusMessage(
+        `Đã duyệt tạm nghỉ buổi học của ${leave.teacherName}, đẩy thông báo lên Cổng Phụ huynh/Học sinh và tạo sẵn tin nhắn Zalo/Email báo sớm.`,
+      );
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'Không thể báo nghỉ buổi học.');
     } finally {
       setBusy(false);
     }
@@ -2125,11 +2251,27 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                             }`}
                           >
                             {lv.status === 'PENDING'
-                              ? 'Chờ duyệt'
+                              ? 'Chờ xử lý'
                               : lv.status === 'APPROVED'
-                                ? 'Đã duyệt nghỉ'
+                                ? lv.resolutionType === 'SUBSTITUTE_ASSIGNED' && lv.substituteTeacherName
+                                  ? `Đã xếp thay: ${lv.substituteTeacherName}`
+                                  : lv.resolutionType === 'CLASS_CANCELLED_NOTIFIED'
+                                    ? 'Đã nghỉ & báo sớm PH'
+                                    : 'Đã duyệt nghỉ'
                                 : 'Đã từ chối'}
                           </span>
+
+                          {canEdit && lv.status !== 'REJECTED' && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleLoadLeaveResolution(lv.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-md cursor-pointer whitespace-nowrap"
+                            >
+                              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                              <span>{resolvingLeaveId === lv.id ? 'Ẩn phương án' : 'Phương án xử lý'}</span>
+                            </button>
+                          )}
 
                           {canEdit && lv.status === 'PENDING' && (
                             <>
@@ -2165,6 +2307,75 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                         </div>
                       </div>
 
+                      {/* Smart Admin Resolution Drawer Inline (Auto Substitute Suggestions + 1-Click Parent Notice) */}
+                      {canEdit && resolvingLeaveId === lv.id && (
+                        <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+                          {leavePlanLoading ? (
+                            <p className="text-xs text-blue-900 font-medium">
+                              Đang phân tích giáo viên rảnh cùng nhóm chuyên môn và danh sách phụ huynh chịu ảnh hưởng...
+                            </p>
+                          ) : leaveResolutionPlan && leaveResolutionPlan.leaveId === lv.id ? (
+                            <>
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-blue-200">
+                                <div>
+                                  <p className="text-xs font-bold text-blue-950">
+                                    Phương án 1 · Gán nhanh Giáo viên dạy thay ({leaveResolutionPlan.suggestions.length} đề xuất)
+                                  </p>
+                                  <p className="text-[11px] text-slate-600">
+                                    Hệ thống tự chấm điểm theo cùng nhóm (Bộ môn / Trả bài), đúng môn, 0 xung đột và trạng thái Rảnh.
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleCancelAndNotifyParents(lv)}
+                                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
+                                >
+                                  <Send className="w-3.5 h-3.5" />
+                                  <span>Không có GV thay · Báo PH nghỉ buổi</span>
+                                </button>
+                              </div>
+
+                              {leaveResolutionPlan.suggestions.length === 0 ? (
+                                <p className="text-xs text-slate-700">
+                                  Không có giáo viên nào khả dụng ở khung giờ này. Bấm nút <strong>“Báo PH nghỉ buổi”</strong> bên trên để gửi thông báo sớm cho phụ huynh khỏi đưa con đến lớp.
+                                </p>
+                              ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                  {leaveResolutionPlan.suggestions.slice(0, 6).map((cand) => (
+                                    <div
+                                      key={cand.teacherId}
+                                      className="bg-white border border-slate-200 rounded-lg p-3 flex items-center justify-between gap-2"
+                                    >
+                                      <div className="min-w-0">
+                                        <p className="text-xs font-bold text-slate-950 truncate">
+                                          {cand.shortName}{' '}
+                                          <span className="font-normal text-slate-500">({cand.teacherName})</span>
+                                        </p>
+                                        <p className="text-[11px] text-slate-600 truncate">
+                                          Điểm phù hợp: <strong className="text-blue-900">{cand.score}/100</strong> ·{' '}
+                                          {cand.reasons.slice(0, 2).join(' · ')}
+                                        </p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        disabled={busy || cand.conflictCount > 0}
+                                        onClick={() =>
+                                          handleAssignSubstituteForLeave(lv.id, cand.teacherId, cand.shortName)
+                                        }
+                                        className="px-2.5 py-1.5 rounded-lg bg-blue-900 hover:bg-blue-800 disabled:bg-slate-300 text-white text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                                      >
+                                        {cand.conflictCount > 0 ? 'Đang trùng ca' : 'Gán dạy thay'}
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          ) : null}
+                        </div>
+                      )}
+
                       {affected.length > 0 && (
                         <div className="p-3 bg-red-50/70 border border-red-200 rounded-lg space-y-1.5">
                           <p className="text-[11px] font-bold text-red-800">
@@ -2195,6 +2406,62 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Ready-to-Send Parent Cancellation Notice Box (Zalo + Email) */}
+            {dispatchedCancelNotice && (
+              <div className="m-4 p-4 bg-amber-50 border border-amber-300 rounded-xl space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-bold text-amber-950">
+                      Mẫu tin báo sớm Phụ huynh &amp; Học sinh nghỉ buổi ({dispatchedCancelNotice.affectedClasses.join(', ') || 'Lớp bị ảnh hưởng'})
+                    </p>
+                    <p className="text-[11px] text-amber-900">
+                      SĐT Zalo phụ huynh ({dispatchedCancelNotice.parentPhones.length}):{' '}
+                      <span className="font-mono-num">
+                        {dispatchedCancelNotice.parentPhones.slice(0, 6).join(', ') || 'Chưa có SĐT'}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(dispatchedCancelNotice.zaloMessage);
+                          setCopiedCancelZalo(true);
+                          setTimeout(() => setCopiedCancelZalo(false), 2500);
+                        } catch {
+                          // ignore clipboard fallback
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-900 text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
+                    >
+                      {copiedCancelZalo ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedCancelZalo ? 'Đã sao chép Zalo' : 'Sao chép gửi Zalo'}</span>
+                    </button>
+                    {dispatchedCancelNotice.parentEmails.length > 0 && (
+                      <a
+                        href={`mailto:${encodeURIComponent(dispatchedCancelNotice.parentEmails.join(','))}?subject=${encodeURIComponent(dispatchedCancelNotice.emailSubject)}&body=${encodeURIComponent(dispatchedCancelNotice.emailBody)}`}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-amber-400 text-amber-950 text-xs font-semibold whitespace-nowrap"
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        <span>Mở Email ({dispatchedCancelNotice.parentEmails.length})</span>
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setDispatchedCancelNotice(null)}
+                      className="text-xs text-slate-600 hover:text-slate-950 px-2 py-1 cursor-pointer"
+                    >
+                      Đóng
+                    </button>
+                  </div>
+                </div>
+                <pre className="text-xs text-slate-800 bg-white border border-amber-200 rounded-lg p-3 whitespace-pre-wrap font-sans leading-relaxed">
+                  {dispatchedCancelNotice.zaloMessage}
+                </pre>
               </div>
             )}
           </div>

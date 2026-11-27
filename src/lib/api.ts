@@ -21,6 +21,7 @@ import type {
   Student,
   Teacher,
   TeacherLeave,
+  TimetableChangeEvent,
   TimetableSlot,
   TuitionRecord,
   UserNotificationPreference,
@@ -221,6 +222,9 @@ export interface WorkspacePayload {
   classCheckins: ClassCheckInRecord[];
   reminderDispatchLogs: ReminderDispatchLog[];
   printTemplates?: PrintTemplate[];
+  timetableUpdatedAt?: string;
+  timetableVersion?: number;
+  timetableChanges?: TimetableChangeEvent[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
 }

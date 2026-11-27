@@ -217,7 +217,11 @@ service cloud.firestore {
 
     function isValidTeacherLeave(data) {
       return data.keys().hasAll(['id', 'teacherId', 'teacherName', 'day', 'dateLabel', 'period', 'reason', 'status', 'createdBy', 'createdAt'])
-        && data.keys().hasOnly(['id', 'teacherId', 'teacherName', 'day', 'dateLabel', 'period', 'shift', 'reason', 'status', 'createdBy', 'reviewedBy', 'createdAt'])
+        && data.keys().hasOnly([
+          'id', 'teacherId', 'teacherName', 'day', 'dateLabel', 'period', 'shift', 'reason', 'status',
+          'createdBy', 'reviewedBy', 'createdAt',
+          'affectedSlotIds', 'resolutionType', 'substituteTeacherId', 'substituteTeacherName', 'parentNoticeSentAt'
+        ])
         && isValidId(data.id)
         && isNonEmptyString(data.teacherId, 128)
         && isNonEmptyString(data.teacherName, 80)
@@ -229,7 +233,12 @@ service cloud.firestore {
         && data.status in ['PENDING', 'APPROVED', 'REJECTED']
         && isNonEmptyString(data.createdBy, 160)
         && isOptionalString(data, 'reviewedBy', 160)
-        && isNonEmptyString(data.createdAt, 40);
+        && isNonEmptyString(data.createdAt, 40)
+        && (!('affectedSlotIds' in data) || isBoundedStringList(data.affectedSlotIds, 20))
+        && (!('resolutionType' in data) || data.resolutionType in ['SUBSTITUTE_ASSIGNED', 'CLASS_CANCELLED_NOTIFIED'])
+        && isOptionalString(data, 'substituteTeacherId', 128)
+        && isOptionalString(data, 'substituteTeacherName', 80)
+        && isOptionalString(data, 'parentNoticeSentAt', 60);
     }
 
     function isValidFamilyProfile(data) {
@@ -246,7 +255,11 @@ service cloud.firestore {
 
     function isValidPublicTeacher(data) {
       return data.keys().hasAll(['id', 'name', 'shortName', 'subjects', 'degree', 'experienceYears', 'status'])
-        && data.keys().hasOnly(['id', 'name', 'shortName', 'teacherGroup', 'subjects', 'degree', 'experienceYears', 'roomDefault', 'status', 'availability'])
+        && data.keys().hasOnly([
+          'id', 'name', 'shortName', 'teacherGroup', 'subjects', 'degree', 'experienceYears',
+          'roomDefault', 'status', 'availability',
+          'scheduleAlertEnabled', 'scheduleAlertSound', 'lastTimetableAckAt', 'profileUpdatedAt', 'profileUpdatedBy'
+        ])
         && isValidId(data.id)
         && isNonEmptyString(data.name, 120)
         && isNonEmptyString(data.shortName, 60)
@@ -256,7 +269,12 @@ service cloud.firestore {
         && data.experienceYears is number && data.experienceYears >= 0 && data.experienceYears <= 60
         && isOptionalString(data, 'roomDefault', 60)
         && data.status in ['ACTIVE', 'ON_LEAVE']
-        && (!('availability' in data) || isBoundedStringList(data.availability, 40));
+        && (!('availability' in data) || isBoundedStringList(data.availability, 40))
+        && (!('scheduleAlertEnabled' in data) || data.scheduleAlertEnabled is bool)
+        && (!('scheduleAlertSound' in data) || data.scheduleAlertSound is bool)
+        && isOptionalString(data, 'lastTimetableAckAt', 60)
+        && isOptionalString(data, 'profileUpdatedAt', 60)
+        && isOptionalString(data, 'profileUpdatedBy', 160);
     }
 
     function isValidTimetableSlot(data) {

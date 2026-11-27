@@ -142,7 +142,12 @@
         "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
         "createdBy": { "type": "string", "maxLength": 160 },
         "reviewedBy": { "type": "string", "maxLength": 160 },
-        "createdAt": { "type": "string", "maxLength": 40 }
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "affectedSlotIds": { "type": "array" },
+        "resolutionType": { "type": "string", "enum": ["SUBSTITUTE_ASSIGNED", "CLASS_CANCELLED_NOTIFIED"] },
+        "substituteTeacherId": { "type": "string", "maxLength": 128 },
+        "substituteTeacherName": { "type": "string", "maxLength": 80 },
+        "parentNoticeSentAt": { "type": "string", "maxLength": 60 }
       },
       "required": ["id", "teacherId", "teacherName", "day", "dateLabel", "period", "reason", "status", "createdBy", "createdAt"]
     },
@@ -175,7 +180,12 @@
         "experienceYears": { "type": "number" },
         "roomDefault": { "type": "string", "maxLength": 60 },
         "status": { "type": "string", "enum": ["ACTIVE", "ON_LEAVE"] },
-        "availability": { "type": "array" }
+        "availability": { "type": "array" },
+        "scheduleAlertEnabled": { "type": "boolean" },
+        "scheduleAlertSound": { "type": "boolean" },
+        "lastTimetableAckAt": { "type": "string", "maxLength": 60 },
+        "profileUpdatedAt": { "type": "string", "maxLength": 60 },
+        "profileUpdatedBy": { "type": "string", "maxLength": 160 }
       },
       "required": ["id", "name", "shortName", "subjects", "degree", "experienceYears", "status"]
     },

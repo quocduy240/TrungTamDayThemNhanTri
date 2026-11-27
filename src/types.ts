@@ -166,6 +166,11 @@ export interface Teacher {
   roomDefault: string;
   status: 'ACTIVE' | 'ON_LEAVE';
   availability?: string[];
+  scheduleAlertEnabled?: boolean;
+  scheduleAlertSound?: boolean;
+  lastTimetableAckAt?: string;
+  profileUpdatedAt?: string;
+  profileUpdatedBy?: string;
 }
 
 export interface TeacherLeave {
@@ -181,6 +186,55 @@ export interface TeacherLeave {
   createdBy: string;
   reviewedBy?: string;
   createdAt: string;
+  affectedSlotIds?: string[];
+  resolutionType?: 'SUBSTITUTE_ASSIGNED' | 'CLASS_CANCELLED_NOTIFIED';
+  substituteTeacherId?: string;
+  substituteTeacherName?: string;
+  parentNoticeSentAt?: string;
+}
+
+export interface TimetableChangeSnapshot {
+  day: DayOfWeek;
+  period: SessionPeriod;
+  shift: ShiftCode;
+  timeRange: string;
+  centerClass: string;
+  subject: string;
+  teacherId: string;
+  teacherName: string;
+  room: string;
+  status: TimetableSlot['status'];
+  slotType: TimetableSlot['slotType'];
+  note?: string;
+}
+
+export interface TimetableChangeEvent {
+  id: string;
+  version: number;
+  createdAt: string;
+  updatedBy: string;
+  action: 'ADDED' | 'UPDATED' | 'REMOVED' | 'SUBSTITUTED' | 'CANCELLED' | 'BULK_IMPORT';
+  slotId?: string;
+  summary: string;
+  before?: TimetableChangeSnapshot;
+  after?: TimetableChangeSnapshot;
+  affectedTeacherIds: string[];
+  acknowledgedByTeacherIds: string[];
+}
+
+export interface SubstituteSuggestion {
+  teacherId: string;
+  teacherName: string;
+  shortName: string;
+  teacherGroup: TeacherGroup;
+  subjects: string[];
+  phone: string;
+  email?: string;
+  score: number;
+  subjectMatch: boolean;
+  availableForAllShifts: boolean;
+  conflictCount: number;
+  reasons: string[];
 }
 
 export interface FamilyProfile {
@@ -583,6 +637,9 @@ export interface DatabaseState {
   classCheckins: ClassCheckInRecord[];
   reminderDispatchLogs: ReminderDispatchLog[];
   printTemplates?: PrintTemplate[];
+  timetableUpdatedAt?: string;
+  timetableVersion?: number;
+  timetableChanges?: TimetableChangeEvent[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
   adminPasscodeHash?: string;
