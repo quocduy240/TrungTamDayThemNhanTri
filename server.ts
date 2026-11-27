@@ -80,6 +80,10 @@ import {
   slugifyVietnamese,
 } from './src/lib/contentStudioEngine.ts';
 import {
+  sanitizeHexColor as sanitizeSpecialHex,
+  sanitizeShiftKeys as sanitizeSpecialShiftKeys,
+} from './src/lib/timetableSpecialBlocks.ts';
+import {
   DEFAULT_FALLBACK_THUMBNAIL,
   fetchSocialUrlMetadata,
   fetchYouTubeChannelRssPosts,
@@ -337,6 +341,7 @@ app.get('/api/v1/bootstrap', (_req, res) => {
     socialPosts: (db.socialPosts || []).filter((p) => p.visible),
     editorialArticles: (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
     promoBanners: (db.promoBanners || []).filter((b) => b.active),
+    timetableSpecialBlocks: (db.timetableSpecialBlocks || []).filter((b) => b.active),
     notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
   });
 });
@@ -1063,6 +1068,9 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     promoBanners: isManagerUser
       ? (db.promoBanners || [])
       : (db.promoBanners || []).filter((b) => b.active),
+    timetableSpecialBlocks: isManagerUser
+      ? (db.timetableSpecialBlocks || [])
+      : (db.timetableSpecialBlocks || []).filter((b) => b.active),
     notificationConfig: isAdminUser ? db.notificationConfig : undefined,
     myNotificationPref: getOrBuildUserNotificationPref(db, user),
     classCheckins: scopedCheckins,
@@ -4571,6 +4579,136 @@ app.delete('/api/v1/promo-banners/:id', requireAuth(['MANAGER']), (req: AuthedRe
   }
   saveDb(db);
   res.json({ deleted: true, banners: db.promoBanners });
+});
+
+// ============================================================
+// TIMETABLE SPECIAL OVERRIDE BLOCKS (NGHỈ / PHỤ ĐẠO / KIỂM TRA / SỰ KIỆN)
+// ============================================================
+
+app.post('/api/v1/timetable/special-blocks', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.timetableSpecialBlocks)) db.timetableSpecialBlocks = [];
+  const b = req.body || {};
+  const title = String(b.title || '').trim().slice(0, 120);
+  const shiftKeys = sanitizeSpecialShiftKeys(b.shiftKeys);
+  if (!title) {
+    res.status(400).json({ error: 'Vui lòng nhập tiêu đề Block đặc biệt.' });
+    return;
+  }
+  if (shiftKeys.length === 0) {
+    res.status(400).json({ error: 'Vui lòng tick chọn ít nhất 1 ca học trên Thời khóa biểu.' });
+    return;
+  }
+  const targetClasses: string[] = Array.isArray(b.targetClasses)
+    ? Array.from(
+        new Set<string>(
+          b.targetClasses
+            .map((c: unknown) => String(c || '').trim())
+            .filter((v: string) => v.length > 0),
+        ),
+      )
+    : [];
+
+  const block = {
+    id: `tsb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    templateKey: typeof b.templateKey === 'string' ? b.templateKey.slice(0, 60) : undefined,
+    blockType: (['NGHI', 'PHU_DAO', 'KIEM_TRA', 'SU_KIEN', 'CUSTOM'].includes(b.blockType)
+      ? b.blockType
+      : 'CUSTOM') as 'NGHI' | 'PHU_DAO' | 'KIEM_TRA' | 'SU_KIEN' | 'CUSTOM',
+    title,
+    subtitle: String(b.subtitle || '').trim().slice(0, 240),
+    shiftKeys,
+    targetClasses,
+    bgColor: sanitizeSpecialHex(b.bgColor, '#FEF2F2'),
+    borderColor: sanitizeSpecialHex(b.borderColor, '#DC2626'),
+    textColor: sanitizeSpecialHex(b.textColor, '#991B1B'),
+    accentColor: sanitizeSpecialHex(b.accentColor, '#DC2626'),
+    borderWidth: ([1, 2, 3].includes(Number(b.borderWidth)) ? Number(b.borderWidth) : 2) as 1 | 2 | 3,
+    borderStyle: (['solid', 'dashed', 'double'].includes(b.borderStyle) ? b.borderStyle : 'solid') as
+      | 'solid'
+      | 'dashed'
+      | 'double',
+    fontFamily: (['SANS', 'DISPLAY', 'SERIF', 'MONO'].includes(b.fontFamily) ? b.fontFamily : 'SANS') as
+      | 'SANS'
+      | 'DISPLAY'
+      | 'SERIF'
+      | 'MONO',
+    fontSize: (['SM', 'MD', 'LG'].includes(b.fontSize) ? b.fontSize : 'MD') as 'SM' | 'MD' | 'LG',
+    fontWeight: (['SEMIBOLD', 'BOLD', 'EXTRABOLD'].includes(b.fontWeight) ? b.fontWeight : 'BOLD') as
+      | 'SEMIBOLD'
+      | 'BOLD'
+      | 'EXTRABOLD',
+    priority: Math.max(1, Math.min(200, Number(b.priority) || 100)),
+    active: b.active !== false,
+    updatedAt: new Date().toISOString(),
+    updatedBy: req.user!.email,
+  };
+
+  db.timetableSpecialBlocks.unshift(block);
+  db.timetableUpdatedAt = block.updatedAt;
+  db.timetableVersion = (db.timetableVersion || 1) + 1;
+  saveDb(db);
+  res.status(201).json({ block, blocks: db.timetableSpecialBlocks });
+});
+
+app.patch('/api/v1/timetable/special-blocks/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.timetableSpecialBlocks)) db.timetableSpecialBlocks = [];
+  const block = db.timetableSpecialBlocks.find((item) => item.id === req.params.id);
+  if (!block) {
+    res.status(404).json({ error: 'Không tìm thấy Block đặc biệt cần cập nhật.' });
+    return;
+  }
+  const b = req.body || {};
+  if (typeof b.templateKey === 'string') block.templateKey = b.templateKey.slice(0, 60);
+  if (['NGHI', 'PHU_DAO', 'KIEM_TRA', 'SU_KIEN', 'CUSTOM'].includes(b.blockType)) block.blockType = b.blockType;
+  if (typeof b.title === 'string' && b.title.trim()) block.title = b.title.trim().slice(0, 120);
+  if (typeof b.subtitle === 'string') block.subtitle = b.subtitle.trim().slice(0, 240);
+  if (Array.isArray(b.shiftKeys)) {
+    const cleanShifts = sanitizeSpecialShiftKeys(b.shiftKeys);
+    if (cleanShifts.length === 0) {
+      res.status(400).json({ error: 'Block phải chọn ít nhất 1 ca học.' });
+      return;
+    }
+    block.shiftKeys = cleanShifts;
+  }
+  if (Array.isArray(b.targetClasses)) {
+    block.targetClasses = Array.from(
+      new Set(b.targetClasses.map((c: unknown) => String(c || '').trim()).filter(Boolean)),
+    );
+  }
+  if (b.bgColor) block.bgColor = sanitizeSpecialHex(b.bgColor, block.bgColor);
+  if (b.borderColor) block.borderColor = sanitizeSpecialHex(b.borderColor, block.borderColor);
+  if (b.textColor) block.textColor = sanitizeSpecialHex(b.textColor, block.textColor);
+  if (b.accentColor) block.accentColor = sanitizeSpecialHex(b.accentColor, block.accentColor);
+  if ([1, 2, 3].includes(Number(b.borderWidth))) block.borderWidth = Number(b.borderWidth) as 1 | 2 | 3;
+  if (['solid', 'dashed', 'double'].includes(b.borderStyle)) block.borderStyle = b.borderStyle;
+  if (['SANS', 'DISPLAY', 'SERIF', 'MONO'].includes(b.fontFamily)) block.fontFamily = b.fontFamily;
+  if (['SM', 'MD', 'LG'].includes(b.fontSize)) block.fontSize = b.fontSize;
+  if (['SEMIBOLD', 'BOLD', 'EXTRABOLD'].includes(b.fontWeight)) block.fontWeight = b.fontWeight;
+  if (b.priority !== undefined) block.priority = Math.max(1, Math.min(200, Number(b.priority) || 100));
+  if (typeof b.active === 'boolean') block.active = b.active;
+  block.updatedAt = new Date().toISOString();
+  block.updatedBy = req.user!.email;
+  db.timetableUpdatedAt = block.updatedAt;
+  db.timetableVersion = (db.timetableVersion || 1) + 1;
+  saveDb(db);
+  res.json({ block, blocks: db.timetableSpecialBlocks });
+});
+
+app.delete('/api/v1/timetable/special-blocks/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.timetableSpecialBlocks)) db.timetableSpecialBlocks = [];
+  const before = db.timetableSpecialBlocks.length;
+  db.timetableSpecialBlocks = db.timetableSpecialBlocks.filter((item) => item.id !== req.params.id);
+  if (db.timetableSpecialBlocks.length === before) {
+    res.status(404).json({ error: 'Không tìm thấy Block đặc biệt cần xóa.' });
+    return;
+  }
+  db.timetableUpdatedAt = new Date().toISOString();
+  db.timetableVersion = (db.timetableVersion || 1) + 1;
+  saveDb(db);
+  res.json({ deleted: true, blocks: db.timetableSpecialBlocks });
 });
 
 // ============================================================

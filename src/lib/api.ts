@@ -28,6 +28,7 @@ import type {
   TeacherLeave,
   TimetableChangeEvent,
   TimetableSlot,
+  TimetableSpecialBlock,
   TuitionRecord,
   UserNotificationPreference,
   UserRole,
@@ -174,6 +175,7 @@ export interface BootstrapPayload {
   courses: CoursePackage[];
   teachers: Teacher[];
   timetable?: TimetableSlot[];
+  timetableSpecialBlocks?: TimetableSpecialBlock[];
   exams?: NationalExam[];
   gallery: { id: string; url: string; title: string; caption: string }[];
   fanpagePosts?: FanpagePost[];
@@ -217,6 +219,7 @@ export interface WorkspacePayload {
   archivedStudents?: ArchivedStudentRecord[];
   archivedTeachers?: ArchivedTeacherRecord[];
   timetable: TimetableSlot[];
+  timetableSpecialBlocks?: TimetableSpecialBlock[];
   scores: ScoreRecord[];
   attendance: AttendanceRecord[];
   tuition: TuitionRecord[];

@@ -1816,6 +1816,11 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
 
                           <ParentTimetableView
                             slots={focusedTimetable}
+                            specialBlocks={
+                              workspace?.timetableSpecialBlocks ||
+                              bootstrap.timetableSpecialBlocks ||
+                              []
+                            }
                             student={focusedStudent}
                             title={`Thời khóa biểu của ${focusedStudent.fullName}`}
                             subtitle={`${focusedStudent.centerClass} · ${focusedTimetable.length} buổi/tuần · Mặc định bảng đồ họa theo môn học`}

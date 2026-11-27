@@ -33,10 +33,17 @@ import type {
   TeacherLeave,
   TimetableChangeEvent,
   TimetableSlot,
+  TimetableSpecialBlock,
 } from '../types';
 import { apiRequest } from '../lib/api';
 import { buildTimetableDocumentHtml } from '../lib/brandedDocumentExporter';
 import { ALL_SHIFT_KEYS, DAYS, SHIFT_ROWS, makeShiftKey } from '../lib/timetableEngine';
+import {
+  SPECIAL_BLOCK_TYPE_LABELS,
+  getSpecialBlockVisualStyle,
+  resolveHighestPrioritySpecialBlock,
+  sanitizeHexColor,
+} from '../lib/timetableSpecialBlocks';
 import {
   buildTeacherScheduleShareText,
   diffTeacherProfileFields,
@@ -58,6 +65,7 @@ interface TeacherSelfServiceHubProps {
   timetableUpdatedAt?: string;
   timetableVersion?: number;
   timetableChanges?: TimetableChangeEvent[];
+  specialBlocks?: TimetableSpecialBlock[];
   siteConfig?: Partial<SiteConfig>;
   onRefresh: () => Promise<void>;
 }
@@ -98,6 +106,7 @@ export const TeacherSelfServiceHub: React.FC<TeacherSelfServiceHubProps> = ({
   timetableUpdatedAt,
   timetableVersion,
   timetableChanges = [],
+  specialBlocks = [],
   siteConfig,
   onRefresh,
 }) => {
@@ -1102,8 +1111,33 @@ export const TeacherSelfServiceHub: React.FC<TeacherSelfServiceHubProps> = ({
                         <div className="text-[11px] text-slate-500 tabular-nums mt-0.5">{row.time}</div>
                       </td>
                       {DAYS.map((d) => {
+                        const cellKey = makeShiftKey(d.code, row.period, row.shift);
                         const cellSlots = mySlots.filter(
                           (sl) => sl.day === d.code && sl.period === row.period && sl.shift === row.shift,
+                        );
+                        const globalSpecial = resolveHighestPrioritySpecialBlock(
+                          specialBlocks.filter((b) => !b.targetClasses || b.targetClasses.length === 0),
+                          cellKey,
+                        );
+                        const slotSpecialMap = new Map<string, TimetableSpecialBlock>();
+                        const uncoveredSlots: TimetableSlot[] = [];
+                        for (const sl of cellSlots) {
+                          const matchedSpecial = resolveHighestPrioritySpecialBlock(
+                            specialBlocks,
+                            cellKey,
+                            sl.centerClass,
+                          );
+                          if (matchedSpecial) {
+                            slotSpecialMap.set(matchedSpecial.id, matchedSpecial);
+                          } else {
+                            uncoveredSlots.push(sl);
+                          }
+                        }
+                        if (globalSpecial && !slotSpecialMap.has(globalSpecial.id)) {
+                          slotSpecialMap.set(globalSpecial.id, globalSpecial);
+                        }
+                        const cellSpecials = Array.from(slotSpecialMap.values()).sort(
+                          (a, b) => b.priority - a.priority,
                         );
                         const isToday = d.code === todayCode;
                         return (
@@ -1113,13 +1147,55 @@ export const TeacherSelfServiceHub: React.FC<TeacherSelfServiceHubProps> = ({
                               isToday ? 'bg-blue-50/25' : 'bg-white'
                             }`}
                           >
-                            {cellSlots.length === 0 ? (
+                            {cellSpecials.length === 0 && uncoveredSlots.length === 0 ? (
                               <div className="h-20 flex items-center justify-center text-slate-300 select-none">
                                 —
                               </div>
                             ) : (
                               <div className="space-y-1.5">
-                                {cellSlots.map((sl) => {
+                                {cellSpecials.map((sb) => {
+                                  const vis = getSpecialBlockVisualStyle(sb);
+                                  const accent = sanitizeHexColor(
+                                    sb.accentColor,
+                                    vis.containerStyle.borderColor,
+                                  );
+                                  return (
+                                    <div
+                                      key={sb.id}
+                                      style={vis.containerStyle}
+                                      className="rounded-xl p-2.5 space-y-1"
+                                    >
+                                      <div className="flex items-center justify-between gap-1">
+                                        <span
+                                          style={{ color: accent }}
+                                          className="text-[10px] font-bold uppercase tracking-wider"
+                                        >
+                                          {SPECIAL_BLOCK_TYPE_LABELS[sb.blockType]}
+                                        </span>
+                                        <span
+                                          style={{ color: accent }}
+                                          className="text-[9px] font-bold opacity-85"
+                                        >
+                                          Ưu tiên
+                                        </span>
+                                      </div>
+                                      <div className={`${vis.titleSizeClass} ${vis.weightClass} leading-snug`}>
+                                        {sb.title}
+                                      </div>
+                                      {sb.subtitle && (
+                                        <div className={`${vis.subtitleSizeClass} opacity-85 leading-snug`}>
+                                          {sb.subtitle}
+                                        </div>
+                                      )}
+                                      {sb.targetClasses.length > 0 && (
+                                        <div className="text-[10px] opacity-80">
+                                          Áp dụng: {sb.targetClasses.join(', ')}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                                {uncoveredSlots.map((sl) => {
                                   const isOff = sl.status === 'OFF';
                                   const isAbsent = sl.status === 'TEACHER_ABSENT';
                                   const isSub = sl.status === 'SUBSTITUTED';

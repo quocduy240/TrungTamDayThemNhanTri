@@ -9,12 +9,30 @@ import {
   Printer,
   UserCheck,
 } from 'lucide-react';
-import type { DayOfWeek, SessionPeriod, ShiftCode, SiteConfig, Student, TimetableSlot } from '../types';
+import type {
+  DayOfWeek,
+  SessionPeriod,
+  ShiftCode,
+  SiteConfig,
+  Student,
+  TimetableSlot,
+  TimetableSpecialBlock,
+} from '../types';
 import { buildTimetableDocumentHtml } from '../lib/brandedDocumentExporter';
+import { makeShiftKey } from '../lib/timetableEngine';
+import {
+  SPECIAL_BLOCK_TYPE_LABELS,
+  getSpecialBlockVisualStyle,
+  resolveHighestPrioritySpecialBlock,
+  sanitizeHexColor,
+  specialBlockMatchesClass,
+} from '../lib/timetableSpecialBlocks';
 import { BrandedPrintModal } from './BrandedPrintModal';
 
 interface ParentTimetableViewProps {
   slots: TimetableSlot[];
+  specialBlocks?: TimetableSpecialBlock[];
+  classFilter?: string;
   student?: Student;
   title?: string;
   subtitle?: string;
@@ -138,6 +156,8 @@ function getSubjectTheme(slot: TimetableSlot): SubjectColorTheme {
 
 export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
   slots,
+  specialBlocks = [],
+  classFilter,
   student,
   title = 'Thời khóa biểu học tập cá nhân',
   subtitle,
@@ -148,6 +168,20 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
   const [viewMode, setViewMode] = useState<'MATRIX' | 'LIST'>(defaultView);
   const [selectedSlot, setSelectedSlot] = useState<TimetableSlot | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
+
+  const effectiveClass = student?.centerClass || classFilter;
+
+  const activeSpecialBlocks = useMemo(
+    () =>
+      specialBlocks.filter(
+        (b) =>
+          b.active &&
+          Array.isArray(b.shiftKeys) &&
+          b.shiftKeys.length > 0 &&
+          specialBlockMatchesClass(b, effectiveClass),
+      ),
+    [specialBlocks, effectiveClass],
+  );
 
   const todayKey = useMemo(() => getTodayVnDayOfWeek(), []);
 
@@ -263,7 +297,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
         </div>
       )}
 
-      {slots.length === 0 ? (
+      {slots.length === 0 && activeSpecialBlocks.length === 0 ? (
         <div className="py-10 text-center text-sm text-slate-500 border border-dashed border-slate-200 rounded-xl">
           {emptyMessage}
         </div>
@@ -342,6 +376,12 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
                       </td>
                       {DAYS.map((day) => {
                         const isToday = day.key === todayKey;
+                        const cellKey = makeShiftKey(day.key, row.period, row.shift);
+                        const overrideBlock = resolveHighestPrioritySpecialBlock(
+                          activeSpecialBlocks,
+                          cellKey,
+                          effectiveClass,
+                        );
                         const cellSlots = slots.filter(
                           (sl) =>
                             sl.day === day.key &&
@@ -355,7 +395,44 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
                               isToday ? 'bg-amber-50/30' : 'bg-white'
                             }`}
                           >
-                            {cellSlots.length === 0 ? (
+                            {overrideBlock ? (
+                              (() => {
+                                const vis = getSpecialBlockVisualStyle(overrideBlock);
+                                const accent = sanitizeHexColor(
+                                  overrideBlock.accentColor,
+                                  vis.containerStyle.borderColor,
+                                );
+                                return (
+                                  <div
+                                    style={vis.containerStyle}
+                                    className="w-full p-2.5 rounded-lg min-h-[68px] flex flex-col justify-center gap-1"
+                                  >
+                                    <div className="flex items-center justify-between gap-1">
+                                      <span
+                                        style={{ color: accent }}
+                                        className="text-[10px] font-bold uppercase tracking-wider"
+                                      >
+                                        {SPECIAL_BLOCK_TYPE_LABELS[overrideBlock.blockType]}
+                                      </span>
+                                      <span
+                                        style={{ color: accent }}
+                                        className="text-[9px] font-bold opacity-80"
+                                      >
+                                        Ưu tiên
+                                      </span>
+                                    </div>
+                                    <p className={`${vis.titleSizeClass} ${vis.weightClass} leading-snug`}>
+                                      {overrideBlock.title}
+                                    </p>
+                                    {overrideBlock.subtitle && (
+                                      <p className={`${vis.subtitleSizeClass} opacity-85 leading-snug`}>
+                                        {overrideBlock.subtitle}
+                                      </p>
+                                    )}
+                                  </div>
+                                );
+                              })()
+                            ) : cellSlots.length === 0 ? (
                               <div className="h-14 flex items-center justify-center text-slate-200 text-xs select-none">
                                 —
                               </div>
@@ -469,44 +546,77 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
         </div>
       ) : (
         /* Classic Chronological List View (Preserved as 2nd mode) */
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {sortedListSlots.map((sl) => {
-            const theme = getSubjectTheme(sl);
-            const isToday = sl.day === todayKey;
-            return (
-              <div
-                key={sl.id}
-                className={`p-3.5 rounded-xl border space-y-1.5 ${
-                  sl.status === 'TEACHER_ABSENT'
-                    ? 'bg-red-50 border-red-300'
-                    : isToday
-                      ? 'bg-amber-50/50 border-amber-300'
-                      : 'bg-slate-50/70 border-slate-200'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-extrabold text-blue-950 font-mono-num">
-                    {sl.day} · {sl.timeRange}
-                  </span>
-                  <span className="font-mono-num font-bold text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded">
-                    P.{sl.room}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${theme.dotColor}`} />
-                  <p className="text-sm font-bold text-slate-950">{sl.subject}</p>
-                </div>
-                <p className="text-xs text-slate-600">
-                  {sl.centerClass} · {sl.teacherName}
-                </p>
-                {sl.status === 'TEACHER_ABSENT' && (
-                  <p className="text-[11px] font-semibold text-red-700">
-                    Giáo viên đang báo nghỉ — Trung tâm đang bố trí dạy thay
-                  </p>
-                )}
-              </div>
-            );
-          })}
+        <div className="space-y-3">
+          {activeSpecialBlocks.length > 0 && (
+            <div className="grid sm:grid-cols-2 gap-3">
+              {activeSpecialBlocks.map((b) => {
+                const vis = getSpecialBlockVisualStyle(b);
+                const accent = sanitizeHexColor(b.accentColor, vis.containerStyle.borderColor);
+                return (
+                  <div key={b.id} style={vis.containerStyle} className="p-3.5 rounded-xl space-y-1">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span style={{ color: accent }} className="font-bold uppercase tracking-wider">
+                        {SPECIAL_BLOCK_TYPE_LABELS[b.blockType]} · Ưu tiên cao nhất
+                      </span>
+                      <span className="font-mono-num text-[11px] opacity-85">
+                        {b.shiftKeys.length} ca áp dụng
+                      </span>
+                    </div>
+                    <p className={`${vis.titleSizeClass} ${vis.weightClass}`}>{b.title}</p>
+                    {b.subtitle && <p className={`${vis.subtitleSizeClass} opacity-90`}>{b.subtitle}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {sortedListSlots
+              .filter(
+                (sl) =>
+                  !resolveHighestPrioritySpecialBlock(
+                    activeSpecialBlocks,
+                    makeShiftKey(sl.day, sl.period, sl.shift),
+                    sl.centerClass || effectiveClass,
+                  ),
+              )
+              .map((sl) => {
+                const theme = getSubjectTheme(sl);
+                const isToday = sl.day === todayKey;
+                return (
+                  <div
+                    key={sl.id}
+                    className={`p-3.5 rounded-xl border space-y-1.5 ${
+                      sl.status === 'TEACHER_ABSENT'
+                        ? 'bg-red-50 border-red-300'
+                        : isToday
+                          ? 'bg-amber-50/50 border-amber-300'
+                          : 'bg-slate-50/70 border-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-extrabold text-blue-950 font-mono-num">
+                        {sl.day} · {sl.timeRange}
+                      </span>
+                      <span className="font-mono-num font-bold text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded">
+                        P.{sl.room}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${theme.dotColor}`} />
+                      <p className="text-sm font-bold text-slate-950">{sl.subject}</p>
+                    </div>
+                    <p className="text-xs text-slate-600">
+                      {sl.centerClass} · {sl.teacherName}
+                    </p>
+                    {sl.status === 'TEACHER_ABSENT' && (
+                      <p className="text-[11px] font-semibold text-red-700">
+                        Giáo viên đang báo nghỉ — Trung tâm đang bố trí dạy thay
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
         </div>
       )}
 

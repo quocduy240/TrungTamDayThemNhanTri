@@ -7,6 +7,7 @@ import {
   Calendar,
   Check,
   DoorOpen,
+  ExternalLink,
   FileBarChart2,
   GraduationCap,
   Home,
@@ -1122,6 +1123,16 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={typeof window !== 'undefined' ? `${window.location.origin}/?view=frontend` : '/?view=frontend'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Mở giao diện Frontend trong tab trình duyệt mới"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 border border-blue-200 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-blue-900" />
+                  <span className="hidden sm:inline">Mở Frontend</span>
+                </a>
                 <button
                   type="button"
                   onClick={() => setLang((l) => (l === 'vi' ? 'en' : 'vi'))}
@@ -1192,6 +1203,9 @@ export default function App() {
                     timetableUpdatedAt={workspace.timetableUpdatedAt}
                     timetableVersion={workspace.timetableVersion}
                     timetableChanges={workspace.timetableChanges}
+                    specialBlocks={
+                      workspace.timetableSpecialBlocks || bootstrap.timetableSpecialBlocks || []
+                    }
                     siteConfig={siteConfig}
                     onRefresh={refreshWorkspace}
                   />

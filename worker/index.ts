@@ -69,6 +69,10 @@ import {
   slotToSnapshot,
 } from '../src/lib/teacherSelfService.ts';
 import {
+  sanitizeHexColor as sanitizeSpecialHex,
+  sanitizeShiftKeys as sanitizeSpecialShiftKeys,
+} from '../src/lib/timetableSpecialBlocks.ts';
+import {
   auditDatabaseHealth,
   cascadeSyncRoomUpdate,
   cascadeSyncStudentUpdate,
@@ -774,6 +778,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       socialPosts: (db.socialPosts || []).filter((p) => p.visible),
       editorialArticles: (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
       promoBanners: (db.promoBanners || []).filter((b) => b.active),
+      timetableSpecialBlocks: (db.timetableSpecialBlocks || []).filter((b) => b.active),
       notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
     });
   }
@@ -1434,6 +1439,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       promoBanners: isManagerUser
         ? (db.promoBanners || [])
         : (db.promoBanners || []).filter((b) => b.active),
+      timetableSpecialBlocks: isManagerUser
+        ? (db.timetableSpecialBlocks || [])
+        : (db.timetableSpecialBlocks || []).filter((b) => b.active),
       notificationConfig: isAdminUser ? db.notificationConfig : undefined,
       myNotificationPref: getOrBuildUserNotificationPref(db, user!),
       classCheckins: scopedCheckins,
@@ -4490,6 +4498,108 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     banner.updatedBy = user!.email;
     await saveState(env, db);
     return json({ banner, banners: db.promoBanners });
+  }
+
+  // TIMETABLE SPECIAL OVERRIDE BLOCKS
+  if (method === 'POST' && pathname === '/api/v1/timetable/special-blocks') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    if (!Array.isArray(db.timetableSpecialBlocks)) db.timetableSpecialBlocks = [];
+    const b = await readJson<Record<string, unknown>>();
+    const title = String(b.title || '').trim().slice(0, 120);
+    const shiftKeys = sanitizeSpecialShiftKeys(b.shiftKeys);
+    if (!title) return json({ error: 'Vui lòng nhập tiêu đề Block đặc biệt.' }, 400);
+    if (shiftKeys.length === 0) return json({ error: 'Vui lòng tick chọn ít nhất 1 ca học.' }, 400);
+    const targetClasses = Array.isArray(b.targetClasses)
+      ? Array.from(new Set(b.targetClasses.map((c) => String(c || '').trim()).filter(Boolean)))
+      : [];
+    const block = {
+      id: `tsb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      templateKey: typeof b.templateKey === 'string' ? b.templateKey.slice(0, 60) : undefined,
+      blockType: (['NGHI', 'PHU_DAO', 'KIEM_TRA', 'SU_KIEN', 'CUSTOM'].includes(String(b.blockType))
+        ? b.blockType
+        : 'CUSTOM') as 'NGHI' | 'PHU_DAO' | 'KIEM_TRA' | 'SU_KIEN' | 'CUSTOM',
+      title,
+      subtitle: String(b.subtitle || '').trim().slice(0, 240),
+      shiftKeys,
+      targetClasses,
+      bgColor: sanitizeSpecialHex(b.bgColor, '#FEF2F2'),
+      borderColor: sanitizeSpecialHex(b.borderColor, '#DC2626'),
+      textColor: sanitizeSpecialHex(b.textColor, '#991B1B'),
+      accentColor: sanitizeSpecialHex(b.accentColor, '#DC2626'),
+      borderWidth: ([1, 2, 3].includes(Number(b.borderWidth)) ? Number(b.borderWidth) : 2) as 1 | 2 | 3,
+      borderStyle: (['solid', 'dashed', 'double'].includes(String(b.borderStyle))
+        ? b.borderStyle
+        : 'solid') as 'solid' | 'dashed' | 'double',
+      fontFamily: (['SANS', 'DISPLAY', 'SERIF', 'MONO'].includes(String(b.fontFamily))
+        ? b.fontFamily
+        : 'SANS') as 'SANS' | 'DISPLAY' | 'SERIF' | 'MONO',
+      fontSize: (['SM', 'MD', 'LG'].includes(String(b.fontSize)) ? b.fontSize : 'MD') as 'SM' | 'MD' | 'LG',
+      fontWeight: (['SEMIBOLD', 'BOLD', 'EXTRABOLD'].includes(String(b.fontWeight))
+        ? b.fontWeight
+        : 'BOLD') as 'SEMIBOLD' | 'BOLD' | 'EXTRABOLD',
+      priority: Math.max(1, Math.min(200, Number(b.priority) || 100)),
+      active: b.active !== false,
+      updatedAt: new Date().toISOString(),
+      updatedBy: user!.email,
+    };
+    db.timetableSpecialBlocks.unshift(block);
+    db.timetableUpdatedAt = block.updatedAt;
+    db.timetableVersion = (db.timetableVersion || 1) + 1;
+    await saveState(env, db);
+    return json({ block, blocks: db.timetableSpecialBlocks }, 201);
+  }
+
+  const tsbMatch = pathname.match(/^\/api\/v1\/timetable\/special-blocks\/([^/]+)$/);
+  if (tsbMatch && (method === 'PATCH' || method === 'DELETE')) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    if (!Array.isArray(db.timetableSpecialBlocks)) db.timetableSpecialBlocks = [];
+    if (method === 'DELETE') {
+      db.timetableSpecialBlocks = db.timetableSpecialBlocks.filter((item) => item.id !== tsbMatch[1]);
+      db.timetableUpdatedAt = new Date().toISOString();
+      db.timetableVersion = (db.timetableVersion || 1) + 1;
+      await saveState(env, db);
+      return json({ deleted: true, blocks: db.timetableSpecialBlocks });
+    }
+    const block = db.timetableSpecialBlocks.find((item) => item.id === tsbMatch[1]);
+    if (!block) return json({ error: 'Không tìm thấy Block đặc biệt.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.templateKey === 'string') block.templateKey = b.templateKey.slice(0, 60);
+    if (['NGHI', 'PHU_DAO', 'KIEM_TRA', 'SU_KIEN', 'CUSTOM'].includes(String(b.blockType))) {
+      block.blockType = b.blockType as typeof block.blockType;
+    }
+    if (typeof b.title === 'string' && b.title.trim()) block.title = b.title.trim().slice(0, 120);
+    if (typeof b.subtitle === 'string') block.subtitle = b.subtitle.trim().slice(0, 240);
+    if (Array.isArray(b.shiftKeys)) {
+      const cleanShifts = sanitizeSpecialShiftKeys(b.shiftKeys);
+      if (cleanShifts.length === 0) return json({ error: 'Block phải chọn ít nhất 1 ca học.' }, 400);
+      block.shiftKeys = cleanShifts;
+    }
+    if (Array.isArray(b.targetClasses)) {
+      block.targetClasses = Array.from(
+        new Set(b.targetClasses.map((c) => String(c || '').trim()).filter(Boolean)),
+      );
+    }
+    if (b.bgColor) block.bgColor = sanitizeSpecialHex(b.bgColor, block.bgColor);
+    if (b.borderColor) block.borderColor = sanitizeSpecialHex(b.borderColor, block.borderColor);
+    if (b.textColor) block.textColor = sanitizeSpecialHex(b.textColor, block.textColor);
+    if (b.accentColor) block.accentColor = sanitizeSpecialHex(b.accentColor, block.accentColor);
+    if ([1, 2, 3].includes(Number(b.borderWidth))) block.borderWidth = Number(b.borderWidth) as 1 | 2 | 3;
+    if (['solid', 'dashed', 'double'].includes(String(b.borderStyle))) block.borderStyle = b.borderStyle as typeof block.borderStyle;
+    if (['SANS', 'DISPLAY', 'SERIF', 'MONO'].includes(String(b.fontFamily))) block.fontFamily = b.fontFamily as typeof block.fontFamily;
+    if (['SM', 'MD', 'LG'].includes(String(b.fontSize))) block.fontSize = b.fontSize as typeof block.fontSize;
+    if (['SEMIBOLD', 'BOLD', 'EXTRABOLD'].includes(String(b.fontWeight))) block.fontWeight = b.fontWeight as typeof block.fontWeight;
+    if (b.priority !== undefined) block.priority = Math.max(1, Math.min(200, Number(b.priority) || 100));
+    if (typeof b.active === 'boolean') block.active = b.active;
+    block.updatedAt = new Date().toISOString();
+    block.updatedBy = user!.email;
+    db.timetableUpdatedAt = block.updatedAt;
+    db.timetableVersion = (db.timetableVersion || 1) + 1;
+    await saveState(env, db);
+    return json({ block, blocks: db.timetableSpecialBlocks });
   }
 
   return json({ error: 'Không tìm thấy endpoint API.' }, 404);

@@ -12,6 +12,7 @@ import {
   Download,
   FileSpreadsheet,
   GripVertical,
+  Layers,
   Mail,
   Pencil,
   Plus,
@@ -61,7 +62,15 @@ import {
   studentBelongsToClass,
   type MoveOrSwapEvaluation,
 } from '../lib/timetableEngine';
+import {
+  SPECIAL_BLOCK_TYPE_LABELS,
+  getSpecialBlockVisualStyle,
+  resolveActiveSpecialBlocksForCell,
+  resolveHighestPrioritySpecialBlock,
+  sanitizeHexColor,
+} from '../lib/timetableSpecialBlocks';
 import { ParentTimetableView } from './ParentTimetableView';
+import { TimetableSpecialBlockStudio } from './TimetableSpecialBlockStudio';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { TimetablePdfDispatchModal } from './TimetablePdfDispatchModal';
 import { InlineErrorAlert } from './ContextualReloginBanner';
@@ -93,7 +102,7 @@ const CLASS_OPTIONS = [
   'Lớp 12',
 ];
 
-type SubTab = 'GRID' | 'ROOMS' | 'TEACHERS' | 'LEAVES' | 'PERSONAL';
+type SubTab = 'GRID' | 'SPECIAL_BLOCKS' | 'ROOMS' | 'TEACHERS' | 'LEAVES' | 'PERSONAL';
 
 interface SubstituteSuggestion {
   slot: TimetableSlot;
@@ -137,6 +146,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
   const isTeacher = workspace.user.role === 'TEACHER';
 
   const [activeTab, setActiveTab] = useState<SubTab>(canEdit ? 'GRID' : 'PERSONAL');
+  const [editingSpecialBlockId, setEditingSpecialBlockId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -974,6 +984,11 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
     setTimeout(() => setCopiedZalo(false), 2500);
   }
 
+  const activeSpecialBlocksCount = useMemo(
+    () => (workspace.timetableSpecialBlocks || []).filter((b) => b.active).length,
+    [workspace.timetableSpecialBlocks],
+  );
+
   const visibleTabs: { id: SubTab; label: string; icon: React.ReactNode; badge?: number }[] = [
     ...(canEdit
       ? [
@@ -981,6 +996,12 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
             id: 'GRID' as SubTab,
             label: 'Lưới Kéo-Thả TKB',
             icon: <Calendar className="w-3.5 h-3.5" />,
+          },
+          {
+            id: 'SPECIAL_BLOCKS' as SubTab,
+            label: 'Block Đặc biệt (NGHỈ / PHỤ ĐẠO)',
+            icon: <Layers className="w-3.5 h-3.5" />,
+            badge: activeSpecialBlocksCount > 0 ? activeSpecialBlocksCount : undefined,
           },
           {
             id: 'ROOMS' as SubTab,
@@ -1053,6 +1074,17 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
               >
                 <Printer className="w-4 h-4 text-amber-700" />
                 <span>Xuất &amp; Gửi PDF Cá nhân hóa</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingSpecialBlockId(null);
+                  setActiveTab('SPECIAL_BLOCKS');
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-red-950 bg-red-50 border border-red-200 hover:bg-red-100 rounded-lg whitespace-nowrap cursor-pointer"
+              >
+                <Layers className="w-4 h-4 text-red-700" />
+                <span>Chèn Block NGHỈ / PHỤ ĐẠO</span>
               </button>
               <button
                 type="button"
@@ -1300,6 +1332,25 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                       const cellSlots = filteredSlots.filter(
                         (s) => s.period === row.period && s.shift === row.shift && s.day === day.code,
                       );
+                      const effectiveClassFilter =
+                        classFilter === 'Tất cả lớp' ? undefined : classFilter;
+                      const cellSpecialBlocks = resolveActiveSpecialBlocksForCell(
+                        workspace.timetableSpecialBlocks,
+                        cellKey,
+                        effectiveClassFilter,
+                      );
+                      const displayedSpecialBlocks = effectiveClassFilter
+                        ? cellSpecialBlocks.slice(0, 1)
+                        : cellSpecialBlocks;
+                      const uncoveredSlots = cellSlots.filter(
+                        (sl) =>
+                          !resolveHighestPrioritySpecialBlock(
+                            workspace.timetableSpecialBlocks,
+                            cellKey,
+                            sl.centerClass,
+                          ),
+                      );
+                      const coveredCount = cellSlots.length - uncoveredSlots.length;
 
                       // Live cell validation while dragging
                       let cellEval: MoveOrSwapEvaluation | null = null;
@@ -1332,7 +1383,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                             : isHovered
                               ? 'bg-red-100/70 ring-2 ring-inset ring-red-400'
                               : 'bg-red-50/25'
-                          : day.code === 'T3' && cellSlots.length === 0
+                          : day.code === 'T3' && cellSlots.length === 0 && displayedSpecialBlocks.length === 0
                             ? 'bg-slate-50/40'
                             : '';
 
@@ -1371,7 +1422,63 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                             </div>
                           )}
 
-                          {cellSlots.map((slot) => {
+                          {displayedSpecialBlocks.map((sb) => {
+                            const vis = getSpecialBlockVisualStyle(sb);
+                            const accent = sanitizeHexColor(
+                              sb.accentColor,
+                              vis.containerStyle.borderColor,
+                            );
+                            return (
+                              <button
+                                key={sb.id}
+                                type="button"
+                                onClick={() => {
+                                  setEditingSpecialBlockId(sb.id);
+                                  setActiveTab('SPECIAL_BLOCKS');
+                                }}
+                                style={vis.containerStyle}
+                                title="Bấm để chỉnh sửa Block đặc biệt này"
+                                className="w-full text-left p-2.5 rounded-lg transition-transform hover:scale-[1.01] cursor-pointer space-y-1"
+                              >
+                                <div className="flex items-center justify-between gap-1">
+                                  <span
+                                    style={{ color: accent }}
+                                    className="text-[10px] font-bold uppercase tracking-wider truncate"
+                                  >
+                                    {SPECIAL_BLOCK_TYPE_LABELS[sb.blockType]}
+                                  </span>
+                                  <span
+                                    style={{ color: accent }}
+                                    className="text-[10px] font-mono-num font-bold shrink-0"
+                                  >
+                                    P{sb.priority}
+                                  </span>
+                                </div>
+                                <p className={`${vis.titleSizeClass} ${vis.weightClass} leading-snug`}>
+                                  {sb.title}
+                                </p>
+                                {sb.subtitle && (
+                                  <p className={`${vis.subtitleSizeClass} opacity-85 leading-snug`}>
+                                    {sb.subtitle}
+                                  </p>
+                                )}
+                                <p className="text-[10px] opacity-80 pt-0.5">
+                                  {sb.targetClasses.length === 0
+                                    ? 'Toàn trung tâm'
+                                    : sb.targetClasses.join(', ')}
+                                </p>
+                              </button>
+                            );
+                          })}
+
+                          {coveredCount > 0 && (
+                            <p className="text-[10px] font-medium text-slate-500 px-1">
+                              Ưu tiên cao nhất · Đang thay thế{' '}
+                              <span className="font-mono-num font-bold">{coveredCount}</span> ca thường
+                            </p>
+                          )}
+
+                          {uncoveredSlots.map((slot) => {
                             const matchedLeave = findTeacherLeave(
                               slot.teacherId,
                               slot.day,
@@ -1510,7 +1617,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                             );
                           })}
 
-                          {cellSlots.length === 0 && !draggedSlot && (
+                          {cellSlots.length === 0 && displayedSpecialBlocks.length === 0 && !draggedSlot && (
                             <button
                               type="button"
                               onClick={() => openCreateModal({ day: day.code, period: row.period, shift: row.shift })}
@@ -2558,6 +2665,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
 
             <ParentTimetableView
               slots={personalSlots}
+              specialBlocks={workspace.timetableSpecialBlocks || []}
               student={personalPerspective === 'STUDENT' ? selectedStudent : undefined}
               title={
                 personalPerspective === 'STUDENT' && selectedStudent
@@ -2611,6 +2719,19 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* TAB: SPECIAL OVERRIDE BLOCKS STUDIO (NGHỈ / PHỤ ĐẠO / THI / SỰ KIỆN)  */}
+      {/* ===================================================================== */}
+      {activeTab === 'SPECIAL_BLOCKS' && canEdit && (
+        <TimetableSpecialBlockStudio
+          blocks={workspace.timetableSpecialBlocks || []}
+          availableClasses={CLASS_OPTIONS.filter((c) => c !== 'Tất cả lớp')}
+          initialEditBlockId={editingSpecialBlockId}
+          onRefresh={onRefresh}
+          onJumpToGrid={() => setActiveTab('GRID')}
+        />
       )}
 
       {/* ===================================================================== */}

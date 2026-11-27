@@ -715,6 +715,32 @@ export interface PromoBanner {
   updatedBy?: string;
 }
 
+export type TimetableSpecialBlockType = 'NGHI' | 'PHU_DAO' | 'KIEM_TRA' | 'SU_KIEN' | 'CUSTOM';
+export type TimetableSpecialBlockFontFamily = 'SANS' | 'DISPLAY' | 'SERIF' | 'MONO';
+
+export interface TimetableSpecialBlock {
+  id: string;
+  templateKey?: string;
+  blockType: TimetableSpecialBlockType;
+  title: string;
+  subtitle?: string;
+  shiftKeys: string[];
+  targetClasses: string[];
+  bgColor: string;
+  borderColor: string;
+  textColor: string;
+  accentColor: string;
+  borderWidth: 1 | 2 | 3;
+  borderStyle: 'solid' | 'dashed' | 'double';
+  fontFamily: TimetableSpecialBlockFontFamily;
+  fontSize: 'SM' | 'MD' | 'LG';
+  fontWeight: 'SEMIBOLD' | 'BOLD' | 'EXTRABOLD';
+  priority: number;
+  active: boolean;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
 export interface DatabaseState {
   courses: CoursePackage[];
   rooms: Room[];
@@ -725,6 +751,7 @@ export interface DatabaseState {
   archivedStudents?: ArchivedStudentRecord[];
   archivedTeachers?: ArchivedTeacherRecord[];
   timetable: TimetableSlot[];
+  timetableSpecialBlocks?: TimetableSpecialBlock[];
   scores: ScoreRecord[];
   attendance: AttendanceRecord[];
   tuition: TuitionRecord[];

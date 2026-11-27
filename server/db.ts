@@ -73,6 +73,9 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
   if (!Array.isArray(parsed.promoBanners) || parsed.promoBanners.length === 0) {
     parsed.promoBanners = structuredClone(DEFAULT_PROMO_BANNERS);
   }
+  if (!Array.isArray(parsed.timetableSpecialBlocks)) {
+    parsed.timetableSpecialBlocks = [];
+  }
   parsed.teachers = (parsed.teachers || []).map((t) => ({
     ...t,
     teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
