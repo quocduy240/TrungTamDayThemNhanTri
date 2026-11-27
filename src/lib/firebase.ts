@@ -1,5 +1,11 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
 import {
   doc,
   getDocFromServer,
@@ -17,12 +23,17 @@ export const ADMIN_EMAIL_SECONDARY = 'trungtamnhantri2026@gmail.com';
 export const ADMIN_EMAILS: readonly string[] = [ADMIN_EMAIL, ADMIN_EMAIL_SECONDARY];
 export const OFFICIAL_DOMAIN = 'daythemnhantri.com';
 
+// Configured Google Workspace scopes (least-privilege read-only Drive access for personal images & list files)
+export const SCOPES = ['https://www.googleapis.com/auth/drive.readonly'] as const;
+
 export function isBootstrappedAdminEmail(email?: string | null): boolean {
   if (!email) return false;
   return ADMIN_EMAILS.includes(email.trim().toLowerCase());
 }
 
 const app = initializeApp(firebaseConfig);
+
+const firestoreDatabaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
 
 function createFirestoreInstance(): Firestore {
   try {
@@ -33,10 +44,10 @@ function createFirestoreInstance(): Firestore {
           tabManager: persistentMultipleTabManager(),
         }),
       },
-      firebaseConfig.firestoreDatabaseId,
+      firestoreDatabaseId,
     );
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    return firestoreDatabaseId ? getFirestore(app, firestoreDatabaseId) : getFirestore(app);
   }
 }
 
@@ -46,11 +57,59 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+// Dedicated Drive-scoped GoogleAuthProvider reusing existing Firebase app & auth instance
+const googleDriveProvider = new GoogleAuthProvider();
+SCOPES.forEach((scope) => googleDriveProvider.addScope(scope));
+googleDriveProvider.setCustomParameters({ prompt: 'select_account' });
+
+// Keep Google Drive OAuth access token strictly in memory (never localStorage/sessionStorage)
+let cachedDriveAccessToken: string | null = null;
+let cachedDriveAccountEmail: string | null = null;
+
+onAuthStateChanged(auth, (fbUser) => {
+  if (!fbUser) {
+    cachedDriveAccessToken = null;
+    cachedDriveAccountEmail = null;
+  }
+});
+
 export async function signInWithGmailPopup() {
   return signInWithPopup(auth, googleProvider);
 }
 
+export async function connectGoogleDriveWithPopup(): Promise<{
+  accessToken: string;
+  email: string;
+}> {
+  const result = await signInWithPopup(auth, googleDriveProvider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (!credential?.accessToken) {
+    throw new Error('Chưa nhận được quyền truy cập Google Drive. Vui lòng thử kết nối lại.');
+  }
+  cachedDriveAccessToken = credential.accessToken;
+  cachedDriveAccountEmail = result.user.email || '';
+  return {
+    accessToken: cachedDriveAccessToken,
+    email: cachedDriveAccountEmail,
+  };
+}
+
+export function getGoogleDriveAccessToken(): string | null {
+  return cachedDriveAccessToken;
+}
+
+export function getGoogleDriveAccountEmail(): string | null {
+  return cachedDriveAccountEmail;
+}
+
+export function clearGoogleDriveToken(): void {
+  cachedDriveAccessToken = null;
+  cachedDriveAccountEmail = null;
+}
+
 export async function signOutGmail() {
+  cachedDriveAccessToken = null;
+  cachedDriveAccountEmail = null;
   return signOut(auth);
 }
 

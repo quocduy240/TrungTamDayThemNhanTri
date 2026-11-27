@@ -4,6 +4,11 @@ import type { DatabaseState } from '../src/types.ts';
 import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
 import { buildDeterministicQrToken } from '../src/lib/smartCodeAndQr.ts';
 import { ensureSystemPrintTemplates, normalizeLookupKey } from '../src/lib/workspaceIntegrity.ts';
+import {
+  DEFAULT_EDITORIAL_ARTICLES,
+  DEFAULT_PROMO_BANNERS,
+  ensureDefaultReusableBlocks,
+} from '../src/lib/contentStudioEngine.ts';
 import { INITIAL_DB } from './seedData.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -54,6 +59,19 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
   }
   if (!Array.isArray(parsed.timetableChanges)) {
     parsed.timetableChanges = [];
+  }
+  if (!Array.isArray(parsed.archivedStudents)) {
+    parsed.archivedStudents = [];
+  }
+  if (!Array.isArray(parsed.archivedTeachers)) {
+    parsed.archivedTeachers = [];
+  }
+  if (!Array.isArray(parsed.editorialArticles) || parsed.editorialArticles.length === 0) {
+    parsed.editorialArticles = structuredClone(DEFAULT_EDITORIAL_ARTICLES);
+  }
+  parsed.reusableBlocks = ensureDefaultReusableBlocks(parsed.reusableBlocks);
+  if (!Array.isArray(parsed.promoBanners) || parsed.promoBanners.length === 0) {
+    parsed.promoBanners = structuredClone(DEFAULT_PROMO_BANNERS);
   }
   parsed.teachers = (parsed.teachers || []).map((t) => ({
     ...t,

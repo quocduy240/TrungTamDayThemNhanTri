@@ -71,6 +71,15 @@ import {
   slotToSnapshot,
 } from './src/lib/teacherSelfService.ts';
 import {
+  DEFAULT_EDITORIAL_ARTICLES,
+  DEFAULT_PROMO_BANNERS,
+  ensureDefaultReusableBlocks,
+  isExactConfirmNameMatch,
+  sanitizeRichHtml,
+  sanitizeSafeUrl,
+  slugifyVietnamese,
+} from './src/lib/contentStudioEngine.ts';
+import {
   DEFAULT_FALLBACK_THUMBNAIL,
   fetchSocialUrlMetadata,
   fetchYouTubeChannelRssPosts,
@@ -326,6 +335,8 @@ app.get('/api/v1/bootstrap', (_req, res) => {
     authPolicy: getPolicy(db),
     socialChannels: (db.socialChannels || []).filter((c) => c.active),
     socialPosts: (db.socialPosts || []).filter((p) => p.visible),
+    editorialArticles: (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
+    promoBanners: (db.promoBanners || []).filter((b) => b.active),
     notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
   });
 });
@@ -1031,6 +1042,8 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     teacherLeaves,
     families,
     students,
+    archivedStudents: isManagerUser ? (db.archivedStudents || []) : [],
+    archivedTeachers: isManagerUser ? (db.archivedTeachers || []) : [],
     timetable,
     scores,
     attendance,
@@ -1043,6 +1056,13 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     auditLogs: isAdminUser ? (db.auditLogs || []) : [],
     socialChannels: db.socialChannels || [],
     socialPosts: isManagerUser ? (db.socialPosts || []) : (db.socialPosts || []).filter((p) => p.visible),
+    editorialArticles: isManagerUser
+      ? (db.editorialArticles || [])
+      : (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
+    reusableBlocks: isManagerUser ? ensureDefaultReusableBlocks(db.reusableBlocks) : [],
+    promoBanners: isManagerUser
+      ? (db.promoBanners || [])
+      : (db.promoBanners || []).filter((b) => b.active),
     notificationConfig: isAdminUser ? db.notificationConfig : undefined,
     myNotificationPref: getOrBuildUserNotificationPref(db, user),
     classCheckins: scopedCheckins,
@@ -4175,6 +4195,382 @@ app.post('/api/v1/system/data-health/repair', requireAuth(['ADMIN']), (req: Auth
   });
   saveDb(db);
   res.json(result);
+});
+
+// ============================================================
+// SAFE 2-STEP DELETE & ARCHIVE (STUDENTS & TEACHERS)
+// ============================================================
+
+app.delete('/api/v1/students/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = db.students.find((s) => s.id === req.params.id);
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy hồ sơ học sinh.' });
+    return;
+  }
+  const confirmName = String(req.body?.confirmName || '');
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!isExactConfirmNameMatch(confirmName, student.fullName)) {
+    res.status(400).json({
+      error: `Tên xác nhận chưa khớp. Vui lòng nhập chính xác "${student.fullName}" để thực hiện xóa hồ sơ.`,
+    });
+    return;
+  }
+
+  const preservedScoresCount = db.scores.filter((sc) => sc.studentId === student.id).length;
+  const preservedTuitionCount = db.tuition.filter((t) => t.studentId === student.id).length;
+
+  const archived = {
+    id: `arch-st-${Date.now()}`,
+    originalId: student.id,
+    code: student.code,
+    fullName: student.fullName,
+    centerClass: student.centerClass,
+    parentName: student.parentName,
+    parentPhone: student.parentPhone,
+    archivedAt: new Date().toISOString(),
+    archivedBy: req.user!.email,
+    reason: reason || 'Xóa theo yêu cầu quản trị (đã bảo lưu lịch sử tài chính & điểm số)',
+    preservedScoresCount,
+    preservedTuitionCount,
+    snapshot: structuredClone(student),
+  };
+
+  if (!Array.isArray(db.archivedStudents)) db.archivedStudents = [];
+  db.archivedStudents.unshift(archived);
+  db.students = db.students.filter((s) => s.id !== student.id);
+
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'STUDENT_ARCHIVED_DELETED',
+    target: student.id,
+    targetLabel: `${student.fullName} (${student.code})`,
+    detail: `Đã xóa hồ sơ học sinh khỏi danh sách hoạt động & bảo lưu ${preservedScoresCount} điểm, ${preservedTuitionCount} phiếu học phí. Lý do: ${archived.reason}`,
+  });
+
+  saveDb(db);
+  res.json({
+    deleted: true,
+    archived,
+    preservedScoresCount,
+    preservedTuitionCount,
+  });
+});
+
+app.delete('/api/v1/teachers/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const teacher = db.teachers.find((t) => t.id === req.params.id);
+  if (!teacher) {
+    res.status(404).json({ error: 'Không tìm thấy hồ sơ giáo viên.' });
+    return;
+  }
+  const confirmName = String(req.body?.confirmName || '');
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!isExactConfirmNameMatch(confirmName, teacher.name)) {
+    res.status(400).json({
+      error: `Tên xác nhận chưa khớp. Vui lòng nhập chính xác "${teacher.name}" để thực hiện xóa hồ sơ giáo viên.`,
+    });
+    return;
+  }
+
+  const affectedSlots = db.timetable.filter((sl) => sl.teacherId === teacher.id);
+  db.timetable = db.timetable.filter((sl) => sl.teacherId !== teacher.id);
+  db.teacherLeaves = db.teacherLeaves.filter((lv) => lv.teacherId !== teacher.id);
+
+  if (affectedSlots.length > 0) {
+    recordTimetableChange(db, {
+      action: 'REMOVED',
+      updatedBy: req.user!.email,
+      summary: `Gỡ ${affectedSlots.length} ca TKB của ${teacher.shortName} sau khi xóa & lưu trữ hồ sơ giáo viên`,
+      affectedTeacherIds: [teacher.id],
+    });
+  }
+
+  const archived = {
+    id: `arch-tc-${Date.now()}`,
+    originalId: teacher.id,
+    name: teacher.name,
+    shortName: teacher.shortName,
+    teacherGroup: teacher.teacherGroup,
+    subjects: [...(teacher.subjects || [])],
+    archivedAt: new Date().toISOString(),
+    archivedBy: req.user!.email,
+    reason: reason || 'Xóa theo yêu cầu quản trị (đã bảo lưu hồ sơ lưu trữ)',
+    removedTimetableSlotsCount: affectedSlots.length,
+    snapshot: structuredClone(teacher),
+  };
+
+  if (!Array.isArray(db.archivedTeachers)) db.archivedTeachers = [];
+  db.archivedTeachers.unshift(archived);
+  db.teachers = db.teachers.filter((t) => t.id !== teacher.id);
+
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'TEACHER_ARCHIVED_DELETED',
+    target: teacher.id,
+    targetLabel: `${teacher.name} (${teacher.shortName})`,
+    detail: `Đã xóa hồ sơ giáo viên khỏi danh sách hoạt động & gỡ ${affectedSlots.length} ca trên TKB. Lý do: ${archived.reason}`,
+  });
+
+  saveDb(db);
+  res.json({
+    deleted: true,
+    archived,
+    removedTimetableSlotsCount: affectedSlots.length,
+  });
+});
+
+// ============================================================
+// EDITORIAL ARTICLES (GOOGLE DOCS-STYLE RICH EDITOR)
+// ============================================================
+
+app.post('/api/v1/articles', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const title = String(req.body?.title || '').trim();
+  if (title.length < 3) {
+    res.status(400).json({ error: 'Vui lòng nhập tiêu đề bài viết (tối thiểu 3 ký tự).' });
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const status = req.body?.status === 'DRAFT' ? 'DRAFT' : 'PUBLISHED';
+  const article = {
+    id: `art-${Date.now().toString(36)}`,
+    title: title.slice(0, 220),
+    slug: slugifyVietnamese(title),
+    category: String(req.body?.category || 'Tin tức & Thông báo').trim().slice(0, 80),
+    excerpt: String(req.body?.excerpt || '').trim().slice(0, 420),
+    coverImageUrl: sanitizeSafeUrl(String(req.body?.coverImageUrl || ''), true),
+    contentHtml: sanitizeRichHtml(String(req.body?.contentHtml || '')),
+    authorName: req.user!.name || 'Ban Quản Trị',
+    authorEmail: req.user!.email,
+    status: status as 'DRAFT' | 'PUBLISHED',
+    featured: Boolean(req.body?.featured),
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    publishedAt: status === 'PUBLISHED' ? nowIso : undefined,
+  };
+  if (!Array.isArray(db.editorialArticles)) db.editorialArticles = structuredClone(DEFAULT_EDITORIAL_ARTICLES);
+  db.editorialArticles.unshift(article);
+  saveDb(db);
+  res.status(201).json({ article });
+});
+
+app.patch('/api/v1/articles/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.editorialArticles)) db.editorialArticles = [];
+  const article = db.editorialArticles.find((a) => a.id === req.params.id);
+  if (!article) {
+    res.status(404).json({ error: 'Không tìm thấy bài viết.' });
+    return;
+  }
+  if (typeof req.body?.title === 'string' && req.body.title.trim().length >= 3) {
+    article.title = req.body.title.trim().slice(0, 220);
+    article.slug = slugifyVietnamese(article.title);
+  }
+  if (typeof req.body?.category === 'string') article.category = req.body.category.trim().slice(0, 80);
+  if (typeof req.body?.excerpt === 'string') article.excerpt = req.body.excerpt.trim().slice(0, 420);
+  if (typeof req.body?.coverImageUrl === 'string') {
+    article.coverImageUrl = sanitizeSafeUrl(req.body.coverImageUrl, true);
+  }
+  if (typeof req.body?.contentHtml === 'string') {
+    article.contentHtml = sanitizeRichHtml(req.body.contentHtml);
+  }
+  if (req.body?.status === 'DRAFT' || req.body?.status === 'PUBLISHED') {
+    article.status = req.body.status;
+    if (article.status === 'PUBLISHED' && !article.publishedAt) {
+      article.publishedAt = new Date().toISOString();
+    }
+  }
+  if (typeof req.body?.featured === 'boolean') article.featured = req.body.featured;
+  article.updatedAt = new Date().toISOString();
+  saveDb(db);
+  res.json({ article });
+});
+
+app.delete('/api/v1/articles/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.editorialArticles)) db.editorialArticles = [];
+  const before = db.editorialArticles.length;
+  db.editorialArticles = db.editorialArticles.filter((a) => a.id !== req.params.id);
+  if (db.editorialArticles.length === before) {
+    res.status(404).json({ error: 'Không tìm thấy bài viết cần xóa.' });
+    return;
+  }
+  saveDb(db);
+  res.json({ deleted: true });
+});
+
+// ============================================================
+// REUSABLE STATIC CONTENT BLOCKS (5 DEFAULTS + CUSTOM CRUD)
+// ============================================================
+
+app.post('/api/v1/content-blocks', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.reusableBlocks = ensureDefaultReusableBlocks(db.reusableBlocks);
+  const name = String(req.body?.name || '').trim();
+  if (name.length < 2) {
+    res.status(400).json({ error: 'Vui lòng nhập tên Block tĩnh.' });
+    return;
+  }
+  const validCats = ['CONTACT', 'SCHEDULE', 'TUITION_OFFER', 'CTA', 'PARENT_NOTE', 'CUSTOM'];
+  const category = validCats.includes(req.body?.category) ? req.body.category : 'CUSTOM';
+  const block = {
+    id: `blk-${Date.now().toString(36)}`,
+    name: name.slice(0, 120),
+    category,
+    description: String(req.body?.description || '').trim().slice(0, 260),
+    htmlContent: sanitizeRichHtml(String(req.body?.htmlContent || '')),
+    isSystemDefault: false,
+    updatedAt: new Date().toISOString(),
+    updatedBy: req.user!.email,
+  };
+  db.reusableBlocks.unshift(block);
+  saveDb(db);
+  res.status(201).json({ block, blocks: db.reusableBlocks });
+});
+
+app.patch('/api/v1/content-blocks/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.reusableBlocks = ensureDefaultReusableBlocks(db.reusableBlocks);
+  const block = db.reusableBlocks.find((b) => b.id === req.params.id);
+  if (!block) {
+    res.status(404).json({ error: 'Không tìm thấy Block tĩnh.' });
+    return;
+  }
+  if (typeof req.body?.name === 'string' && req.body.name.trim().length >= 2) {
+    block.name = req.body.name.trim().slice(0, 120);
+  }
+  const validCats = ['CONTACT', 'SCHEDULE', 'TUITION_OFFER', 'CTA', 'PARENT_NOTE', 'CUSTOM'];
+  if (validCats.includes(req.body?.category)) block.category = req.body.category;
+  if (typeof req.body?.description === 'string') block.description = req.body.description.trim().slice(0, 260);
+  if (typeof req.body?.htmlContent === 'string') block.htmlContent = sanitizeRichHtml(req.body.htmlContent);
+  block.updatedAt = new Date().toISOString();
+  block.updatedBy = req.user!.email;
+  saveDb(db);
+  res.json({ block, blocks: db.reusableBlocks });
+});
+
+app.delete('/api/v1/content-blocks/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.reusableBlocks = ensureDefaultReusableBlocks(db.reusableBlocks);
+  const before = db.reusableBlocks.length;
+  db.reusableBlocks = db.reusableBlocks.filter((b) => b.id !== req.params.id);
+  if (db.reusableBlocks.length === before) {
+    res.status(404).json({ error: 'Không tìm thấy Block tĩnh cần xóa.' });
+    return;
+  }
+  saveDb(db);
+  res.json({ deleted: true, blocks: db.reusableBlocks });
+});
+
+// ============================================================
+// PROMOTIONAL BANNERS STUDIO (10 TEMPLATES + MULTI-SLOT FRONTEND)
+// ============================================================
+
+function sanitizeHexColor(val: unknown, fallback: string): string {
+  const s = String(val || '').trim();
+  return /^#[0-9a-fA-F]{3,8}$/.test(s) ? s : fallback;
+}
+
+app.post('/api/v1/promo-banners', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.promoBanners)) db.promoBanners = structuredClone(DEFAULT_PROMO_BANNERS);
+  const b = req.body || {};
+  const headline = String(b.headline || '').trim();
+  if (headline.length < 3) {
+    res.status(400).json({ error: 'Vui lòng nhập tiêu đề chính cho Banner.' });
+    return;
+  }
+  const banner = {
+    id: `bnr-${Date.now().toString(36)}`,
+    templateKey: String(b.templateKey || 'tpl-admissions-newyear').slice(0, 80),
+    category: (['ADMISSIONS', 'HOLIDAY', 'URGENT'].includes(b.category) ? b.category : 'ADMISSIONS') as 'ADMISSIONS' | 'HOLIDAY' | 'URGENT',
+    kicker: String(b.kicker || '').trim().slice(0, 120),
+    headline: headline.slice(0, 220),
+    subheadline: String(b.subheadline || '').trim().slice(0, 420),
+    ctaLabel: String(b.ctaLabel || 'Tìm hiểu thêm').trim().slice(0, 60),
+    ctaHref: sanitizeSafeUrl(String(b.ctaHref || '#courses'), false) || '#courses',
+    imageUrl: sanitizeSafeUrl(String(b.imageUrl || ''), true),
+    bgStart: sanitizeHexColor(b.bgStart, '#1E3A8A'),
+    bgEnd: sanitizeHexColor(b.bgEnd, '#0F172A'),
+    accentColor: sanitizeHexColor(b.accentColor, '#F59E0B'),
+    textColor: sanitizeHexColor(b.textColor, '#FFFFFF'),
+    layoutStyle: (['SPLIT_IMAGE', 'FULL_BG', 'CENTER_CARD', 'SLIM_STRIP'].includes(b.layoutStyle)
+      ? b.layoutStyle
+      : 'SPLIT_IMAGE') as 'SPLIT_IMAGE' | 'FULL_BG' | 'CENTER_CARD' | 'SLIM_STRIP',
+    textAlign: (b.textAlign === 'center' ? 'center' : 'left') as 'left' | 'center',
+    fontSizeScale: Math.max(0.85, Math.min(1.25, Number(b.fontSizeScale) || 1)),
+    overlayOpacity: Math.max(0.15, Math.min(0.88, Number(b.overlayOpacity) || 0.45)),
+    borderStyle: (['NONE', 'CLEAN', 'FESTIVE'].includes(b.borderStyle) ? b.borderStyle : 'CLEAN') as 'NONE' | 'CLEAN' | 'FESTIVE',
+    placement: (['TOP_BAR', 'HERO_SPOTLIGHT', 'MID_PAGE', 'POPUP'].includes(b.placement)
+      ? b.placement
+      : 'HERO_SPOTLIGHT') as 'TOP_BAR' | 'HERO_SPOTLIGHT' | 'MID_PAGE' | 'POPUP',
+    audience: (['ALL', 'NEW_CUSTOMER', 'PARENT', 'TEACHER_STUDENT'].includes(b.audience)
+      ? b.audience
+      : 'ALL') as 'ALL' | 'NEW_CUSTOMER' | 'PARENT' | 'TEACHER_STUDENT',
+    startDate: b.startDate ? String(b.startDate).slice(0, 10) : undefined,
+    endDate: b.endDate ? String(b.endDate).slice(0, 10) : undefined,
+    active: b.active !== false,
+    priority: Math.max(0, Math.min(100, Number(b.priority) || 10)),
+    updatedAt: new Date().toISOString(),
+    updatedBy: req.user!.email,
+  };
+  db.promoBanners.unshift(banner);
+  saveDb(db);
+  res.status(201).json({ banner, banners: db.promoBanners });
+});
+
+app.patch('/api/v1/promo-banners/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.promoBanners)) db.promoBanners = [];
+  const banner = db.promoBanners.find((item) => item.id === req.params.id);
+  if (!banner) {
+    res.status(404).json({ error: 'Không tìm thấy Banner.' });
+    return;
+  }
+  const b = req.body || {};
+  if (typeof b.templateKey === 'string') banner.templateKey = b.templateKey.slice(0, 80);
+  if (['ADMISSIONS', 'HOLIDAY', 'URGENT'].includes(b.category)) banner.category = b.category;
+  if (typeof b.kicker === 'string') banner.kicker = b.kicker.trim().slice(0, 120);
+  if (typeof b.headline === 'string' && b.headline.trim().length >= 3) banner.headline = b.headline.trim().slice(0, 220);
+  if (typeof b.subheadline === 'string') banner.subheadline = b.subheadline.trim().slice(0, 420);
+  if (typeof b.ctaLabel === 'string') banner.ctaLabel = b.ctaLabel.trim().slice(0, 60);
+  if (typeof b.ctaHref === 'string') banner.ctaHref = sanitizeSafeUrl(b.ctaHref, false) || '#courses';
+  if (typeof b.imageUrl === 'string') banner.imageUrl = sanitizeSafeUrl(b.imageUrl, true);
+  if (b.bgStart) banner.bgStart = sanitizeHexColor(b.bgStart, banner.bgStart);
+  if (b.bgEnd) banner.bgEnd = sanitizeHexColor(b.bgEnd, banner.bgEnd);
+  if (b.accentColor) banner.accentColor = sanitizeHexColor(b.accentColor, banner.accentColor);
+  if (b.textColor) banner.textColor = sanitizeHexColor(b.textColor, banner.textColor);
+  if (['SPLIT_IMAGE', 'FULL_BG', 'CENTER_CARD', 'SLIM_STRIP'].includes(b.layoutStyle)) banner.layoutStyle = b.layoutStyle;
+  if (b.textAlign === 'left' || b.textAlign === 'center') banner.textAlign = b.textAlign;
+  if (b.fontSizeScale !== undefined) banner.fontSizeScale = Math.max(0.85, Math.min(1.25, Number(b.fontSizeScale) || 1));
+  if (b.overlayOpacity !== undefined) banner.overlayOpacity = Math.max(0.15, Math.min(0.88, Number(b.overlayOpacity) || 0.45));
+  if (['NONE', 'CLEAN', 'FESTIVE'].includes(b.borderStyle)) banner.borderStyle = b.borderStyle;
+  if (['TOP_BAR', 'HERO_SPOTLIGHT', 'MID_PAGE', 'POPUP'].includes(b.placement)) banner.placement = b.placement;
+  if (['ALL', 'NEW_CUSTOMER', 'PARENT', 'TEACHER_STUDENT'].includes(b.audience)) banner.audience = b.audience;
+  if (b.startDate !== undefined) banner.startDate = b.startDate ? String(b.startDate).slice(0, 10) : undefined;
+  if (b.endDate !== undefined) banner.endDate = b.endDate ? String(b.endDate).slice(0, 10) : undefined;
+  if (typeof b.active === 'boolean') banner.active = b.active;
+  if (b.priority !== undefined) banner.priority = Math.max(0, Math.min(100, Number(b.priority) || 10));
+  banner.updatedAt = new Date().toISOString();
+  banner.updatedBy = req.user!.email;
+  saveDb(db);
+  res.json({ banner, banners: db.promoBanners });
+});
+
+app.delete('/api/v1/promo-banners/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  if (!Array.isArray(db.promoBanners)) db.promoBanners = [];
+  const before = db.promoBanners.length;
+  db.promoBanners = db.promoBanners.filter((b) => b.id !== req.params.id);
+  if (db.promoBanners.length === before) {
+    res.status(404).json({ error: 'Không tìm thấy Banner cần xóa.' });
+    return;
+  }
+  saveDb(db);
+  res.json({ deleted: true, banners: db.promoBanners });
 });
 
 // ============================================================

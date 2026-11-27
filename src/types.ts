@@ -615,6 +615,106 @@ export interface FanpagePost {
   thumbnailUrl: string;
 }
 
+export interface ArchivedStudentRecord {
+  id: string;
+  originalId: string;
+  code: string;
+  fullName: string;
+  centerClass: string;
+  parentName: string;
+  parentPhone: string;
+  archivedAt: string;
+  archivedBy: string;
+  reason?: string;
+  preservedScoresCount: number;
+  preservedTuitionCount: number;
+  snapshot: Student;
+}
+
+export interface ArchivedTeacherRecord {
+  id: string;
+  originalId: string;
+  name: string;
+  shortName: string;
+  teacherGroup: TeacherGroup;
+  subjects: string[];
+  archivedAt: string;
+  archivedBy: string;
+  reason?: string;
+  removedTimetableSlotsCount: number;
+  snapshot: Teacher;
+}
+
+export interface EditorialArticle {
+  id: string;
+  title: string;
+  slug: string;
+  category: string;
+  excerpt: string;
+  coverImageUrl?: string;
+  contentHtml: string;
+  authorName: string;
+  authorEmail: string;
+  status: 'DRAFT' | 'PUBLISHED';
+  featured: boolean;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+}
+
+export type ReusableBlockCategory =
+  | 'CONTACT'
+  | 'SCHEDULE'
+  | 'TUITION_OFFER'
+  | 'CTA'
+  | 'PARENT_NOTE'
+  | 'CUSTOM';
+
+export interface ReusableContentBlock {
+  id: string;
+  name: string;
+  category: ReusableBlockCategory;
+  description: string;
+  htmlContent: string;
+  isSystemDefault?: boolean;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export type BannerCategory = 'ADMISSIONS' | 'HOLIDAY' | 'URGENT';
+export type BannerPlacement = 'TOP_BAR' | 'HERO_SPOTLIGHT' | 'MID_PAGE' | 'POPUP';
+export type BannerAudience = 'ALL' | 'NEW_CUSTOMER' | 'PARENT' | 'TEACHER_STUDENT';
+export type BannerLayoutStyle = 'SPLIT_IMAGE' | 'FULL_BG' | 'CENTER_CARD' | 'SLIM_STRIP';
+
+export interface PromoBanner {
+  id: string;
+  templateKey: string;
+  category: BannerCategory;
+  kicker: string;
+  headline: string;
+  subheadline: string;
+  ctaLabel: string;
+  ctaHref: string;
+  imageUrl?: string;
+  bgStart: string;
+  bgEnd: string;
+  accentColor: string;
+  textColor: string;
+  layoutStyle: BannerLayoutStyle;
+  textAlign: 'left' | 'center';
+  fontSizeScale: number;
+  overlayOpacity: number;
+  borderStyle: 'NONE' | 'CLEAN' | 'FESTIVE';
+  placement: BannerPlacement;
+  audience: BannerAudience;
+  startDate?: string;
+  endDate?: string;
+  active: boolean;
+  priority: number;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
 export interface DatabaseState {
   courses: CoursePackage[];
   rooms: Room[];
@@ -622,6 +722,8 @@ export interface DatabaseState {
   teacherLeaves: TeacherLeave[];
   families: FamilyProfile[];
   students: Student[];
+  archivedStudents?: ArchivedStudentRecord[];
+  archivedTeachers?: ArchivedTeacherRecord[];
   timetable: TimetableSlot[];
   scores: ScoreRecord[];
   attendance: AttendanceRecord[];
@@ -632,6 +734,9 @@ export interface DatabaseState {
   notifications: AppNotification[];
   socialChannels: SocialChannelConfig[];
   socialPosts: SocialActivityPost[];
+  editorialArticles?: EditorialArticle[];
+  reusableBlocks?: ReusableContentBlock[];
+  promoBanners?: PromoBanner[];
   notificationConfig: NotificationSystemConfig;
   notificationPrefs: UserNotificationPreference[];
   classCheckins: ClassCheckInRecord[];

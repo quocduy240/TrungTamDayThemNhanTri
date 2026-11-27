@@ -72,6 +72,8 @@ import { QuickClassBanner, QuickClassLookupModal } from './QuickClassHub';
 import { SocialActivityLibrary } from './SocialActivityLibrary';
 import { ShareMenu } from './ShareMenu';
 import { ZpdFrontendManualModal } from './ZpdFrontendManualModal';
+import { FrontendBannerSlot, FrontendEditorialFeed } from './FrontendPromoLayer';
+import { isBannerVisibleNow } from '../lib/contentStudioEngine';
 
 interface FrontendPortalProps {
   bootstrap: BootstrapPayload;
@@ -645,10 +647,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
     'https://www.facebook.com/people/Trung-t%C3%A2m-d%E1%BA%A1y-th%C3%AAm-Nh%C3%A2n-Tr%C3%AD/61586568261774/';
   const socialChannels = workspace?.socialChannels || bootstrap.socialChannels || [];
   const socialPosts = workspace?.socialPosts || bootstrap.socialPosts || [];
+  const promoBanners = workspace?.promoBanners || bootstrap.promoBanners || [];
+  const editorialArticles = workspace?.editorialArticles || bootstrap.editorialArticles || [];
 
   const fanpageFeedSection = (
     <section id="hoat-dong-nhantri" className="bg-white border-t border-slate-200 py-14">
-      <div className="max-w-7xl mx-auto px-6">
+      <div className="max-w-7xl mx-auto px-6 space-y-12">
+        <FrontendBannerSlot banners={promoBanners} placement="MID_PAGE" mode={frontendMode} />
+        <FrontendEditorialFeed articles={editorialArticles} />
         <SocialActivityLibrary channels={socialChannels} posts={socialPosts} />
       </div>
     </section>
@@ -656,6 +662,8 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
 
   return (
     <div className="min-h-screen bg-white text-slate-900">
+      {/* Dynamic Promotional TOP_BAR Banner (managed in Backend Banner Studio) */}
+      <FrontendBannerSlot banners={promoBanners} placement="TOP_BAR" mode={frontendMode} />
       {/* Optional Slim Top Announcement Bar (1-Click Editable) */}
       {siteConfig.showAnnouncement && siteConfig.announcementBanner && (
         <div className="bg-blue-950 text-blue-50 border-b border-blue-900">
@@ -844,6 +852,17 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
           </div>
         </div>
       </header>
+
+      {/* Dynamic Promotional HERO_SPOTLIGHT Banner (managed in Backend Banner Studio) */}
+      {promoBanners.some((b) => b.placement === 'HERO_SPOTLIGHT' && isBannerVisibleNow(b, frontendMode)) && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-5">
+          <FrontendBannerSlot
+            banners={promoBanners}
+            placement="HERO_SPOTLIGHT"
+            mode={frontendMode}
+          />
+        </div>
+      )}
 
       {/* ===================================================================== */}
       {/* MODE 1: GIÁO VIÊN & HỌC SINH (VÀO LỚP — CÓ CỔNG XÁC THỰC)             */}
@@ -2031,6 +2050,10 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
               )}
             </div>
           </section>
+          <div className="max-w-7xl mx-auto px-6 py-8 space-y-10">
+            <FrontendBannerSlot banners={promoBanners} placement="MID_PAGE" mode={frontendMode} />
+            <FrontendEditorialFeed articles={editorialArticles} />
+          </div>
         </main>
       )}
 
@@ -2943,6 +2966,9 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
           onChangeFrontendMode('TEACHER_STUDENT');
         }}
       />
+
+      {/* Dynamic Promotional POPUP Banner (session-dismissible, managed in Backend Banner Studio) */}
+      <FrontendBannerSlot banners={promoBanners} placement="POPUP" mode={frontendMode} />
     </div>
   );
 };

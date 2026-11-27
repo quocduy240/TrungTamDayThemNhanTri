@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BookOpen,
@@ -6,9 +6,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Compass,
+  GripVertical,
   Lightbulb,
   Maximize2,
   Minimize2,
+  RotateCcw,
   Search,
   Sparkles,
   X,
@@ -29,6 +31,28 @@ type DrawerLevel = 0 | 1 | 2;
 
 const ZOOM_LEVELS = [85, 100, 115, 130, 140];
 
+const MANUAL_POS_STORAGE_KEY = 'nhantri_backend_manual_btn_pos_v1';
+const BTN_ESTIMATED_WIDTH = 176;
+const BTN_ESTIMATED_HEIGHT = 56;
+
+function clampManualButtonPos(pos: { x: number; y: number }): { x: number; y: number } {
+  if (typeof window === 'undefined') return pos;
+  const maxX = Math.max(12, window.innerWidth - BTN_ESTIMATED_WIDTH - 12);
+  const maxY = Math.max(12, window.innerHeight - BTN_ESTIMATED_HEIGHT - 12);
+  return {
+    x: Math.min(maxX, Math.max(12, Math.round(pos.x))),
+    y: Math.min(maxY, Math.max(12, Math.round(pos.y))),
+  };
+}
+
+function getDefaultTopRightPos(): { x: number; y: number } {
+  if (typeof window === 'undefined') return { x: 1000, y: 76 };
+  return clampManualButtonPos({
+    x: window.innerWidth - BTN_ESTIMATED_WIDTH - 16,
+    y: 76,
+  });
+}
+
 export const ZpdBackendManualDrawer: React.FC<ZpdBackendManualDrawerProps> = ({
   activeTab,
   onNavigateTab,
@@ -42,6 +66,57 @@ export const ZpdBackendManualDrawer: React.FC<ZpdBackendManualDrawerProps> = ({
   const [query, setQuery] = useState<string>('');
   const [activeNodeIdx, setActiveNodeIdx] = useState<number>(0);
   const [checkedSteps, setCheckedSteps] = useState<Record<string, boolean>>({});
+
+  // Draggable collapsed button position — defaults to Top-Right corner
+  const [btnPos, setBtnPos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const saved = window.sessionStorage.getItem(MANUAL_POS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { x?: number; y?: number };
+        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+          return clampManualButtonPos({ x: parsed.x, y: parsed.y });
+        }
+      }
+    } catch {
+      // ignore sessionStorage restrictions
+    }
+    return getDefaultTopRightPos();
+  });
+  const [hasCustomPos, setHasCustomPos] = useState<boolean>(() => {
+    try {
+      return Boolean(window.sessionStorage.getItem(MANUAL_POS_STORAGE_KEY));
+    } catch {
+      return false;
+    }
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setBtnPos((prev) => (hasCustomPos ? clampManualButtonPos(prev) : getDefaultTopRightPos()));
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [hasCustomPos]);
+
+  const resetToTopRight = () => {
+    const next = getDefaultTopRightPos();
+    setBtnPos(next);
+    setHasCustomPos(false);
+    try {
+      window.sessionStorage.removeItem(MANUAL_POS_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  };
 
   // Sync manual chapter automatically when Admin switches left-nav tabs
   useEffect(() => {
@@ -75,28 +150,114 @@ export const ZpdBackendManualDrawer: React.FC<ZpdBackendManualDrawerProps> = ({
   const canZoomOut = zoomIndex > 0;
   const canZoomIn = zoomIndex < ZOOM_LEVELS.length - 1;
 
-  // Collapsed State (Level 0): Floating right-edge tab
+  // Collapsed State (Level 0): Top-right default draggable floating button
   if (level === 0) {
     const currentTabTitle = BACKEND_ZPD_MANUALS[activeTab]?.title || 'Cẩm nang Quản trị';
     return (
-      <div className="fixed right-0 top-1/2 -translate-y-1/2 z-40">
-        <button
-          type="button"
-          onClick={() => setLevel(1)}
-          title={`Mở Cẩm nang Quản trị cho mục: ${currentTabTitle}`}
-          className="group flex items-center gap-2 pl-3 pr-2.5 py-3 rounded-l-2xl bg-blue-900 hover:bg-blue-800 text-white shadow-lg border border-r-0 border-blue-700 transition cursor-pointer"
+      <div
+        style={{ left: `${btnPos.x}px`, top: `${btnPos.y}px` }}
+        className="fixed z-40 flex items-center gap-1 select-none touch-none"
+      >
+        <div
+          role="button"
+          tabIndex={0}
+          onPointerDown={(e) => {
+            if (e.button !== 0 && e.pointerType === 'mouse') return;
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            dragStateRef.current = {
+              pointerId: e.pointerId,
+              startClientX: e.clientX,
+              startClientY: e.clientY,
+              originX: btnPos.x,
+              originY: btnPos.y,
+              moved: false,
+            };
+          }}
+          onPointerMove={(e) => {
+            const st = dragStateRef.current;
+            if (!st || st.pointerId !== e.pointerId) return;
+            const dx = e.clientX - st.startClientX;
+            const dy = e.clientY - st.startClientY;
+            if (!st.moved && Math.hypot(dx, dy) > 5) {
+              st.moved = true;
+              setIsDragging(true);
+            }
+            if (st.moved) {
+              const clamped = clampManualButtonPos({
+                x: st.originX + dx,
+                y: st.originY + dy,
+              });
+              setBtnPos(clamped);
+            }
+          }}
+          onPointerUp={(e) => {
+            const st = dragStateRef.current;
+            if (!st || st.pointerId !== e.pointerId) return;
+            if ((e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) {
+              (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+            }
+            const wasDragged = st.moved;
+            dragStateRef.current = null;
+            setIsDragging(false);
+            if (wasDragged) {
+              setHasCustomPos(true);
+              try {
+                window.sessionStorage.setItem(
+                  MANUAL_POS_STORAGE_KEY,
+                  JSON.stringify(
+                    clampManualButtonPos({
+                      x: st.originX + (e.clientX - st.startClientX),
+                      y: st.originY + (e.clientY - st.startClientY),
+                    }),
+                  ),
+                );
+              } catch {
+                // ignore
+              }
+            } else {
+              setLevel(1);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setLevel(1);
+            }
+          }}
+          title={`Kéo thả để di chuyển vị trí · Nhấn để mở Cẩm nang: ${currentTabTitle}`}
+          className={`group flex items-center gap-2 rounded-2xl border border-blue-700 bg-blue-900 px-3 py-2.5 text-white shadow-xl transition ${
+            isDragging
+              ? 'scale-[1.03] cursor-grabbing bg-blue-800 shadow-2xl ring-2 ring-amber-300'
+              : 'cursor-grab hover:bg-blue-800'
+          }`}
         >
-          <ChevronLeft className="w-4 h-4 text-amber-300 shrink-0" />
+          <GripVertical className="h-4 w-4 shrink-0 text-blue-300" />
           <div className="text-left">
             <div className="flex items-center gap-1.5 text-xs font-bold whitespace-nowrap">
-              <BookOpen className="w-3.5 h-3.5" />
+              <BookOpen className="h-3.5 w-3.5 text-amber-300" />
               <span>Cẩm nang</span>
             </div>
-            <div className="text-[10px] text-blue-200 max-w-[110px] truncate">
+            <div className="max-w-[105px] truncate text-[10px] text-blue-200">
               {currentTabTitle}
             </div>
           </div>
-        </button>
+          <ChevronLeft className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+        </div>
+
+        {hasCustomPos && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              resetToTopRight();
+            }}
+            title="Đưa nút Cẩm nang về góc trên bên phải"
+            aria-label="Đưa nút Cẩm nang về góc trên bên phải"
+            className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-md transition hover:bg-blue-50 hover:text-blue-900"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
     );
   }

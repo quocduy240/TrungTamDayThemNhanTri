@@ -882,7 +882,7 @@ export default function App() {
           ? [
               {
                 id: 'social' as CmsTab,
-                label: lang === 'vi' ? 'Truyền thông & Nhắc lịch 10p' : 'Social & Reminders',
+                label: lang === 'vi' ? 'Bài viết, Banner & Truyền thông' : 'Articles, Banners & Social',
                 icon: <Tv className="w-4 h-4 shrink-0" />,
               },
             ]
@@ -1221,6 +1221,9 @@ export default function App() {
                     user={currentUser}
                     channels={workspace.socialChannels || bootstrap.socialChannels || []}
                     posts={workspace.socialPosts || bootstrap.socialPosts || []}
+                    editorialArticles={workspace.editorialArticles || bootstrap.editorialArticles || []}
+                    reusableBlocks={workspace.reusableBlocks || []}
+                    promoBanners={workspace.promoBanners || bootstrap.promoBanners || []}
                     notificationConfig={workspace.notificationConfig}
                     dispatchLogs={workspace.reminderDispatchLogs || []}
                     timetable={workspace.timetable}

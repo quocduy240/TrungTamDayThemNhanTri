@@ -77,6 +77,15 @@ import {
   normalizeLookupKey,
   repairDatabaseHealth,
 } from '../src/lib/workspaceIntegrity.ts';
+import {
+  DEFAULT_EDITORIAL_ARTICLES,
+  DEFAULT_PROMO_BANNERS,
+  ensureDefaultReusableBlocks,
+  isExactConfirmNameMatch,
+  sanitizeRichHtml,
+  sanitizeSafeUrl,
+  slugifyVietnamese,
+} from '../src/lib/contentStudioEngine.ts';
 import type {
   AccessAuditLog,
   AttendanceRecord,
@@ -396,6 +405,15 @@ function normalizeWorkerState(parsed: DatabaseState): DatabaseState {
     parsed.reminderDispatchLogs = structuredClone(INITIAL_DB.reminderDispatchLogs);
   }
   parsed.printTemplates = ensureSystemPrintTemplates(parsed.printTemplates);
+  if (!Array.isArray(parsed.archivedStudents)) parsed.archivedStudents = [];
+  if (!Array.isArray(parsed.archivedTeachers)) parsed.archivedTeachers = [];
+  if (!Array.isArray(parsed.editorialArticles) || parsed.editorialArticles.length === 0) {
+    parsed.editorialArticles = structuredClone(DEFAULT_EDITORIAL_ARTICLES);
+  }
+  parsed.reusableBlocks = ensureDefaultReusableBlocks(parsed.reusableBlocks);
+  if (!Array.isArray(parsed.promoBanners) || parsed.promoBanners.length === 0) {
+    parsed.promoBanners = structuredClone(DEFAULT_PROMO_BANNERS);
+  }
   parsed.students = (parsed.students || []).map((st) => {
     let homeroomTeacherId = st.homeroomTeacherId;
     if (!homeroomTeacherId && st.homeroomTeacher) {
@@ -754,6 +772,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       authPolicy: getPolicy(db),
       socialChannels: (db.socialChannels || []).filter((c) => c.active),
       socialPosts: (db.socialPosts || []).filter((p) => p.visible),
+      editorialArticles: (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
+      promoBanners: (db.promoBanners || []).filter((b) => b.active),
       notificationLeadMinutes: db.notificationConfig?.leadMinutes || 10,
     });
   }
@@ -1379,6 +1399,8 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       teacherLeaves,
       families,
       students: scopedStudents,
+      archivedStudents: isManagerUser ? (db.archivedStudents || []) : [],
+      archivedTeachers: isManagerUser ? (db.archivedTeachers || []) : [],
       timetable,
       scores: isStaff ? db.scores : db.scores.filter((sc) => allowedIds.has(sc.studentId)),
       attendance: isStaff ? db.attendance : db.attendance.filter((a) => allowedIds.has(a.studentId)),
@@ -1405,6 +1427,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       auditLogs: isAdminUser ? (db.auditLogs || []) : [],
       socialChannels: db.socialChannels || [],
       socialPosts: isManagerUser ? (db.socialPosts || []) : (db.socialPosts || []).filter((p) => p.visible),
+      editorialArticles: isManagerUser
+        ? (db.editorialArticles || [])
+        : (db.editorialArticles || []).filter((a) => a.status === 'PUBLISHED'),
+      reusableBlocks: isManagerUser ? ensureDefaultReusableBlocks(db.reusableBlocks) : [],
+      promoBanners: isManagerUser
+        ? (db.promoBanners || [])
+        : (db.promoBanners || []).filter((b) => b.active),
       notificationConfig: isAdminUser ? db.notificationConfig : undefined,
       myNotificationPref: getOrBuildUserNotificationPref(db, user!),
       classCheckins: scopedCheckins,
@@ -4155,6 +4184,312 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     });
     await saveState(env, db);
     return json(result);
+  }
+
+  // SAFE 2-STEP DELETE & ARCHIVE (STUDENTS & TEACHERS)
+  const delStudentMatch = pathname.match(/^\/api\/v1\/students\/([^/]+)$/);
+  if (method === 'DELETE' && delStudentMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const student = db.students.find((s) => s.id === delStudentMatch[1]);
+    if (!student) return json({ error: 'Không tìm thấy hồ sơ học sinh.' }, 404);
+    const b = await readJson<{ confirmName?: string; reason?: string }>();
+    if (!isExactConfirmNameMatch(String(b.confirmName || ''), student.fullName)) {
+      return json(
+        { error: `Tên xác nhận chưa khớp. Vui lòng nhập chính xác "${student.fullName}" để xóa hồ sơ.` },
+        400,
+      );
+    }
+    const preservedScoresCount = db.scores.filter((sc) => sc.studentId === student.id).length;
+    const preservedTuitionCount = db.tuition.filter((t) => t.studentId === student.id).length;
+    const archived = {
+      id: `arch-st-${Date.now()}`,
+      originalId: student.id,
+      code: student.code,
+      fullName: student.fullName,
+      centerClass: student.centerClass,
+      parentName: student.parentName,
+      parentPhone: student.parentPhone,
+      archivedAt: new Date().toISOString(),
+      archivedBy: user!.email,
+      reason: String(b.reason || '').trim().slice(0, 300) || 'Xóa theo yêu cầu quản trị (đã bảo lưu lịch sử tài chính & điểm số)',
+      preservedScoresCount,
+      preservedTuitionCount,
+      snapshot: structuredClone(student),
+    };
+    if (!Array.isArray(db.archivedStudents)) db.archivedStudents = [];
+    db.archivedStudents.unshift(archived);
+    db.students = db.students.filter((s) => s.id !== student.id);
+    appendAuditLog(db, {
+      actorEmail: user!.email,
+      actorRole: user!.role,
+      action: 'STUDENT_ARCHIVED_DELETED',
+      target: student.id,
+      targetLabel: `${student.fullName} (${student.code})`,
+      detail: `Đã xóa hồ sơ học sinh & bảo lưu ${preservedScoresCount} điểm, ${preservedTuitionCount} phiếu học phí.`,
+    });
+    await saveState(env, db);
+    return json({ deleted: true, archived, preservedScoresCount, preservedTuitionCount });
+  }
+
+  const delTeacherMatch = pathname.match(/^\/api\/v1\/teachers\/([^/]+)$/);
+  if (method === 'DELETE' && delTeacherMatch) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const teacher = db.teachers.find((t) => t.id === delTeacherMatch[1]);
+    if (!teacher) return json({ error: 'Không tìm thấy hồ sơ giáo viên.' }, 404);
+    const b = await readJson<{ confirmName?: string; reason?: string }>();
+    if (!isExactConfirmNameMatch(String(b.confirmName || ''), teacher.name)) {
+      return json(
+        { error: `Tên xác nhận chưa khớp. Vui lòng nhập chính xác "${teacher.name}" để xóa hồ sơ giáo viên.` },
+        400,
+      );
+    }
+    const affectedSlots = db.timetable.filter((sl) => sl.teacherId === teacher.id);
+    db.timetable = db.timetable.filter((sl) => sl.teacherId !== teacher.id);
+    db.teacherLeaves = db.teacherLeaves.filter((lv) => lv.teacherId !== teacher.id);
+    if (affectedSlots.length > 0) {
+      recordTimetableChange(db, {
+        action: 'REMOVED',
+        updatedBy: user!.email,
+        summary: `Gỡ ${affectedSlots.length} ca TKB của ${teacher.shortName} sau khi xóa & lưu trữ hồ sơ giáo viên`,
+        affectedTeacherIds: [teacher.id],
+      });
+    }
+    const archived = {
+      id: `arch-tc-${Date.now()}`,
+      originalId: teacher.id,
+      name: teacher.name,
+      shortName: teacher.shortName,
+      teacherGroup: teacher.teacherGroup,
+      subjects: [...(teacher.subjects || [])],
+      archivedAt: new Date().toISOString(),
+      archivedBy: user!.email,
+      reason: String(b.reason || '').trim().slice(0, 300) || 'Xóa theo yêu cầu quản trị',
+      removedTimetableSlotsCount: affectedSlots.length,
+      snapshot: structuredClone(teacher),
+    };
+    if (!Array.isArray(db.archivedTeachers)) db.archivedTeachers = [];
+    db.archivedTeachers.unshift(archived);
+    db.teachers = db.teachers.filter((t) => t.id !== teacher.id);
+    appendAuditLog(db, {
+      actorEmail: user!.email,
+      actorRole: user!.role,
+      action: 'TEACHER_ARCHIVED_DELETED',
+      target: teacher.id,
+      targetLabel: `${teacher.name} (${teacher.shortName})`,
+      detail: `Đã xóa hồ sơ giáo viên & gỡ ${affectedSlots.length} ca trên TKB.`,
+    });
+    await saveState(env, db);
+    return json({ deleted: true, archived, removedTimetableSlotsCount: affectedSlots.length });
+  }
+
+  // EDITORIAL ARTICLES CRUD
+  if (method === 'POST' && pathname === '/api/v1/articles') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<Record<string, unknown>>();
+    const title = String(b.title || '').trim();
+    if (title.length < 3) return json({ error: 'Vui lòng nhập tiêu đề bài viết.' }, 400);
+    const nowIso = new Date().toISOString();
+    const status = b.status === 'DRAFT' ? 'DRAFT' : 'PUBLISHED';
+    const article = {
+      id: `art-${Date.now().toString(36)}`,
+      title: title.slice(0, 220),
+      slug: slugifyVietnamese(title),
+      category: String(b.category || 'Tin tức & Thông báo').trim().slice(0, 80),
+      excerpt: String(b.excerpt || '').trim().slice(0, 420),
+      coverImageUrl: sanitizeSafeUrl(String(b.coverImageUrl || ''), true),
+      contentHtml: sanitizeRichHtml(String(b.contentHtml || '')),
+      authorName: user!.name || 'Ban Quản Trị',
+      authorEmail: user!.email,
+      status: status as 'DRAFT' | 'PUBLISHED',
+      featured: Boolean(b.featured),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      publishedAt: status === 'PUBLISHED' ? nowIso : undefined,
+    };
+    if (!Array.isArray(db.editorialArticles)) db.editorialArticles = structuredClone(DEFAULT_EDITORIAL_ARTICLES);
+    db.editorialArticles.unshift(article);
+    await saveState(env, db);
+    return json({ article }, 201);
+  }
+
+  const artMatch = pathname.match(/^\/api\/v1\/articles\/([^/]+)$/);
+  if (artMatch && (method === 'PATCH' || method === 'DELETE')) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    if (!Array.isArray(db.editorialArticles)) db.editorialArticles = [];
+    if (method === 'DELETE') {
+      db.editorialArticles = db.editorialArticles.filter((a) => a.id !== artMatch[1]);
+      await saveState(env, db);
+      return json({ deleted: true });
+    }
+    const article = db.editorialArticles.find((a) => a.id === artMatch[1]);
+    if (!article) return json({ error: 'Không tìm thấy bài viết.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.title === 'string' && b.title.trim().length >= 3) {
+      article.title = b.title.trim().slice(0, 220);
+      article.slug = slugifyVietnamese(article.title);
+    }
+    if (typeof b.category === 'string') article.category = b.category.trim().slice(0, 80);
+    if (typeof b.excerpt === 'string') article.excerpt = b.excerpt.trim().slice(0, 420);
+    if (typeof b.coverImageUrl === 'string') article.coverImageUrl = sanitizeSafeUrl(b.coverImageUrl, true);
+    if (typeof b.contentHtml === 'string') article.contentHtml = sanitizeRichHtml(b.contentHtml);
+    if (b.status === 'DRAFT' || b.status === 'PUBLISHED') {
+      article.status = b.status;
+      if (article.status === 'PUBLISHED' && !article.publishedAt) article.publishedAt = new Date().toISOString();
+    }
+    if (typeof b.featured === 'boolean') article.featured = b.featured;
+    article.updatedAt = new Date().toISOString();
+    await saveState(env, db);
+    return json({ article });
+  }
+
+  // REUSABLE CONTENT BLOCKS CRUD
+  if (method === 'POST' && pathname === '/api/v1/content-blocks') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    db.reusableBlocks = ensureDefaultReusableBlocks(db.reusableBlocks);
+    const b = await readJson<Record<string, unknown>>();
+    const name = String(b.name || '').trim();
+    if (name.length < 2) return json({ error: 'Vui lòng nhập tên Block tĩnh.' }, 400);
+    const validCats = ['CONTACT', 'SCHEDULE', 'TUITION_OFFER', 'CTA', 'PARENT_NOTE', 'CUSTOM'];
+    const block = {
+      id: `blk-${Date.now().toString(36)}`,
+      name: name.slice(0, 120),
+      category: (validCats.includes(String(b.category)) ? b.category : 'CUSTOM') as 'CONTACT' | 'SCHEDULE' | 'TUITION_OFFER' | 'CTA' | 'PARENT_NOTE' | 'CUSTOM',
+      description: String(b.description || '').trim().slice(0, 260),
+      htmlContent: sanitizeRichHtml(String(b.htmlContent || '')),
+      isSystemDefault: false,
+      updatedAt: new Date().toISOString(),
+      updatedBy: user!.email,
+    };
+    db.reusableBlocks.unshift(block);
+    await saveState(env, db);
+    return json({ block, blocks: db.reusableBlocks }, 201);
+  }
+
+  const blkMatch = pathname.match(/^\/api\/v1\/content-blocks\/([^/]+)$/);
+  if (blkMatch && (method === 'PATCH' || method === 'DELETE')) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    db.reusableBlocks = ensureDefaultReusableBlocks(db.reusableBlocks);
+    if (method === 'DELETE') {
+      db.reusableBlocks = db.reusableBlocks.filter((item) => item.id !== blkMatch[1]);
+      await saveState(env, db);
+      return json({ deleted: true, blocks: db.reusableBlocks });
+    }
+    const block = db.reusableBlocks.find((item) => item.id === blkMatch[1]);
+    if (!block) return json({ error: 'Không tìm thấy Block tĩnh.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.name === 'string' && b.name.trim().length >= 2) block.name = b.name.trim().slice(0, 120);
+    const validCats = ['CONTACT', 'SCHEDULE', 'TUITION_OFFER', 'CTA', 'PARENT_NOTE', 'CUSTOM'];
+    if (validCats.includes(String(b.category))) block.category = b.category as typeof block.category;
+    if (typeof b.description === 'string') block.description = b.description.trim().slice(0, 260);
+    if (typeof b.htmlContent === 'string') block.htmlContent = sanitizeRichHtml(b.htmlContent);
+    block.updatedAt = new Date().toISOString();
+    block.updatedBy = user!.email;
+    await saveState(env, db);
+    return json({ block, blocks: db.reusableBlocks });
+  }
+
+  // PROMOTIONAL BANNERS CRUD
+  const cleanHex = (v: unknown, fb: string) => (/^#[0-9a-fA-F]{3,8}$/.test(String(v || '').trim()) ? String(v).trim() : fb);
+  if (method === 'POST' && pathname === '/api/v1/promo-banners') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    if (!Array.isArray(db.promoBanners)) db.promoBanners = structuredClone(DEFAULT_PROMO_BANNERS);
+    const b = await readJson<Record<string, unknown>>();
+    const headline = String(b.headline || '').trim();
+    if (headline.length < 3) return json({ error: 'Vui lòng nhập tiêu đề Banner.' }, 400);
+    const banner = {
+      id: `bnr-${Date.now().toString(36)}`,
+      templateKey: String(b.templateKey || 'tpl-admissions-newyear').slice(0, 80),
+      category: (['ADMISSIONS', 'HOLIDAY', 'URGENT'].includes(String(b.category)) ? b.category : 'ADMISSIONS') as 'ADMISSIONS' | 'HOLIDAY' | 'URGENT',
+      kicker: String(b.kicker || '').trim().slice(0, 120),
+      headline: headline.slice(0, 220),
+      subheadline: String(b.subheadline || '').trim().slice(0, 420),
+      ctaLabel: String(b.ctaLabel || 'Tìm hiểu thêm').trim().slice(0, 60),
+      ctaHref: sanitizeSafeUrl(String(b.ctaHref || '#courses'), false) || '#courses',
+      imageUrl: sanitizeSafeUrl(String(b.imageUrl || ''), true),
+      bgStart: cleanHex(b.bgStart, '#1E3A8A'),
+      bgEnd: cleanHex(b.bgEnd, '#0F172A'),
+      accentColor: cleanHex(b.accentColor, '#F59E0B'),
+      textColor: cleanHex(b.textColor, '#FFFFFF'),
+      layoutStyle: (['SPLIT_IMAGE', 'FULL_BG', 'CENTER_CARD', 'SLIM_STRIP'].includes(String(b.layoutStyle))
+        ? b.layoutStyle
+        : 'SPLIT_IMAGE') as 'SPLIT_IMAGE' | 'FULL_BG' | 'CENTER_CARD' | 'SLIM_STRIP',
+      textAlign: (b.textAlign === 'center' ? 'center' : 'left') as 'left' | 'center',
+      fontSizeScale: Math.max(0.85, Math.min(1.25, Number(b.fontSizeScale) || 1)),
+      overlayOpacity: Math.max(0.15, Math.min(0.88, Number(b.overlayOpacity) || 0.45)),
+      borderStyle: (['NONE', 'CLEAN', 'FESTIVE'].includes(String(b.borderStyle)) ? b.borderStyle : 'CLEAN') as 'NONE' | 'CLEAN' | 'FESTIVE',
+      placement: (['TOP_BAR', 'HERO_SPOTLIGHT', 'MID_PAGE', 'POPUP'].includes(String(b.placement))
+        ? b.placement
+        : 'HERO_SPOTLIGHT') as 'TOP_BAR' | 'HERO_SPOTLIGHT' | 'MID_PAGE' | 'POPUP',
+      audience: (['ALL', 'NEW_CUSTOMER', 'PARENT', 'TEACHER_STUDENT'].includes(String(b.audience))
+        ? b.audience
+        : 'ALL') as 'ALL' | 'NEW_CUSTOMER' | 'PARENT' | 'TEACHER_STUDENT',
+      startDate: b.startDate ? String(b.startDate).slice(0, 10) : undefined,
+      endDate: b.endDate ? String(b.endDate).slice(0, 10) : undefined,
+      active: b.active !== false,
+      priority: Math.max(0, Math.min(100, Number(b.priority) || 10)),
+      updatedAt: new Date().toISOString(),
+      updatedBy: user!.email,
+    };
+    db.promoBanners.unshift(banner);
+    await saveState(env, db);
+    return json({ banner, banners: db.promoBanners }, 201);
+  }
+
+  const bnrMatch = pathname.match(/^\/api\/v1\/promo-banners\/([^/]+)$/);
+  if (bnrMatch && (method === 'PATCH' || method === 'DELETE')) {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    if (!Array.isArray(db.promoBanners)) db.promoBanners = [];
+    if (method === 'DELETE') {
+      db.promoBanners = db.promoBanners.filter((item) => item.id !== bnrMatch[1]);
+      await saveState(env, db);
+      return json({ deleted: true, banners: db.promoBanners });
+    }
+    const banner = db.promoBanners.find((item) => item.id === bnrMatch[1]);
+    if (!banner) return json({ error: 'Không tìm thấy Banner.' }, 404);
+    const b = await readJson<Record<string, unknown>>();
+    if (typeof b.templateKey === 'string') banner.templateKey = b.templateKey.slice(0, 80);
+    if (['ADMISSIONS', 'HOLIDAY', 'URGENT'].includes(String(b.category))) banner.category = b.category as typeof banner.category;
+    if (typeof b.kicker === 'string') banner.kicker = b.kicker.trim().slice(0, 120);
+    if (typeof b.headline === 'string' && b.headline.trim().length >= 3) banner.headline = b.headline.trim().slice(0, 220);
+    if (typeof b.subheadline === 'string') banner.subheadline = b.subheadline.trim().slice(0, 420);
+    if (typeof b.ctaLabel === 'string') banner.ctaLabel = b.ctaLabel.trim().slice(0, 60);
+    if (typeof b.ctaHref === 'string') banner.ctaHref = sanitizeSafeUrl(b.ctaHref, false) || '#courses';
+    if (typeof b.imageUrl === 'string') banner.imageUrl = sanitizeSafeUrl(b.imageUrl, true);
+    if (b.bgStart) banner.bgStart = cleanHex(b.bgStart, banner.bgStart);
+    if (b.bgEnd) banner.bgEnd = cleanHex(b.bgEnd, banner.bgEnd);
+    if (b.accentColor) banner.accentColor = cleanHex(b.accentColor, banner.accentColor);
+    if (b.textColor) banner.textColor = cleanHex(b.textColor, banner.textColor);
+    if (['SPLIT_IMAGE', 'FULL_BG', 'CENTER_CARD', 'SLIM_STRIP'].includes(String(b.layoutStyle))) banner.layoutStyle = b.layoutStyle as typeof banner.layoutStyle;
+    if (b.textAlign === 'left' || b.textAlign === 'center') banner.textAlign = b.textAlign;
+    if (b.fontSizeScale !== undefined) banner.fontSizeScale = Math.max(0.85, Math.min(1.25, Number(b.fontSizeScale) || 1));
+    if (b.overlayOpacity !== undefined) banner.overlayOpacity = Math.max(0.15, Math.min(0.88, Number(b.overlayOpacity) || 0.45));
+    if (['NONE', 'CLEAN', 'FESTIVE'].includes(String(b.borderStyle))) banner.borderStyle = b.borderStyle as typeof banner.borderStyle;
+    if (['TOP_BAR', 'HERO_SPOTLIGHT', 'MID_PAGE', 'POPUP'].includes(String(b.placement))) banner.placement = b.placement as typeof banner.placement;
+    if (['ALL', 'NEW_CUSTOMER', 'PARENT', 'TEACHER_STUDENT'].includes(String(b.audience))) banner.audience = b.audience as typeof banner.audience;
+    if (b.startDate !== undefined) banner.startDate = b.startDate ? String(b.startDate).slice(0, 10) : undefined;
+    if (b.endDate !== undefined) banner.endDate = b.endDate ? String(b.endDate).slice(0, 10) : undefined;
+    if (typeof b.active === 'boolean') banner.active = b.active;
+    if (b.priority !== undefined) banner.priority = Math.max(0, Math.min(100, Number(b.priority) || 10));
+    banner.updatedAt = new Date().toISOString();
+    banner.updatedBy = user!.email;
+    await saveState(env, db);
+    return json({ banner, banners: db.promoBanners });
   }
 
   return json({ error: 'Không tìm thấy endpoint API.' }, 404);

@@ -10,6 +10,7 @@ import {
   Plus,
   Printer,
   Search,
+  Trash2,
   UserPlus,
   Users,
   X,
@@ -20,6 +21,7 @@ import { ensureSystemPrintTemplates, type WorkspaceIndexes } from '../lib/worksp
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { CustomPrintTemplateStudio } from './CustomPrintTemplateStudio';
 import { InlineErrorAlert } from './ContextualReloginBanner';
+import { SafeDeleteConfirmModal } from './SafeDeleteConfirmModal';
 import type { CrossNavIntent, QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface TeachersDirectoryModuleProps {
@@ -60,6 +62,7 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
   );
 
   const [creating, setCreating] = useState(false);
+  const [deletingTeacher, setDeletingTeacher] = useState<Teacher | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -572,6 +575,17 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
                             <GraduationCap className="w-3.5 h-3.5" />
                             HS ({assignedStudents.length})
                           </button>
+                          {canManage && (
+                            <button
+                              type="button"
+                              onClick={() => setDeletingTeacher(t)}
+                              title="Xóa hồ sơ giáo viên an toàn (nhập đúng tên)"
+                              className="inline-flex items-center gap-1 min-h-[34px] px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition whitespace-nowrap"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Xóa
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -610,6 +624,43 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
           void onRefresh();
         }}
         onRequestRelogin={onRequestRelogin}
+      />
+      {/* 2-Step Safe Teacher Delete Confirmation Modal */}
+      <SafeDeleteConfirmModal
+        open={Boolean(deletingTeacher)}
+        entityType="TEACHER"
+        targetName={deletingTeacher?.name || ''}
+        targetSubLabel={
+          deletingTeacher
+            ? `Tên TKB: ${deletingTeacher.shortName} · ${
+                deletingTeacher.teacherGroup === 'TUTOR_REVIEW' ? 'GV Trả bài & Kèm sát' : 'GV Bộ môn'
+              } · Môn: ${(deletingTeacher.subjects || []).join(', ')}`
+            : ''
+        }
+        requesterLabel={`${workspace.user.name} (${workspace.user.email})`}
+        impactSummary={
+          deletingTeacher
+            ? [
+                `Xóa "${deletingTeacher.name}" khỏi danh sách Giáo viên đang hoạt động.`,
+                `Lưu trữ hồ sơ nhân sự vào kho Giáo viên đã lưu trữ để phục vụ đối chiếu lịch sử.`,
+                `Gỡ ${(indexes?.slotsByTeacherId.get(deletingTeacher.id) || []).length} ca dạy trên Thời khóa biểu hiện tại và ghi nhật ký thay đổi TKB.`,
+              ]
+            : []
+        }
+        onConfirmDelete={async ({ confirmName, reason }) => {
+          if (!deletingTeacher) return;
+          await apiRequest(`/api/v1/teachers/${encodeURIComponent(deletingTeacher.id)}`, {
+            method: 'DELETE',
+            body: JSON.stringify({ confirmName, reason }),
+          });
+          const removedName = deletingTeacher.name;
+          setDeletingTeacher(null);
+          await onRefresh();
+          setFeedback(
+            `Đã xóa hồ sơ giáo viên "${removedName}", lưu trữ lịch sử nhân sự và cập nhật Thời khóa biểu.`,
+          );
+        }}
+        onClose={() => setDeletingTeacher(null)}
       />
     </div>
   );

@@ -17,6 +17,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserCheck,
   UserPlus,
   X,
@@ -42,6 +43,7 @@ import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { QrAttendanceScannerModal, StudentQrCardModal } from './StudentQrHub';
 import { CustomPrintTemplateStudio } from './CustomPrintTemplateStudio';
 import { InlineErrorAlert } from './ContextualReloginBanner';
+import { SafeDeleteConfirmModal } from './SafeDeleteConfirmModal';
 import type { CrossNavIntent, QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface StudentsAttendanceModuleProps {
@@ -167,6 +169,7 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
 
   // Per-Student Identity & Access Binding Modal (Admin / SuperAdmin)
   const [editingAccessStudent, setEditingAccessStudent] = useState<StudentRecord | null>(null);
+  const [deletingStudent, setDeletingStudent] = useState<StudentRecord | null>(null);
   const [accessForm, setAccessForm] = useState({
     parentPhone: '',
     parentSecondaryPhone: '',
@@ -1065,6 +1068,17 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                       >
                         Bù tối
                       </button>
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingStudent(st)}
+                          title="Xóa hồ sơ học sinh an toàn (nhập đúng tên)"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Xóa</span>
+                        </button>
+                      )}
                     </div>
                   </td>
                 )}
@@ -1348,6 +1362,41 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           void onRefresh();
         }}
         onRequestRelogin={onRequestRelogin}
+      />
+      {/* 2-Step Safe Student Delete Confirmation Modal */}
+      <SafeDeleteConfirmModal
+        open={Boolean(deletingStudent)}
+        entityType="STUDENT"
+        targetName={deletingStudent?.fullName || ''}
+        targetSubLabel={
+          deletingStudent
+            ? `Mã HS: ${deletingStudent.code} · ${deletingStudent.centerClass} · PH: ${deletingStudent.parentName} (${deletingStudent.parentPhone})`
+            : ''
+        }
+        requesterLabel={`${workspace.user.name} (${workspace.user.email})`}
+        impactSummary={
+          deletingStudent
+            ? [
+                `Xóa "${deletingStudent.fullName}" khỏi danh sách lớp học & điểm danh đang vận hành.`,
+                `Lưu trữ nguyên vẹn bản sao hồ sơ vào kho lưu trữ Học sinh đã nghỉ học.`,
+                `Bảo toàn 100% lịch sử bảng điểm (${workspace.scores.filter((s) => s.studentId === deletingStudent.id).length} bài kiểm tra) và học phí (${workspace.tuition.filter((t) => t.studentId === deletingStudent.id).length} kỳ thu) để đối soát tài chính.`,
+              ]
+            : []
+        }
+        onConfirmDelete={async ({ confirmName, reason }) => {
+          if (!deletingStudent) return;
+          await apiRequest(`/api/v1/students/${encodeURIComponent(deletingStudent.id)}`, {
+            method: 'DELETE',
+            body: JSON.stringify({ confirmName, reason }),
+          });
+          const removedName = deletingStudent.fullName;
+          setDeletingStudent(null);
+          await onRefresh();
+          setFeedbackMsg(
+            `Đã xóa hồ sơ học sinh "${removedName}" khỏi danh sách vận hành và bảo lưu an toàn lịch sử điểm & học phí.`,
+          );
+        }}
+        onClose={() => setDeletingStudent(null)}
       />
     </div>
   );

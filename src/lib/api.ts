@@ -1,11 +1,14 @@
 import type {
   AccessAuditLog,
   AppNotification,
+  ArchivedStudentRecord,
+  ArchivedTeacherRecord,
   AttendanceRecord,
   AuthPolicy,
   AuthUser,
   ClassCheckInRecord,
   CoursePackage,
+  EditorialArticle,
   ExpenseRecord,
   FamilyProfile,
   FanpagePost,
@@ -13,7 +16,9 @@ import type {
   NationalExam,
   NotificationSystemConfig,
   PrintTemplate,
+  PromoBanner,
   ReminderDispatchLog,
+  ReusableContentBlock,
   Room,
   ScoreRecord,
   SocialActivityPost,
@@ -174,6 +179,8 @@ export interface BootstrapPayload {
   fanpagePosts?: FanpagePost[];
   socialChannels?: SocialChannelConfig[];
   socialPosts?: SocialActivityPost[];
+  editorialArticles?: EditorialArticle[];
+  promoBanners?: PromoBanner[];
   notificationLeadMinutes?: number;
   examsSummary: {
     id: string;
@@ -207,6 +214,8 @@ export interface WorkspacePayload {
   teacherLeaves: TeacherLeave[];
   families: FamilyProfile[];
   students: Student[];
+  archivedStudents?: ArchivedStudentRecord[];
+  archivedTeachers?: ArchivedTeacherRecord[];
   timetable: TimetableSlot[];
   scores: ScoreRecord[];
   attendance: AttendanceRecord[];
@@ -217,6 +226,9 @@ export interface WorkspacePayload {
   notifications: AppNotification[];
   socialChannels: SocialChannelConfig[];
   socialPosts: SocialActivityPost[];
+  editorialArticles?: EditorialArticle[];
+  reusableBlocks?: ReusableContentBlock[];
+  promoBanners?: PromoBanner[];
   notificationConfig?: NotificationSystemConfig;
   myNotificationPref?: UserNotificationPreference;
   classCheckins: ClassCheckInRecord[];

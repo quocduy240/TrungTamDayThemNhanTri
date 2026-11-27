@@ -24,19 +24,27 @@ import {
 import { apiRequest } from '../lib/api';
 import type {
   AuthUser,
+  EditorialArticle,
   NotificationSystemConfig,
+  PromoBanner,
   ReminderDispatchLog,
+  ReusableContentBlock,
   SocialActivityPost,
   SocialChannelConfig,
   SocialMediaType,
   SocialPlatform,
   TimetableSlot,
 } from '../types';
+import { RichArticleBlocksStudio } from './RichArticleBlocksStudio';
+import { PromoBannerStudio } from './PromoBannerStudio';
 
 interface SocialNotificationCmsProps {
   user: AuthUser;
   channels: SocialChannelConfig[];
   posts: SocialActivityPost[];
+  editorialArticles?: EditorialArticle[];
+  reusableBlocks?: ReusableContentBlock[];
+  promoBanners?: PromoBanner[];
   notificationConfig?: NotificationSystemConfig;
   dispatchLogs: ReminderDispatchLog[];
   timetable: TimetableSlot[];
@@ -54,13 +62,16 @@ export const SocialNotificationCms: React.FC<SocialNotificationCmsProps> = ({
   user,
   channels,
   posts,
+  editorialArticles = [],
+  reusableBlocks = [],
+  promoBanners = [],
   notificationConfig,
   dispatchLogs,
   timetable,
   onRefresh,
 }) => {
   const isAdmin = user.role === 'SUPER_ADMIN' || user.role === 'ADMIN';
-  const [subTab, setSubTab] = useState<'SOCIAL' | 'REMINDERS'>('SOCIAL');
+  const [subTab, setSubTab] = useState<'ARTICLES' | 'BANNERS' | 'SOCIAL' | 'REMINDERS'>('ARTICLES');
 
   // Channel editing state
   const [editingChannels, setEditingChannels] = useState<Record<string, SocialChannelConfig>>(() =>
@@ -286,38 +297,60 @@ export const SocialNotificationCms: React.FC<SocialNotificationCmsProps> = ({
   return (
     <div className="space-y-6">
       {/* Header & Sub-tab Navigation */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white rounded-2xl border border-slate-200 p-5">
+      <div className="flex flex-col gap-4 bg-white rounded-2xl border border-slate-200 p-5">
         <div>
           <h2 className="text-xl font-extrabold text-slate-900">
-            Truyền thông Mạng xã hội & Nhắc lịch 10 phút
+            Trung tâm Nội dung, Bài viết Google Docs, Banner Quảng cáo &amp; Truyền thông
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            Quản lý 4 kênh MXH, đồng bộ YouTube RSS, dán link tự trích xuất bài viết & cấu hình Webhook Zalo/Email/Facebook.
+            Soạn bài viết chuẩn Google Docs + chèn 5 Block tĩnh tại con trỏ, thiết kế Banner từ 10 mẫu trực quan, kết nối Google Drive cá nhân, đồng bộ 4 kênh MXH &amp; nhắc lịch 10 phút.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setSubTab('ARTICLES')}
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
+              subTab === 'ARTICLES'
+                ? 'bg-[#1E3A8A] text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-blue-50'
+            }`}
+          >
+            Bài viết &amp; Block tĩnh ({editorialArticles.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('BANNERS')}
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
+              subTab === 'BANNERS'
+                ? 'bg-[#1E3A8A] text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-blue-50'
+            }`}
+          >
+            Banner Quảng cáo · 10 Mẫu ({promoBanners.length})
+          </button>
           <button
             type="button"
             onClick={() => setSubTab('SOCIAL')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
               subTab === 'SOCIAL'
                 ? 'bg-[#1E3A8A] text-white'
-                : 'bg-slate-100 text-slate-600 hover:bg-blue-50'
+                : 'bg-slate-100 text-slate-700 hover:bg-blue-50'
             }`}
           >
-            Mạng xã hội & Thư viện ({posts.length})
+            Mạng xã hội &amp; Thư viện ({posts.length})
           </button>
           <button
             type="button"
             onClick={() => setSubTab('REMINDERS')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-bold transition-colors whitespace-nowrap ${
               subTab === 'REMINDERS'
                 ? 'bg-[#1E3A8A] text-white'
-                : 'bg-slate-100 text-slate-600 hover:bg-blue-50'
+                : 'bg-slate-100 text-slate-700 hover:bg-blue-50'
             }`}
           >
-            Nhắc lịch 10 phút & Webhook
+            Nhắc lịch 10 phút &amp; Webhook
           </button>
         </div>
       </div>
@@ -335,7 +368,16 @@ export const SocialNotificationCms: React.FC<SocialNotificationCmsProps> = ({
         </div>
       )}
 
-      {subTab === 'SOCIAL' ? (
+      {subTab === 'ARTICLES' ? (
+        <RichArticleBlocksStudio
+          user={user}
+          articles={editorialArticles}
+          reusableBlocks={reusableBlocks}
+          onRefresh={onRefresh}
+        />
+      ) : subTab === 'BANNERS' ? (
+        <PromoBannerStudio banners={promoBanners} onRefresh={onRefresh} />
+      ) : subTab === 'SOCIAL' ? (
         <div className="space-y-6">
           {/* 1. 4 Official Channels Configuration */}
           <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">

@@ -8,6 +8,7 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  FolderOpen,
   Plus,
   Sparkles,
   Trash2,
@@ -15,6 +16,7 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
+import { GoogleDrivePickerModal } from './GoogleDrivePickerModal';
 import type { SmartImportEntityType, TimetableSyncMode } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
 import { compressImageFile } from '../lib/imageOptimizer';
@@ -152,6 +154,7 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
 
   // Live camera capture for desktop/mobile webcam
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [drivePickerOpen, setDrivePickerOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -367,6 +370,18 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
 
     if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls') || lowerName.endsWith('.csv')) {
       await handleExcelFileChange(file);
+      return;
+    }
+
+    if (lowerName.endsWith('.txt') || file.type === 'text/plain') {
+      setLoadingAi(true);
+      try {
+        const text = await file.text();
+        await runAiSmartExtract({ rawText: text }, `Google Docs / Văn bản ${file.name}`);
+      } catch (err: unknown) {
+        setLoadingAi(false);
+        setErrorMsg(err instanceof Error ? err.message : 'Không đọc được nội dung tệp văn bản.');
+      }
       return;
     }
 
@@ -746,16 +761,26 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
                   </p>
                 </div>
 
-                <label className="min-h-[44px] px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-800 flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap">
-                  <Upload className="w-4 h-4" />
-                  {uploadedExcelFile ? 'Chọn file Excel khác' : 'Chọn file .xlsx / .xls / .csv'}
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls,.csv"
-                    className="hidden"
-                    onChange={(e) => void handleExcelFileChange(e.target.files?.[0])}
-                  />
-                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="min-h-[44px] px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-800 flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap">
+                    <Upload className="w-4 h-4" />
+                    {uploadedExcelFile ? 'Chọn file Excel khác' : 'Chọn file .xlsx / .xls / .csv'}
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="hidden"
+                      onChange={(e) => void handleExcelFileChange(e.target.files?.[0])}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setDrivePickerOpen(true)}
+                    className="min-h-[44px] px-4 py-2.5 rounded-lg border border-blue-200 bg-white text-blue-900 text-xs font-bold hover:bg-blue-50 flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap"
+                  >
+                    <FolderOpen className="w-4 h-4" />
+                    Google Drive cá nhân
+                  </button>
+                </div>
               </div>
 
               {spreadsheet && (
@@ -839,7 +864,7 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <label className="min-h-[52px] px-4 py-3 rounded-xl bg-blue-900 text-white text-xs font-semibold hover:bg-blue-800 flex items-center justify-center gap-2 cursor-pointer text-center">
                   <Camera className="w-4 h-4 shrink-0" />
                   Chụp trực tiếp (Camera điện thoại)
@@ -874,6 +899,16 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
                     onChange={(e) => void handleMultimodalFileUpload(e.target.files?.[0])}
                   />
                 </label>
+
+                <button
+                  type="button"
+                  disabled={loadingAi}
+                  onClick={() => setDrivePickerOpen(true)}
+                  className="min-h-[52px] px-4 py-3 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-950 text-xs font-bold hover:bg-emerald-100 flex items-center justify-center gap-2 cursor-pointer text-center"
+                >
+                  <FolderOpen className="w-4 h-4 shrink-0" />
+                  Lấy từ Google Drive cá nhân
+                </button>
               </div>
 
               {cameraOpen && (
@@ -1114,6 +1149,18 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
           </div>
         </div>
       </div>
+
+      {/* Personal Google Drive File Picker (Sheets / Excel / Docs / PDF / Images) */}
+      <GoogleDrivePickerModal
+        open={drivePickerOpen}
+        mode="LISTS"
+        title="Chọn danh sách Excel, Google Sheets, Docs, PDF hoặc Ảnh từ Google Drive cá nhân"
+        onSelectFile={(file) => {
+          setDrivePickerOpen(false);
+          void handleMultimodalFileUpload(file);
+        }}
+        onClose={() => setDrivePickerOpen(false)}
+      />
     </div>
   );
 };
