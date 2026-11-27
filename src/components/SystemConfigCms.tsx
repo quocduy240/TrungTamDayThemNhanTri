@@ -1,23 +1,27 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Activity,
   Check,
   Database,
   Globe,
   History,
   Lock,
   Pencil,
+  RefreshCw,
   Save,
   ShieldCheck,
   Sliders,
   Trash2,
   UserPlus,
   Users,
+  Wrench,
 } from 'lucide-react';
 import type {
   AccessAuditLog,
   AuthPolicy,
   AuthUser,
   CoursePackage,
+  DataHealthReport,
   FrontendMode,
   RoleInviteDoc,
   SiteConfig,
@@ -36,7 +40,7 @@ import {
   updateUserProfileRole,
   upsertRoleInvite,
 } from '../lib/firestoreStore';
-import { formatVnd, isSuperAdminRole, roleLabel, type BootstrapPayload } from '../lib/api';
+import { apiRequest, formatVnd, isSuperAdminRole, roleLabel, type BootstrapPayload } from '../lib/api';
 
 interface SystemConfigCmsProps {
   currentUser: AuthUser;
@@ -48,6 +52,7 @@ interface SystemConfigCmsProps {
   onConfigSaved: (next: SiteConfig) => void;
   onUpdateAuthPolicy: (next: AuthPolicy) => Promise<void>;
   onJumpToInlineEdit: () => void;
+  onRefreshWorkspace?: () => Promise<void>;
 }
 
 export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
@@ -60,6 +65,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
   onConfigSaved,
   onUpdateAuthPolicy,
   onJumpToInlineEdit,
+  onRefreshWorkspace,
 }) => {
   const isSuperAdmin = isSuperAdminRole(currentUser.role);
   const canManageOperationalRbac = isSuperAdmin || currentUser.role === 'ADMIN';
@@ -72,6 +78,12 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Data Health Audit & Auto-Repair state
+  const [healthReport, setHealthReport] = useState<DataHealthReport | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthRepairing, setHealthRepairing] = useState(false);
+  const [healthSummary, setHealthSummary] = useState<string[]>([]);
 
   // Editable courses state
   const [courseDrafts, setCourseDrafts] = useState<CoursePackage[]>(courses);
@@ -87,6 +99,44 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
     linkedStudentId: '',
   });
   const [syncingSeed, setSyncingSeed] = useState(false);
+
+  async function handleRunHealthCheck() {
+    setHealthLoading(true);
+    setErrorMsg('');
+    try {
+      const res = await apiRequest<{ report: DataHealthReport }>('/api/v1/system/data-health');
+      setHealthReport(res.report);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể kiểm toán sức khỏe dữ liệu.');
+    } finally {
+      setHealthLoading(false);
+    }
+  }
+
+  async function handleAutoRepairHealth() {
+    setHealthRepairing(true);
+    setErrorMsg('');
+    setHealthSummary([]);
+    try {
+      const res = await apiRequest<{
+        fixedCount: number;
+        summary: string[];
+        reportAfter: DataHealthReport;
+      }>('/api/v1/system/data-health/repair', { method: 'POST' });
+      setHealthReport(res.reportAfter);
+      setHealthSummary(res.summary);
+      setStatusMsg(
+        res.fixedCount > 0
+          ? `Đã tự động chuẩn hóa ${res.fixedCount} liên kết dữ liệu. Điểm sức khỏe hiện tại: ${res.reportAfter.healthyScore}/100.`
+          : `CSDL đang chuẩn sạch (${res.reportAfter.healthyScore}/100), không có lỗi cần sửa.`,
+      );
+      await onRefreshWorkspace?.();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể chạy tự động sửa lỗi CSDL.');
+    } finally {
+      setHealthRepairing(false);
+    }
+  }
 
   useEffect(() => {
     setForm(siteConfig);
@@ -1025,6 +1075,124 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
               <strong>{ADMIN_EMAIL}</strong> hoặc <strong>{ADMIN_EMAIL_SECONDARY}</strong> để cấp/khóa lời mời Gmail trực tiếp trên Cloud Firestore.
             </div>
           )}
+
+          {/* SECTION 2.5: DATA HEALTH AUDIT & 1-CLICK AUTO-REPAIR */}
+          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-950 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-blue-900" />
+                  <span>Kiểm toán &amp; Chuẩn hóa Toàn vẹn Dữ liệu (Data Health Audit)</span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Quét tự động khóa ngoại Giáo viên – Phòng học – TKB, mã học sinh NT26 trùng, QR động và gom nhóm Gia đình nhiều con.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRunHealthCheck()}
+                  disabled={healthLoading}
+                  className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${healthLoading ? 'animate-spin' : ''}`} />
+                  <span>{healthLoading ? 'Đang kiểm toán...' : 'Kiểm tra ngay'}</span>
+                </button>
+                {canManageOperationalRbac && (
+                  <button
+                    type="button"
+                    onClick={() => void handleAutoRepairHealth()}
+                    disabled={healthRepairing}
+                    className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap disabled:opacity-60"
+                  >
+                    <Wrench className="w-3.5 h-3.5" />
+                    <span>{healthRepairing ? 'Đang chuẩn hóa...' : 'Tự động sửa lỗi (1-Click)'}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {healthSummary.length > 0 && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 space-y-1">
+                {healthSummary.map((line, i) => (
+                  <p key={i}>• {line}</p>
+                ))}
+              </div>
+            )}
+
+            {healthReport && (
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+                    <div className="text-slate-500">Điểm Toàn vẹn</div>
+                    <div
+                      className={`text-lg font-extrabold font-mono-num mt-0.5 ${
+                        healthReport.healthyScore >= 90
+                          ? 'text-emerald-700'
+                          : healthReport.healthyScore >= 70
+                            ? 'text-amber-700'
+                            : 'text-red-700'
+                      }`}
+                    >
+                      {healthReport.healthyScore}/100
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+                    <div className="text-slate-500">Giáo viên / Phòng</div>
+                    <div className="text-sm font-bold font-mono-num text-slate-900 mt-1">
+                      {healthReport.stats.teachers} GV · {healthReport.stats.rooms} Phòng
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+                    <div className="text-slate-500">Học sinh / Gia đình</div>
+                    <div className="text-sm font-bold font-mono-num text-slate-900 mt-1">
+                      {healthReport.stats.students} HS · {healthReport.stats.families} GĐ
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+                    <div className="text-slate-500">TKB / Mẫu in</div>
+                    <div className="text-sm font-bold font-mono-num text-slate-900 mt-1">
+                      {healthReport.stats.timetableSlots} ca · {healthReport.stats.printTemplates} mẫu
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
+                    <div className="text-slate-500">Cảnh báo phát hiện</div>
+                    <div className="text-lg font-extrabold font-mono-num text-slate-900 mt-0.5">
+                      {healthReport.issues.length}
+                    </div>
+                  </div>
+                </div>
+
+                {healthReport.issues.length === 0 ? (
+                  <p className="text-xs font-semibold text-emerald-700">
+                    Tuyệt vời! Toàn bộ liên kết khóa ngoại, mã học sinh NT26, mã QR động và hộ gia đình đều đồng bộ chuẩn.
+                  </p>
+                ) : (
+                  <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg">
+                    {healthReport.issues.slice(0, 20).map((issue) => (
+                      <div key={issue.id} className="px-3 py-2 text-xs flex items-start justify-between gap-3">
+                        <div>
+                          <span className="font-bold text-slate-900">{issue.entityLabel}</span>
+                          <p className="text-slate-600 mt-0.5">{issue.detail}</p>
+                        </div>
+                        <span
+                          className={`font-bold shrink-0 ${
+                            issue.severity === 'HIGH'
+                              ? 'text-red-700'
+                              : issue.severity === 'MEDIUM'
+                                ? 'text-amber-700'
+                                : 'text-slate-500'
+                          }`}
+                        >
+                          {issue.autoFixable ? 'Tự sửa được' : 'Cần rà soát'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* SECTION 3: ACCESS AUDIT LOGS */}
           <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">

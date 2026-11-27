@@ -1,6 +1,7 @@
 import type {
   FamilyProfile,
   NationalExam,
+  PrintTemplate,
   ScoreRecord,
   SiteConfig,
   Student,
@@ -9,6 +10,11 @@ import type {
   TuitionRecord,
 } from '../types';
 import { BRAND_LOGO_URL } from '../components/BrandLogo';
+import {
+  STUDENT_PRINT_COLUMNS,
+  TEACHER_PRINT_COLUMNS,
+  type WorkspaceIndexes,
+} from './workspaceIntegrity';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -1269,3 +1275,453 @@ export function buildStudentQrCardsHtml(params: {
   });
 }
 
+// ============================================================
+// 7. BLOCK-BASED CUSTOMIZABLE DIRECTORY PRINT ENGINE (STUDENTS / TEACHERS)
+// ============================================================
+
+function formatStudentPrintCell(st: Student, colKey: string): string {
+  switch (colKey) {
+    case 'code':
+      return `<span class="mono-num"><strong>${escapeHtml(st.code)}</strong></span>`;
+    case 'fullName':
+      return `<strong>${escapeHtml(st.fullName)}</strong>`;
+    case 'centerClass':
+      return escapeHtml(st.centerClass);
+    case 'gradeLevel':
+      return `<span class="mono-num">Khối ${escapeHtml(st.grade)} (${
+        st.level === 'CAP_1' ? 'Cấp 1' : st.level === 'CAP_2' ? 'Cấp 2' : 'Cấp 3'
+      })</span>`;
+    case 'schoolClass':
+      return escapeHtml(st.schoolClass || '—');
+    case 'school':
+      return escapeHtml(st.school || '—');
+    case 'homeroomTeacher':
+      return escapeHtml(st.homeroomTeacher || '—');
+    case 'room':
+      return escapeHtml(st.room || '—');
+    case 'parentName':
+      return escapeHtml(st.parentName || '—');
+    case 'parentPhone':
+      return `<span class="mono-num">${escapeHtml(st.parentPhone || '—')}</span>`;
+    case 'services': {
+      const parts: string[] = [
+        st.packageType === 'ALL_IN_ONE'
+          ? 'Trọn gói'
+          : st.packageType === 'TUTORING'
+            ? 'Dạy kèm'
+            : 'Theo môn',
+      ];
+      if (st.hasBoarding) parts.push('Bán trú');
+      if (st.hasShuttle) parts.push('Đưa rước');
+      if (st.annualPrepaid) parts.push('Đóng năm');
+      return escapeHtml(parts.join(' · '));
+    }
+    case 'enrolledSubjects':
+      return escapeHtml((st.enrolledSubjects || []).join(', ') || '—');
+    case 'accessPin':
+      return `<span class="mono-num">${escapeHtml(st.accessPin || '—')}</span>`;
+    case 'status':
+      return st.status === 'ACTIVE' ? 'Đang học' : 'Tạm nghỉ';
+    default:
+      return '—';
+  }
+}
+
+function formatTeacherPrintCell(
+  t: Teacher,
+  colKey: string,
+  indexes?: WorkspaceIndexes,
+): string {
+  const slots = indexes?.slotsByTeacherId.get(t.id) || [];
+  switch (colKey) {
+    case 'name':
+      return `<strong>${escapeHtml(t.name)}</strong>`;
+    case 'shortName':
+      return escapeHtml(t.shortName || '—');
+    case 'teacherGroup':
+      return t.teacherGroup === 'TUTOR_REVIEW' ? 'GV Trả bài' : 'GV Bộ môn';
+    case 'subjects':
+      return escapeHtml((t.subjects || []).join(', ') || '—');
+    case 'degree':
+      return escapeHtml(t.degree || '—');
+    case 'experienceYears':
+      return `<span class="mono-num">${escapeHtml(t.experienceYears ?? 0)} năm</span>`;
+    case 'phone':
+      return `<span class="mono-num">${escapeHtml(t.phone || '—')}</span>`;
+    case 'email':
+      return `<span class="mono-num">${escapeHtml(t.email || '—')}</span>`;
+    case 'roomDefault':
+      return escapeHtml(t.roomDefault || '—');
+    case 'weeklySlots':
+      return `<span class="mono-num"><strong>${slots.length}</strong> ca</span>`;
+    case 'assignedClasses': {
+      const classes = Array.from(new Set(slots.map((s) => s.centerClass))).sort();
+      return escapeHtml(classes.join(', ') || '—');
+    }
+    case 'status':
+      return t.status === 'ACTIVE' ? 'Đang dạy' : 'Đang nghỉ';
+    default:
+      return '—';
+  }
+}
+
+export function buildCustomDirectoryPrintHtml(params: {
+  template: PrintTemplate;
+  students?: Student[];
+  teachers?: Teacher[];
+  indexes?: WorkspaceIndexes;
+  filterSummary?: string;
+  siteConfig?: Partial<SiteConfig>;
+}): string {
+  const { template, siteConfig } = params;
+  const isStudents = template.entityType === 'STUDENTS';
+  const students = params.students || [];
+  const teachers = params.teachers || [];
+  const totalCount = isStudents ? students.length : teachers.length;
+
+  const colCatalog = isStudents ? STUDENT_PRINT_COLUMNS : TEACHER_PRINT_COLUMNS;
+  const colMap = new Map(colCatalog.map((c) => [c.key, c]));
+  const activeCols = template.columns
+    .map((key) => colMap.get(key))
+    .filter((c): c is NonNullable<typeof c> => Boolean(c));
+  const extraBlankCols = (template.extraBlankColumns || [])
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  const logoUrl = escapeHtml(resolveAbsoluteLogoUrl());
+  const centerName = escapeHtml(
+    siteConfig?.centerName || 'TRUNG TÂM DẠY THÊM HỌC THÊM NHÂN TRÍ',
+  );
+  const domain = escapeHtml(siteConfig?.domain || 'daythemnhantri.com');
+  const hotline = escapeHtml(siteConfig?.hotlineZalo || '0947 376 444 (Cô Tâm)');
+  const campus1 = escapeHtml(
+    siteConfig?.campus1 || 'Cơ sở 1: 35 Lý Thường Kiệt, TP. Long Xuyên, Tỉnh An Giang',
+  );
+  const campus2 = escapeHtml(siteConfig?.campus2 || '');
+  const printedAt = escapeHtml(formatTodayVn());
+
+  const fontSizePx = template.fontSize === 'sm' ? '10.5px' : template.fontSize === 'lg' ? '13px' : '11.5px';
+  const pageSizeCss = template.orientation === 'landscape' ? 'A4 landscape' : 'A4 portrait';
+  const shellMaxWidth = template.orientation === 'landscape' ? '1120px' : '820px';
+
+  // Grouping logic
+  type RowGroup<T> = { groupTitle: string; items: T[] };
+  const buildGroups = (): Array<RowGroup<Student | Teacher>> => {
+    if (isStudents) {
+      if (template.groupBy === 'NONE') {
+        return [{ groupTitle: '', items: students }];
+      }
+      const map = new Map<string, Student[]>();
+      for (const st of students) {
+        const key =
+          template.groupBy === 'CLASS'
+            ? st.centerClass || 'Chưa phân lớp'
+            : template.groupBy === 'GRADE'
+              ? `Khối ${st.grade}`
+              : template.groupBy === 'LEVEL'
+                ? st.level === 'CAP_1'
+                  ? 'Cấp 1 (Tiểu học)'
+                  : st.level === 'CAP_2'
+                    ? 'Cấp 2 (THCS)'
+                    : 'Cấp 3 (THPT)'
+                : st.status === 'ACTIVE'
+                  ? 'Đang theo học'
+                  : 'Tạm nghỉ';
+        const list = map.get(key) || [];
+        list.push(st);
+        map.set(key, list);
+      }
+      return Array.from(map.entries()).map(([groupTitle, items]) => ({ groupTitle, items }));
+    } else {
+      if (template.groupBy === 'NONE') {
+        return [{ groupTitle: '', items: teachers }];
+      }
+      const map = new Map<string, Teacher[]>();
+      for (const t of teachers) {
+        const key =
+          template.groupBy === 'TEACHER_GROUP'
+            ? t.teacherGroup === 'TUTOR_REVIEW'
+              ? 'Nhóm Giáo viên Trả bài & Kèm sát'
+              : 'Nhóm Giáo viên Bộ môn'
+            : t.status === 'ACTIVE'
+              ? 'Đang giảng dạy'
+              : 'Đang nghỉ phép';
+        const list = map.get(key) || [];
+        list.push(t);
+        map.set(key, list);
+      }
+      return Array.from(map.entries()).map(([groupTitle, items]) => ({ groupTitle, items }));
+    }
+  };
+
+  const groups = buildGroups();
+
+  const headerCellsHtml = [
+    template.blocks.showRowNumbers ? '<th style="width:38px;text-align:center">STT</th>' : '',
+    ...activeCols.map(
+      (col) =>
+        `<th style="text-align:${col.align || 'left'}">${escapeHtml(col.shortLabel || col.label)}</th>`,
+    ),
+    ...extraBlankCols.map(
+      (blank) => `<th style="text-align:center;min-width:74px">${escapeHtml(blank)}</th>`,
+    ),
+  ]
+    .filter(Boolean)
+    .join('');
+
+  let globalIndex = 0;
+  const groupsHtml =
+    totalCount === 0
+      ? `<div class="empty-box">Không có dữ liệu phù hợp với bộ lọc hiện tại.</div>`
+      : groups
+          .map((grp) => {
+            const rowsHtml = grp.items
+              .map((item) => {
+                globalIndex++;
+                const cells = [
+                  template.blocks.showRowNumbers
+                    ? `<td class="mono-num" style="text-align:center;color:#475569">${globalIndex}</td>`
+                    : '',
+                  ...activeCols.map((col) => {
+                    const cellContent = isStudents
+                      ? formatStudentPrintCell(item as Student, col.key)
+                      : formatTeacherPrintCell(item as Teacher, col.key, params.indexes);
+                    return `<td style="text-align:${col.align || 'left'}">${cellContent}</td>`;
+                  }),
+                  ...extraBlankCols.map(() => `<td class="blank-cell">&nbsp;</td>`),
+                ]
+                  .filter(Boolean)
+                  .join('');
+                return `<tr>${cells}</tr>`;
+              })
+              .join('');
+
+            return `
+              ${
+                grp.groupTitle
+                  ? `<div class="group-heading">${escapeHtml(grp.groupTitle)} <span class="mono-num">(${grp.items.length})</span></div>`
+                  : ''
+              }
+              <table>
+                <thead><tr>${headerCellsHtml}</tr></thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            `;
+          })
+          .join('');
+
+  const summaryStatsHtml = template.blocks.showSummaryStats
+    ? isStudents
+      ? `<div class="stats-bar">
+          <div>Tổng số học sinh: <strong class="mono-num">${students.length}</strong></div>
+          <div>Bán trú: <strong class="mono-num">${students.filter((s) => s.hasBoarding).length}</strong></div>
+          <div>Đưa rước: <strong class="mono-num">${students.filter((s) => s.hasShuttle).length}</strong></div>
+          <div>Đang học: <strong class="mono-num">${students.filter((s) => s.status === 'ACTIVE').length}</strong></div>
+        </div>`
+      : `<div class="stats-bar">
+          <div>Tổng số giáo viên: <strong class="mono-num">${teachers.length}</strong></div>
+          <div>GV Bộ môn: <strong class="mono-num">${teachers.filter((t) => t.teacherGroup === 'SUBJECT').length}</strong></div>
+          <div>GV Trả bài: <strong class="mono-num">${teachers.filter((t) => t.teacherGroup === 'TUTOR_REVIEW').length}</strong></div>
+          <div>Đang giảng dạy: <strong class="mono-num">${teachers.filter((t) => t.status === 'ACTIVE').length}</strong></div>
+        </div>`
+    : '';
+
+  const sigLabels =
+    template.blocks.signatureLabels && template.blocks.signatureLabels.length > 0
+      ? template.blocks.signatureLabels
+      : ['Người lập biểu', 'Giám đốc Trung tâm'];
+
+  const signaturesHtml = template.blocks.showSignatures
+    ? `
+      <div class="sig-grid" style="grid-template-columns: repeat(${sigLabels.length}, minmax(0, 1fr))">
+        ${sigLabels
+          .map(
+            (lbl) => `
+          <div class="sig-col">
+            <div class="sig-role">${escapeHtml(lbl)}</div>
+            <div class="sig-note">(Ký và ghi rõ họ tên)</div>
+            <div class="sig-space"></div>
+          </div>`,
+          )
+          .join('')}
+      </div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(template.customTitle || template.name)} — Trung Tâm Nhân Trí</title>
+  <style>
+    @page { size: ${pageSizeCss}; margin: 11mm 11mm 13mm 11mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: #0f172a;
+      background: #f1f5f9;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      font-size: ${fontSizePx};
+      line-height: 1.45;
+    }
+    .mono-num { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .watermark-layer {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .watermark-logo {
+      width: 340px; height: 340px; object-fit: contain;
+      opacity: 0.055; transform: rotate(-18deg);
+    }
+    .watermark-text {
+      margin-top: 8px; font-size: 24px; font-weight: 800; letter-spacing: 0.22em;
+      color: #1e3a8a; opacity: 0.045; transform: rotate(-18deg);
+      text-transform: uppercase; white-space: nowrap;
+    }
+    .print-page {
+      position: relative;
+      z-index: 1;
+      max-width: ${shellMaxWidth};
+      margin: 14px auto;
+      padding: 20px 24px 26px;
+      background: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.08);
+    }
+    .brand-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding-bottom: 10px; border-bottom: 2.5px solid #1e3a8a; margin-bottom: 14px;
+    }
+    .brand-left { display: flex; align-items: center; gap: 12px; }
+    .brand-logo-wrap {
+      width: 54px; height: 54px; border-radius: 999px; border: 1.5px solid #bfdbfe;
+      padding: 2px; background: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .brand-logo-wrap img { width: 100%; height: 100%; object-fit: contain; border-radius: 999px; }
+    .brand-org { font-size: 13.5px; font-weight: 800; color: #1e3a8a; }
+    .brand-sub { font-size: 10.5px; color: #475569; margin-top: 2px; }
+    .brand-meta { text-align: right; font-size: 10.5px; color: #475569; flex-shrink: 0; }
+    .brand-meta strong { color: #1e3a8a; font-size: 11px; display: block; }
+    .doc-title-box { text-align: center; margin: 10px 0 12px; }
+    .doc-kicker { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: #b45309; }
+    .doc-title { font-size: 17px; font-weight: 800; color: #0f172a; margin: 4px 0 0; }
+    .filter-summary {
+      background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 7px 11px; margin-bottom: 10px; font-size: 10.5px; color: #334155;
+      display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    }
+    .stats-bar {
+      display: flex; flex-wrap: wrap; gap: 16px; padding: 7px 11px;
+      background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;
+      margin-bottom: 12px; font-size: 11px; color: #1e3a8a;
+    }
+    .group-heading {
+      margin: 12px 0 6px; font-size: 12px; font-weight: 800; color: #1e3a8a;
+      padding-bottom: 3px; border-bottom: 1px solid #cbd5e1;
+      page-break-after: avoid; break-after: avoid;
+    }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+    thead { display: table-header-group; }
+    tr { page-break-inside: avoid; break-inside: avoid; }
+    th, td { border: 1px solid #cbd5e1; padding: 5.5px 7px; vertical-align: middle; }
+    th { background: #f1f5f9; color: #0f172a; font-weight: 700; font-size: 0.94em; }
+    td.blank-cell { min-height: 22px; }
+    .empty-box {
+      border: 1px dashed #cbd5e1; border-radius: 8px; padding: 24px;
+      text-align: center; color: #64748b; margin: 14px 0;
+    }
+    .sig-grid {
+      display: grid; gap: 16px; margin-top: 22px; text-align: center;
+      page-break-inside: avoid; break-inside: avoid;
+    }
+    .sig-role { font-weight: 700; color: #0f172a; font-size: 11.5px; }
+    .sig-note { font-size: 10px; color: #64748b; font-style: italic; margin-top: 2px; }
+    .sig-space { height: 58px; }
+    .brand-footer {
+      margin-top: 18px; padding-top: 8px; border-top: 1px solid #cbd5e1;
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 10px; color: #64748b; gap: 10px;
+    }
+    @media print {
+      body { background: #fff; }
+      .print-page { margin: 0; padding: 0; max-width: none; box-shadow: none; border-radius: 0; }
+    }
+  </style>
+</head>
+<body>
+  ${
+    template.blocks.showWatermark
+      ? `<div class="watermark-layer" aria-hidden="true">
+          <img class="watermark-logo" src="${logoUrl}" alt="" />
+          <div class="watermark-text">NHÂN TRÍ · SINCE 2023</div>
+        </div>`
+      : ''
+  }
+  <section class="print-page">
+    ${
+      template.blocks.showLogoHeader
+        ? `<header class="brand-header">
+            <div class="brand-left">
+              <div class="brand-logo-wrap">
+                <img src="${logoUrl}" alt="Logo Trung Tâm Nhân Trí" />
+              </div>
+              <div>
+                <div class="brand-org">${centerName}</div>
+                <div class="brand-sub">${campus1}${campus2 ? ` · ${campus2}` : ''}</div>
+                <div class="brand-sub">Website: <strong>${domain}</strong> · Hotline/Zalo: <strong>${hotline}</strong></div>
+              </div>
+            </div>
+            <div class="brand-meta">
+              <strong>MẪU CHUẨN TRUNG TÂM</strong>
+              <div>${escapeHtml(template.name)}</div>
+              <div>Xuất lúc: ${printedAt}</div>
+            </div>
+          </header>`
+        : ''
+    }
+    <div class="doc-title-box">
+      <div class="doc-kicker">${isStudents ? 'Hồ sơ Học vụ · Danh sách Học sinh' : 'Hồ sơ Nhân sự · Đội ngũ Giáo viên'}</div>
+      <h1 class="doc-title">${escapeHtml(template.customTitle || template.name)}</h1>
+    </div>
+    ${
+      template.blocks.showFilterSummary
+        ? `<div class="filter-summary">
+            <span><strong>Phạm vi lọc:</strong> ${escapeHtml(params.filterSummary || 'Toàn bộ danh sách đang hiển thị')}</span>
+            <span><strong>Ngày in:</strong> <span class="mono-num">${printedAt}</span></span>
+          </div>`
+        : ''
+    }
+    ${summaryStatsHtml}
+    ${groupsHtml}
+    ${signaturesHtml}
+    <footer class="brand-footer">
+      <span>Biểu mẫu hành chính chính thức · ${centerName} (${domain})</span>
+      <span>Trao tri thức · Gửi yêu thương</span>
+    </footer>
+  </section>
+</body>
+</html>`;
+}
+
+export function downloadBrandedHtmlFile(htmlContent: string, fileName: string): void {
+  if (typeof document === 'undefined' || typeof Blob === 'undefined') return;
+  const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName.endsWith('.html') ? fileName : `${fileName}.html`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

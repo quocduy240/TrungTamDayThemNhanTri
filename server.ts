@@ -72,6 +72,14 @@ import {
   resolvePrefKey,
   validateWebhookUrl,
 } from './src/lib/reminderDispatcher.ts';
+import {
+  auditDatabaseHealth,
+  cascadeSyncRoomUpdate,
+  cascadeSyncStudentUpdate,
+  cascadeSyncTeacherUpdate,
+  ensureSystemPrintTemplates,
+  repairDatabaseHealth,
+} from './src/lib/workspaceIntegrity.ts';
 import type {
   AccessAuditLog,
   AttendanceRecord,
@@ -81,8 +89,14 @@ import type {
   ClassCheckInRecord,
   DatabaseState,
   DayOfWeek,
+  EducationLevel,
   FamilyProfile,
   FeedbackTicket,
+  PrintTemplate,
+  PrintTemplateBlocks,
+  PrintTemplateEntityType,
+  PrintTemplateGroupBy,
+  PrintTemplatePreset,
   Room,
   ScoreRecord,
   SessionPeriod,
@@ -1023,6 +1037,7 @@ app.get('/api/v1/workspace', requireAuth(), (req: AuthedRequest, res) => {
     myNotificationPref: getOrBuildUserNotificationPref(db, user),
     classCheckins: scopedCheckins,
     reminderDispatchLogs: isAdminUser ? (db.reminderDispatchLogs || []) : [],
+    printTemplates: isStaff ? ensureSystemPrintTemplates(db.printTemplates) : [],
   });
 });
 
@@ -1430,16 +1445,9 @@ app.patch('/api/v1/rooms/:id', requireAuth(['MANAGER']), (req: AuthedRequest, re
   if (typeof b.active === 'boolean') room.active = b.active;
   if (typeof b.note === 'string') room.note = b.note.trim().slice(0, 240) || undefined;
 
-  if (oldName !== room.name) {
-    db.timetable.forEach((slot) => {
-      if (slot.roomId === room.id || slot.room === oldName) {
-        slot.room = room.name;
-        slot.roomId = room.id;
-      }
-    });
-  }
+  const synced = cascadeSyncRoomUpdate(db, room, oldName);
   saveDb(db);
-  res.json({ room });
+  res.json({ room, synced });
 });
 
 app.delete('/api/v1/rooms/:id', requireAuth(['MANAGER']), (req, res) => {
@@ -1511,6 +1519,7 @@ app.patch('/api/v1/teachers/:id', requireAuth(['MANAGER']), (req: AuthedRequest,
     return;
   }
   const b = req.body || {};
+  const oldName = teacher.name;
   const oldShort = teacher.shortName;
   if (typeof b.name === 'string' && b.name.trim().length >= 2) teacher.name = b.name.trim().slice(0, 120);
   if (typeof b.shortName === 'string' && b.shortName.trim().length >= 2) teacher.shortName = b.shortName.trim().slice(0, 60);
@@ -1532,13 +1541,9 @@ app.patch('/api/v1/teachers/:id', requireAuth(['MANAGER']), (req: AuthedRequest,
   if (Array.isArray(b.availability)) {
     teacher.availability = b.availability.map(String).filter((k: string) => ALL_SHIFT_KEYS.includes(k));
   }
-  if (oldShort !== teacher.shortName) {
-    db.timetable.forEach((slot) => {
-      if (slot.teacherId === teacher.id) slot.teacherName = teacher.shortName;
-    });
-  }
+  const synced = cascadeSyncTeacherUpdate(db, teacher, oldName, oldShort);
   saveDb(db);
-  res.json({ teacher });
+  res.json({ teacher, synced });
 });
 
 app.patch('/api/v1/teachers/:id/availability', requireAuth(['MANAGER', 'TEACHER']), (req: AuthedRequest, res) => {
@@ -3463,6 +3468,253 @@ app.post('/api/v1/timetable/dispatch-personal', requireAuth(['MANAGER']), async 
     webhookDelivered,
     logs: createdLogs,
   });
+});
+
+// ============================================================
+// STUDENT QUICK-EDIT (WITH CASCADE INTEGRITY SYNC)
+// ============================================================
+
+app.patch('/api/v1/students/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const student = db.students.find((s) => s.id === req.params.id);
+  if (!student) {
+    res.status(404).json({ error: 'Không tìm thấy hồ sơ học sinh.' });
+    return;
+  }
+  const b = req.body || {};
+  if (typeof b.fullName === 'string' && b.fullName.trim().length >= 2) {
+    student.fullName = b.fullName.trim().slice(0, 120);
+  }
+  if (b.grade !== undefined) {
+    const g = Math.min(12, Math.max(1, Number(b.grade) || student.grade));
+    student.grade = g;
+    student.level = (g <= 5 ? 'CAP_1' : g <= 9 ? 'CAP_2' : 'CAP_3') as EducationLevel;
+  }
+  if (b.level === 'CAP_1' || b.level === 'CAP_2' || b.level === 'CAP_3') {
+    student.level = b.level;
+  }
+  if (typeof b.centerClass === 'string' && b.centerClass.trim().length >= 2) {
+    student.centerClass = b.centerClass.trim().slice(0, 60);
+  }
+  if (typeof b.schoolClass === 'string') {
+    student.schoolClass = b.schoolClass.trim().slice(0, 40) || student.schoolClass;
+  }
+  if (typeof b.school === 'string' && b.school.trim()) {
+    student.school = b.school.trim().slice(0, 140);
+  }
+  if (typeof b.homeroomTeacherId === 'string') {
+    student.homeroomTeacherId = b.homeroomTeacherId.trim() || undefined;
+  }
+  if (typeof b.homeroomTeacher === 'string' && b.homeroomTeacher.trim()) {
+    student.homeroomTeacher = b.homeroomTeacher.trim().slice(0, 80);
+  }
+  if (typeof b.roomId === 'string') {
+    student.roomId = b.roomId.trim() || undefined;
+  }
+  if (typeof b.room === 'string' && b.room.trim()) {
+    student.room = b.room.trim().slice(0, 60);
+  }
+  if (typeof b.parentName === 'string' && b.parentName.trim()) {
+    student.parentName = b.parentName.trim().slice(0, 120);
+  }
+  if (typeof b.parentPhone === 'string' && b.parentPhone.trim().length >= 8) {
+    student.parentPhone = normalizePhoneVN(b.parentPhone) || b.parentPhone.trim().slice(0, 30);
+  }
+  if (
+    b.packageType === 'ALL_IN_ONE' ||
+    b.packageType === 'PER_SUBJECT' ||
+    b.packageType === 'TUTORING'
+  ) {
+    student.packageType = b.packageType;
+  }
+  if (typeof b.hasBoarding === 'boolean') student.hasBoarding = b.hasBoarding;
+  if (typeof b.hasShuttle === 'boolean') student.hasShuttle = b.hasShuttle;
+  if (typeof b.annualPrepaid === 'boolean') student.annualPrepaid = b.annualPrepaid;
+  if (b.enrolledSubjects !== undefined) {
+    const arr = Array.isArray(b.enrolledSubjects)
+      ? b.enrolledSubjects
+      : String(b.enrolledSubjects).split(/[,;]/);
+    const cleaned = arr.map((s: unknown) => String(s || '').trim()).filter(Boolean).slice(0, 12);
+    if (cleaned.length > 0) student.enrolledSubjects = cleaned;
+  }
+  if (b.status === 'ACTIVE' || b.status === 'PAUSED') {
+    student.status = b.status;
+  }
+
+  const synced = cascadeSyncStudentUpdate(db, student);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'STUDENT_QUICK_UPDATE',
+    targetLabel: `${student.fullName} (${student.code})`,
+    detail: `Cập nhật hồ sơ học sinh lớp ${student.centerClass}. Đồng bộ: ${synced.updatedScores} điểm, ${synced.updatedAttendance} điểm danh, ${synced.updatedTuition} phiếu học phí.`,
+  });
+  saveDb(db);
+  res.json({ student, synced });
+});
+
+// ============================================================
+// CENTER-STANDARD CUSTOM PRINT TEMPLATES CRUD
+// ============================================================
+
+function sanitizePrintBlocks(raw: unknown, fallback?: PrintTemplateBlocks): PrintTemplateBlocks {
+  const b = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const sigs = Array.isArray(b.signatureLabels)
+    ? b.signatureLabels.map((s) => String(s || '').trim().slice(0, 60)).filter(Boolean).slice(0, 4)
+    : fallback?.signatureLabels || ['Giáo viên phụ trách', 'Quản lý học vụ'];
+  return {
+    showLogoHeader: typeof b.showLogoHeader === 'boolean' ? b.showLogoHeader : fallback?.showLogoHeader ?? true,
+    showWatermark: typeof b.showWatermark === 'boolean' ? b.showWatermark : fallback?.showWatermark ?? true,
+    showFilterSummary: typeof b.showFilterSummary === 'boolean' ? b.showFilterSummary : fallback?.showFilterSummary ?? true,
+    showRowNumbers: typeof b.showRowNumbers === 'boolean' ? b.showRowNumbers : fallback?.showRowNumbers ?? true,
+    showSummaryStats: typeof b.showSummaryStats === 'boolean' ? b.showSummaryStats : fallback?.showSummaryStats ?? true,
+    showSignatures: typeof b.showSignatures === 'boolean' ? b.showSignatures : fallback?.showSignatures ?? true,
+    signatureLabels: sigs.length > 0 ? sigs : ['Giáo viên phụ trách', 'Quản lý học vụ'],
+  };
+}
+
+app.get('/api/v1/print-templates', requireAuth(['MANAGER', 'TEACHER']), (_req, res) => {
+  const db = loadDb();
+  const templates = ensureSystemPrintTemplates(db.printTemplates);
+  res.json({ templates });
+});
+
+app.post('/api/v1/print-templates', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.printTemplates = ensureSystemPrintTemplates(db.printTemplates);
+  const b = req.body || {};
+  const name = String(b.name || '').trim().slice(0, 120);
+  if (name.length < 2) {
+    res.status(400).json({ error: 'Vui lòng nhập tên Mẫu in (tối thiểu 2 ký tự).' });
+    return;
+  }
+  const entityType: PrintTemplateEntityType = b.entityType === 'TEACHERS' ? 'TEACHERS' : 'STUDENTS';
+  const presetBase: PrintTemplatePreset =
+    b.presetBase === 'SIMPLE' || b.presetBase === 'FULL' ? b.presetBase : 'CUSTOM';
+  const validGroupBys: PrintTemplateGroupBy[] = ['NONE', 'CLASS', 'GRADE', 'LEVEL', 'TEACHER_GROUP', 'STATUS'];
+  const groupBy: PrintTemplateGroupBy = validGroupBys.includes(b.groupBy) ? b.groupBy : 'NONE';
+  const columns = Array.isArray(b.columns)
+    ? b.columns.map((c: unknown) => String(c || '').trim()).filter(Boolean).slice(0, 16)
+    : [];
+  if (columns.length === 0) {
+    res.status(400).json({ error: 'Vui lòng chọn ít nhất 1 cột hiển thị cho Mẫu in.' });
+    return;
+  }
+  const extraBlankColumns = Array.isArray(b.extraBlankColumns)
+    ? b.extraBlankColumns.map((c: unknown) => String(c || '').trim().slice(0, 40)).filter(Boolean).slice(0, 4)
+    : [];
+
+  const template: PrintTemplate = {
+    id: `tpl-custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+    name,
+    description: String(b.description || '').trim().slice(0, 240) || undefined,
+    entityType,
+    presetBase,
+    customTitle:
+      String(b.customTitle || '').trim().slice(0, 140) ||
+      (entityType === 'TEACHERS' ? 'DANH SÁCH GIÁO VIÊN TRUNG TÂM' : 'DANH SÁCH HỌC SINH TRUNG TÂM'),
+    orientation: b.orientation === 'landscape' ? 'landscape' : 'portrait',
+    fontSize: b.fontSize === 'sm' || b.fontSize === 'lg' ? b.fontSize : 'md',
+    groupBy,
+    columns,
+    extraBlankColumns,
+    blocks: sanitizePrintBlocks(b.blocks),
+    isSystemDefault: false,
+    createdBy: req.user!.email || req.user!.name,
+    updatedBy: req.user!.email || req.user!.name,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.printTemplates.push(template);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'PRINT_TEMPLATE_CREATE',
+    targetLabel: `${template.name} (${template.entityType})`,
+    detail: `Tạo mẫu in tùy biến gồm ${template.columns.length} cột, khổ ${template.orientation}.`,
+  });
+  saveDb(db);
+  res.status(201).json({ template, templates: db.printTemplates });
+});
+
+app.patch('/api/v1/print-templates/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.printTemplates = ensureSystemPrintTemplates(db.printTemplates);
+  const template = db.printTemplates.find((t) => t.id === req.params.id);
+  if (!template) {
+    res.status(404).json({ error: 'Không tìm thấy mẫu in này.' });
+    return;
+  }
+  const b = req.body || {};
+  if (typeof b.name === 'string' && b.name.trim().length >= 2) template.name = b.name.trim().slice(0, 120);
+  if (typeof b.description === 'string') template.description = b.description.trim().slice(0, 240) || undefined;
+  if (typeof b.customTitle === 'string' && b.customTitle.trim()) template.customTitle = b.customTitle.trim().slice(0, 140);
+  if (b.presetBase === 'SIMPLE' || b.presetBase === 'FULL' || b.presetBase === 'CUSTOM') template.presetBase = b.presetBase;
+  if (b.orientation === 'portrait' || b.orientation === 'landscape') template.orientation = b.orientation;
+  if (b.fontSize === 'sm' || b.fontSize === 'md' || b.fontSize === 'lg') template.fontSize = b.fontSize;
+  const validGroupBys: PrintTemplateGroupBy[] = ['NONE', 'CLASS', 'GRADE', 'LEVEL', 'TEACHER_GROUP', 'STATUS'];
+  if (validGroupBys.includes(b.groupBy)) template.groupBy = b.groupBy;
+  if (Array.isArray(b.columns)) {
+    const cleaned = b.columns.map((c: unknown) => String(c || '').trim()).filter(Boolean).slice(0, 16);
+    if (cleaned.length > 0) template.columns = cleaned;
+  }
+  if (Array.isArray(b.extraBlankColumns)) {
+    template.extraBlankColumns = b.extraBlankColumns
+      .map((c: unknown) => String(c || '').trim().slice(0, 40))
+      .filter(Boolean)
+      .slice(0, 4);
+  }
+  if (b.blocks) {
+    template.blocks = sanitizePrintBlocks(b.blocks, template.blocks);
+  }
+  template.updatedBy = req.user!.email || req.user!.name;
+  template.updatedAt = new Date().toISOString();
+  saveDb(db);
+  res.json({ template, templates: db.printTemplates });
+});
+
+app.delete('/api/v1/print-templates/:id', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  db.printTemplates = ensureSystemPrintTemplates(db.printTemplates);
+  const template = db.printTemplates.find((t) => t.id === req.params.id);
+  if (!template) {
+    res.status(404).json({ error: 'Không tìm thấy mẫu in này.' });
+    return;
+  }
+  if (template.isSystemDefault) {
+    res.status(400).json({ error: 'Không thể xóa Mẫu in chuẩn mặc định của Trung tâm.' });
+    return;
+  }
+  db.printTemplates = db.printTemplates.filter((t) => t.id !== template.id);
+  saveDb(db);
+  res.json({ deleted: true, templates: db.printTemplates });
+});
+
+// ============================================================
+// DATA HEALTH AUDIT & 1-CLICK AUTO-REPAIR
+// ============================================================
+
+app.get('/api/v1/system/data-health', requireAuth(['MANAGER']), (_req, res) => {
+  const db = loadDb();
+  const report = auditDatabaseHealth(db);
+  res.json({ report });
+});
+
+app.post('/api/v1/system/data-health/repair', requireAuth(['ADMIN']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const result = repairDatabaseHealth(db);
+  appendAuditLog(db, {
+    actorEmail: req.user!.email,
+    actorRole: req.user!.role,
+    action: 'DATA_HEALTH_REPAIR',
+    targetLabel: `Điểm sức khỏe: ${result.reportAfter.healthyScore}/100`,
+    detail:
+      result.summary.length > 0
+        ? result.summary.join(' ')
+        : 'Kiểm tra toàn vẹn dữ liệu: CSDL đã đạt chuẩn, không cần sửa lỗi.',
+  });
+  saveDb(db);
+  res.json(result);
 });
 
 // ============================================================

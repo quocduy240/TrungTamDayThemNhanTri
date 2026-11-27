@@ -1,12 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  BookOpen,
+  Calendar,
   Camera,
   Check,
   Copy,
+  CreditCard,
   Download,
   FileSpreadsheet,
   Image as ImageIcon,
   KeyRound,
+  Pencil,
   Printer,
   QrCode,
   RefreshCw,
@@ -17,7 +21,7 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
-import type { SiteConfig, StudentAccessStatus, StudentRecord } from '../types';
+import type { PrintTemplate, SiteConfig, StudentAccessStatus, StudentRecord } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
 import {
   buildZaloAccessCardText,
@@ -32,16 +36,25 @@ import {
   renderQrDataUrl,
 } from '../lib/smartCodeAndQr';
 import { buildStudentQrCardsHtml } from '../lib/brandedDocumentExporter';
+import { ensureSystemPrintTemplates, type WorkspaceIndexes } from '../lib/workspaceIntegrity';
 import { BrandedPrintModal } from './BrandedPrintModal';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { QrAttendanceScannerModal, StudentQrCardModal } from './StudentQrHub';
+import { CustomPrintTemplateStudio } from './CustomPrintTemplateStudio';
+import { InlineErrorAlert } from './ContextualReloginBanner';
+import type { CrossNavIntent, QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface StudentsAttendanceModuleProps {
   workspace: WorkspacePayload;
+  indexes?: WorkspaceIndexes | null;
   siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
   initialClassFilter?: string;
   initialShiftLabel?: string;
+  initialTeacherId?: string;
+  onOpenDrawer?: (target: QuickDrawerTarget) => void;
+  onCrossNavigate?: (intent: CrossNavIntent) => void;
+  onRequestRelogin?: () => void;
 }
 
 interface PreviewRow {
@@ -95,16 +108,25 @@ function parseDelimitedText(text: string): Record<string, string>[] {
 
 export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> = ({
   workspace,
+  indexes,
   siteConfig,
   onRefresh,
   initialClassFilter,
   initialShiftLabel,
+  initialTeacherId,
+  onOpenDrawer,
+  onCrossNavigate,
+  onRequestRelogin,
 }) => {
   const isStaff =
     workspace.user.role === 'SUPER_ADMIN' ||
     workspace.user.role === 'ADMIN' ||
     workspace.user.role === 'MANAGER' ||
     workspace.user.role === 'TEACHER';
+  const canManageTemplates =
+    workspace.user.role === 'SUPER_ADMIN' ||
+    workspace.user.role === 'ADMIN' ||
+    workspace.user.role === 'MANAGER';
   const isAdmin =
     workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const minGradeForGmail =
@@ -113,19 +135,35 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
 
   const [search, setSearch] = useState(initialClassFilter || '');
   const [gradeFilter, setGradeFilter] = useState<'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3'>('ALL');
+  const [classSelect, setClassSelect] = useState<string>(initialClassFilter || 'ALL');
+  const [teacherFilter, setTeacherFilter] = useState<string>(initialTeacherId || 'ALL');
+  const [serviceFilter, setServiceFilter] = useState<'ALL' | 'BOARDING' | 'SHUTTLE' | 'ANNUAL'>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'PAUSED'>('ALL');
   const [shiftLabel, setShiftLabel] = useState(initialShiftLabel || 'Chiều Ca 2 (15:15–16:45)');
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [customPrintOpen, setCustomPrintOpen] = useState(false);
+  const [localTemplates, setLocalTemplates] = useState<PrintTemplate[]>(() =>
+    ensureSystemPrintTemplates(workspace.printTemplates),
+  );
 
   useEffect(() => {
     if (initialClassFilter) {
-      setSearch(initialClassFilter);
+      setClassSelect(initialClassFilter);
+      setSearch('');
+      setGradeFilter('ALL');
+      setTeacherFilter('ALL');
+    }
+    if (initialTeacherId) {
+      setTeacherFilter(initialTeacherId);
+      setClassSelect('ALL');
+      setSearch('');
       setGradeFilter('ALL');
     }
     if (initialShiftLabel) {
       setShiftLabel(initialShiftLabel);
     }
-  }, [initialClassFilter, initialShiftLabel]);
+  }, [initialClassFilter, initialTeacherId, initialShiftLabel]);
 
   // Per-Student Identity & Access Binding Modal (Admin / SuperAdmin)
   const [editingAccessStudent, setEditingAccessStudent] = useState<StudentRecord | null>(null);
@@ -171,37 +209,95 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
   const [buildingClassQr, setBuildingClassQr] = useState(false);
 
   const previewSmartCode = useMemo(
-    () => generateSmartStudentCode(newStudent.centerClass, workspace.students),
+    () =>
+      generateSmartStudentCode(
+        newStudent.centerClass,
+        workspace.students.map((s) => s.code),
+      ),
     [newStudent.centerClass, workspace.students],
   );
+
+  const classOptions = useMemo(() => {
+    const set = new Set<string>();
+    workspace.students.forEach((s) => {
+      if (s.centerClass) set.add(s.centerClass);
+    });
+    return Array.from(set).sort();
+  }, [workspace.students]);
+
+  const mergedTemplates = useMemo(
+    () => ensureSystemPrintTemplates(workspace.printTemplates?.length ? workspace.printTemplates : localTemplates),
+    [workspace.printTemplates, localTemplates],
+  );
+
+  const teacherStudentIds = useMemo(() => {
+    if (teacherFilter === 'ALL') return null;
+    const fromIndex = indexes?.studentsByTeacherId.get(teacherFilter);
+    if (fromIndex) return new Set(fromIndex.map((s) => s.id));
+    const tea = workspace.teachers.find((t) => t.id === teacherFilter);
+    return new Set(
+      workspace.students
+        .filter(
+          (st) =>
+            st.homeroomTeacherId === teacherFilter ||
+            (tea && (st.homeroomTeacher === tea.shortName || st.homeroomTeacher === tea.name)),
+        )
+        .map((s) => s.id),
+    );
+  }, [teacherFilter, indexes, workspace.students, workspace.teachers]);
 
   const filteredStudents = useMemo(() => {
     const q = search.trim().toLowerCase();
     return workspace.students.filter((st) => {
       if (gradeFilter !== 'ALL' && st.level !== gradeFilter) return false;
+      if (classSelect !== 'ALL' && st.centerClass !== classSelect) return false;
+      if (teacherStudentIds && !teacherStudentIds.has(st.id)) return false;
+      if (serviceFilter === 'BOARDING' && !st.hasBoarding) return false;
+      if (serviceFilter === 'SHUTTLE' && !st.hasShuttle) return false;
+      if (serviceFilter === 'ANNUAL' && !st.annualPrepaid) return false;
+      if (statusFilter !== 'ALL' && st.status !== statusFilter) return false;
       if (!q) return true;
       return (
         st.fullName.toLowerCase().includes(q) ||
         st.centerClass.toLowerCase().includes(q) ||
         st.school.toLowerCase().includes(q) ||
-        st.code.toLowerCase().includes(q)
+        st.code.toLowerCase().includes(q) ||
+        st.parentName.toLowerCase().includes(q) ||
+        st.parentPhone.toLowerCase().includes(q)
       );
     });
-  }, [workspace.students, search, gradeFilter]);
+  }, [workspace.students, search, gradeFilter, classSelect, teacherStudentIds, serviceFilter, statusFilter]);
+
+  const activeFilterSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (gradeFilter !== 'ALL') parts.push(gradeFilter === 'CAP_1' ? 'Cấp 1' : gradeFilter === 'CAP_2' ? 'Cấp 2' : 'Cấp 3');
+    if (classSelect !== 'ALL') parts.push(`Lớp ${classSelect}`);
+    if (teacherFilter !== 'ALL') {
+      const t = workspace.teachers.find((item) => item.id === teacherFilter);
+      if (t) parts.push(`GV: ${t.shortName}`);
+    }
+    if (serviceFilter === 'BOARDING') parts.push('Có Bán trú');
+    if (serviceFilter === 'SHUTTLE') parts.push('Có Đưa rước');
+    if (serviceFilter === 'ANNUAL') parts.push('Đóng 12 tháng');
+    if (statusFilter !== 'ALL') parts.push(statusFilter === 'ACTIVE' ? 'Đang học' : 'Tạm nghỉ');
+    if (search.trim()) parts.push(`Từ khóa "${search.trim()}"`);
+    return parts.length > 0 ? parts.join(' · ') : 'Toàn bộ danh sách Học sinh Trung tâm';
+  }, [gradeFilter, classSelect, teacherFilter, serviceFilter, statusFilter, search, workspace.teachers]);
 
   async function handlePrintFilteredQrCards() {
     if (filteredStudents.length === 0) return;
     setBuildingClassQr(true);
     setErrorMsg('');
     try {
-      const qrMap: Record<string, string> = {};
+      const cards: { student: StudentRecord; qrDataUrl: string; qrUrl: string }[] = [];
       for (const st of filteredStudents) {
         const token = st.qrToken || buildDeterministicQrToken(st.id, st.code);
-        qrMap[st.id] = await renderQrDataUrl(buildStudentQrUrl(token), 240);
+        const qrUrl = buildStudentQrUrl(token);
+        const qrDataUrl = await renderQrDataUrl(qrUrl, 240);
+        cards.push({ student: st, qrDataUrl, qrUrl });
       }
       const html = buildStudentQrCardsHtml({
-        students: filteredStudents,
-        qrDataUrlByStudentId: qrMap,
+        cards,
         siteConfig,
         title: `Bộ Thẻ QR Học sinh (${filteredStudents.length} em)`,
       });
@@ -452,11 +548,19 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
             </button>
             <button
               type="button"
+              onClick={() => setCustomPrintOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-blue-950 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 whitespace-nowrap cursor-pointer"
+            >
+              <Printer className="w-4 h-4 text-blue-900" />
+              <span>In Danh sách Lớp tùy biến ({filteredStudents.length})</span>
+            </button>
+            <button
+              type="button"
               disabled={buildingClassQr || filteredStudents.length === 0}
               onClick={() => void handlePrintFilteredQrCards()}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-950 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 whitespace-nowrap cursor-pointer disabled:opacity-50"
             >
-              <Printer className="w-4 h-4 text-amber-700" />
+              <QrCode className="w-4 h-4 text-amber-700" />
               <span>{buildingClassQr ? 'Đang tạo thẻ...' : `In Bộ Thẻ QR (${filteredStudents.length})`}</span>
             </button>
             <button
@@ -482,14 +586,11 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           </button>
         </div>
       )}
-      {errorMsg && (
-        <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs font-medium text-red-800 flex items-center justify-between">
-          <span>{errorMsg}</span>
-          <button type="button" onClick={() => setErrorMsg('')} className="cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+      <InlineErrorAlert
+        message={errorMsg || null}
+        onRequestRelogin={onRequestRelogin}
+        onDismiss={() => setErrorMsg('')}
+      />
 
       {/* Smart Import Panel (Excel + Gemini Vision Roster OCR) */}
       {showImport && isStaff && (
@@ -667,59 +768,129 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
         </form>
       )}
 
-      {/* Search, Filter & Attendance Shift Toolbar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Tìm tên, lớp, trường..."
-              className="pl-9 pr-3 py-1.5 text-sm border border-slate-300 rounded-lg w-60 focus:outline-none focus:border-blue-900"
-            />
+      {/* Search, Multi-Criteria Filter & Attendance Shift Toolbar */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Tìm tên HS, mã NT26, SĐT PH..."
+                className="pl-9 pr-3 py-1.5 text-sm border border-slate-300 rounded-lg w-60 focus:outline-none focus:border-blue-900"
+              />
+            </div>
+
+            <div className="inline-flex items-center p-1 bg-slate-100 rounded-lg">
+              {[
+                { id: 'ALL', label: 'Tất cả' },
+                { id: 'CAP_1', label: 'Cấp 1' },
+                { id: 'CAP_2', label: 'Cấp 2' },
+                { id: 'CAP_3', label: 'Cấp 3' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setGradeFilter(f.id as 'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3')}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-md cursor-pointer ${
+                    gradeFilter === f.id ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="inline-flex items-center p-1 bg-slate-100 rounded-lg">
-            {[
-              { id: 'ALL', label: 'Tất cả' },
-              { id: 'CAP_1', label: 'Cấp 1' },
-              { id: 'CAP_2', label: 'Cấp 2' },
-              { id: 'CAP_3', label: 'Cấp 3' },
-            ].map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => setGradeFilter(f.id as 'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3')}
-                className={`px-2.5 py-1 text-xs font-semibold rounded-md cursor-pointer ${
-                  gradeFilter === f.id ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
-                }`}
+          {isStaff && (
+            <div className="flex items-center gap-2 text-xs">
+              <UserCheck className="w-4 h-4 text-blue-900" />
+              <span className="text-slate-600">Ca điểm danh:</span>
+              <select
+                value={shiftLabel}
+                onChange={(e) => setShiftLabel(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-medium"
               >
-                {f.label}
-              </button>
-            ))}
-          </div>
+                <option>Sáng Ca 1 (07:15–08:45)</option>
+                <option>Sáng Ca 2 (09:15–10:45)</option>
+                <option>Chiều Ca 1 (13:30–15:00)</option>
+                <option>Chiều Ca 2 (15:15–16:45)</option>
+                <option>Tối Ca 1 (17:30–19:00)</option>
+                <option>Tối Ca 2 (19:00–20:30)</option>
+              </select>
+            </div>
+          )}
         </div>
 
-        {isStaff && (
-          <div className="flex items-center gap-2 text-xs">
-            <UserCheck className="w-4 h-4 text-blue-900" />
-            <span className="text-slate-600">Ca điểm danh:</span>
+        {/* Secondary Multi-Criteria Filter Row */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-100">
+          <select
+            value={classSelect}
+            onChange={(e) => setClassSelect(e.target.value)}
+            className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-medium text-slate-800"
+          >
+            <option value="ALL">Tất cả Lớp Trung tâm</option>
+            {classOptions.map((cls) => (
+              <option key={cls} value={cls}>
+                {cls}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={teacherFilter}
+            onChange={(e) => setTeacherFilter(e.target.value)}
+            className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-medium text-slate-800"
+          >
+            <option value="ALL">Tất cả Giáo viên phụ trách</option>
+            {workspace.teachers.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.shortName} ({t.name})
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={serviceFilter}
+            onChange={(e) => setServiceFilter(e.target.value as 'ALL' | 'BOARDING' | 'SHUTTLE' | 'ANNUAL')}
+            className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-medium text-slate-800"
+          >
+            <option value="ALL">Mọi dịch vụ (Bán trú / Đưa rước)</option>
+            <option value="BOARDING">Có đăng ký Bán trú</option>
+            <option value="SHUTTLE">Có đăng ký Đưa rước</option>
+            <option value="ANNUAL">Đóng học phí trọn 12 tháng</option>
+          </select>
+
+          <div className="flex items-center gap-2">
             <select
-              value={shiftLabel}
-              onChange={(e) => setShiftLabel(e.target.value)}
-              className="px-2.5 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-medium"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'ALL' | 'ACTIVE' | 'PAUSED')}
+              className="flex-1 px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white font-medium text-slate-800"
             >
-              <option>Sáng Ca 1 (07:15–08:45)</option>
-              <option>Sáng Ca 2 (09:15–10:45)</option>
-              <option>Chiều Ca 1 (13:30–15:00)</option>
-              <option>Chiều Ca 2 (15:15–16:45)</option>
-              <option>Tối Ca 1 (17:30–19:00)</option>
-              <option>Tối Ca 2 (19:00–20:30)</option>
+              <option value="ALL">Mọi trạng thái</option>
+              <option value="ACTIVE">Đang theo học</option>
+              <option value="PAUSED">Tạm nghỉ / Bảo lưu</option>
             </select>
+            {(search || gradeFilter !== 'ALL' || classSelect !== 'ALL' || teacherFilter !== 'ALL' || serviceFilter !== 'ALL' || statusFilter !== 'ALL') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch('');
+                  setGradeFilter('ALL');
+                  setClassSelect('ALL');
+                  setTeacherFilter('ALL');
+                  setServiceFilter('ALL');
+                  setStatusFilter('ALL');
+                }}
+                className="text-xs font-semibold text-blue-900 hover:underline whitespace-nowrap"
+              >
+                Xóa lọc
+              </button>
+            )}
           </div>
-        )}
+        </div>
       </div>
 
       {/* Students Table */}
@@ -747,16 +918,31 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                   )}
                 </td>
                 <td className="py-3 px-4">
-                  <p className="font-semibold text-slate-950">{st.fullName}</p>
-                  <p className="text-xs text-slate-500">
-                    {st.schoolClass} · {st.school}
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => onOpenDrawer?.({ type: 'STUDENT', id: st.id })}
+                    className="text-left group cursor-pointer"
+                  >
+                    <p className="font-semibold text-slate-950 group-hover:text-blue-900 transition">
+                      {st.fullName}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {st.schoolClass} · {st.school}
+                    </p>
+                  </button>
                 </td>
                 <td className="py-3 px-4">
-                  <p className="font-semibold text-blue-950">{st.centerClass}</p>
-                  <p className="text-xs text-slate-500">
-                    {st.homeroomTeacher} · {st.room}
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => onCrossNavigate?.({ tab: 'timetable', classFilter: st.centerClass })}
+                    className="text-left group cursor-pointer"
+                    title="Mở Thời khóa biểu lọc theo lớp này"
+                  >
+                    <p className="font-semibold text-blue-950 group-hover:underline">{st.centerClass}</p>
+                    <p className="text-xs text-slate-500">
+                      {st.homeroomTeacher} · {st.room}
+                    </p>
+                  </button>
                 </td>
                 <td className="py-3 px-4 text-xs text-slate-700">
                   <p>
@@ -795,23 +981,67 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
                 </td>
                 {isStaff && (
                   <td className="py-3 px-4 text-right whitespace-nowrap">
-                    <div className="inline-flex items-center gap-1.5">
+                    <div className="inline-flex items-center gap-1 flex-wrap justify-end">
+                      {onOpenDrawer && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenDrawer({ type: 'STUDENT', id: st.id })}
+                          title="Mở ngăn kéo Xem / Sửa nhanh hồ sơ"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-md cursor-pointer"
+                        >
+                          <Pencil className="w-3 h-3 text-blue-900" />
+                          <span>Sửa</span>
+                        </button>
+                      )}
+                      {onCrossNavigate && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onCrossNavigate({ tab: 'timetable', classFilter: st.centerClass })}
+                            title="Mở TKB lớp này"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md cursor-pointer"
+                          >
+                            <Calendar className="w-3 h-3 text-blue-900" />
+                            <span>TKB</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onCrossNavigate({ tab: 'scores', studentId: st.id })}
+                            title="Mở Học bạ & Điểm em này"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md cursor-pointer"
+                          >
+                            <BookOpen className="w-3 h-3 text-emerald-700" />
+                            <span>Điểm</span>
+                          </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => onCrossNavigate({ tab: 'tuition', studentId: st.id })}
+                              title="Mở Học phí em này"
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md cursor-pointer"
+                            >
+                              <CreditCard className="w-3 h-3 text-amber-700" />
+                              <span>HP</span>
+                            </button>
+                          )}
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => setQrCardStudent(st)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md cursor-pointer"
                       >
                         <QrCode className="w-3 h-3 text-blue-900" />
-                        <span>Thẻ QR</span>
+                        <span>QR</span>
                       </button>
                       {isAdmin && (
                         <button
                           type="button"
                           onClick={() => openAccessModal(st)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer"
                         >
                           <KeyRound className="w-3 h-3 text-blue-900" />
-                          <span>Quyền &amp; PIN</span>
+                          <span>PIN</span>
                         </button>
                       )}
                       <button
@@ -1101,6 +1331,24 @@ export const StudentsAttendanceModule: React.FC<StudentsAttendanceModuleProps> =
           onClose={() => setClassQrPrintHtml(null)}
         />
       )}
+
+      {/* Center-Standard Custom Directory Print Studio */}
+      <CustomPrintTemplateStudio
+        open={customPrintOpen}
+        entityType="STUDENTS"
+        students={filteredStudents}
+        indexes={indexes}
+        templates={mergedTemplates}
+        canManageTemplates={canManageTemplates}
+        filterSummary={activeFilterSummary}
+        siteConfig={siteConfig}
+        onClose={() => setCustomPrintOpen(false)}
+        onTemplatesChanged={(next) => {
+          setLocalTemplates(next);
+          void onRefresh();
+        }}
+        onRequestRelogin={onRequestRelogin}
+      />
     </div>
   );
 };

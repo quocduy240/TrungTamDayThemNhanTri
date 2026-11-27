@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BellRing,
   Check,
@@ -7,6 +7,7 @@ import {
   CreditCard,
   Database,
   MessageSquare,
+  Pencil,
   Percent,
   Plus,
   Printer,
@@ -25,26 +26,38 @@ import { getStudentsInFamily } from '../lib/tuitionCalculator';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 import { buildTuitionReceiptDocumentHtml } from '../lib/brandedDocumentExporter';
 import { BrandedPrintModal } from './BrandedPrintModal';
+import type { QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface TuitionViewProps {
   workspace: WorkspacePayload;
   siteConfig?: SiteConfig;
+  initialStudentId?: string;
   onRefresh: () => Promise<void>;
+  onOpenDrawer?: (target: QuickDrawerTarget) => void;
 }
 
 export const TuitionModule: React.FC<TuitionViewProps> = ({
   workspace,
   siteConfig = DEFAULT_SITE_CONFIG,
+  initialStudentId,
   onRefresh,
+  onOpenDrawer,
 }) => {
   const isAdmin = workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PAID' | 'DUE_SOON' | 'OVERDUE'>('ALL');
+  const [studentFilterId, setStudentFilterId] = useState<string>(initialStudentId || '');
   const [payModal, setPayModal] = useState<TuitionRecord | null>(null);
   const [printTuitionRecord, setPrintTuitionRecord] = useState<TuitionRecord | null>(null);
   const [payMethod, setPayMethod] = useState<'VIETQR' | 'MOMO' | 'ZALOPAY'>('VIETQR');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string>('');
   const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    if (initialStudentId !== undefined) {
+      setStudentFilterId(initialStudentId);
+    }
+  }, [initialStudentId]);
 
   // Family multi-child discount drafts (Admin/SuperAdmin only)
   const [familyDrafts, setFamilyDrafts] = useState<
@@ -142,8 +155,16 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
 
   const filteredTuition = useMemo(
     () =>
-      workspace.tuition.filter((t) => statusFilter === 'ALL' || t.status === statusFilter),
-    [workspace.tuition, statusFilter],
+      workspace.tuition.filter((t) => {
+        if (studentFilterId && t.studentId !== studentFilterId) return false;
+        return statusFilter === 'ALL' || t.status === statusFilter;
+      }),
+    [workspace.tuition, statusFilter, studentFilterId],
+  );
+
+  const filteredStudentObj = useMemo(
+    () => (studentFilterId ? workspace.students.find((s) => s.id === studentFilterId) : undefined),
+    [workspace.students, studentFilterId],
   );
 
   function copyText(label: string, text: string) {
@@ -209,6 +230,33 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
           Theo dõi đóng học phí, ưu đãi nhiều con &amp; đóng nguyên năm 12 tháng (-{siteConfig.annualDiscountPercent ?? 10}% cộng dồn trên học phí chính), thanh toán VietQR và nhắc nợ tự động.
         </p>
       </div>
+
+      {filteredStudentObj && (
+        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            Đang lọc công nợ theo học sinh: <strong>{filteredStudentObj.fullName}</strong> ({filteredStudentObj.code} · {filteredStudentObj.centerClass})
+          </span>
+          <div className="flex items-center gap-2">
+            {onOpenDrawer && (
+              <button
+                type="button"
+                onClick={() => onOpenDrawer({ type: 'STUDENT', id: filteredStudentObj.id })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-amber-300 bg-white font-semibold text-amber-950 hover:bg-amber-100 cursor-pointer"
+              >
+                <Pencil className="w-3 h-3" />
+                Hồ sơ nhanh
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setStudentFilterId('')}
+              className="px-2.5 py-1 rounded-lg bg-amber-900 text-white font-semibold hover:bg-amber-800 cursor-pointer"
+            >
+              Xem tất cả học sinh
+            </button>
+          </div>
+        </div>
+      )}
 
       {notice && (
         <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-950 flex items-center justify-between gap-3">

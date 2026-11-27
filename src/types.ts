@@ -209,7 +209,9 @@ export interface Student {
   enrolledClasses?: string[];
   schoolClass: string;
   school: string;
+  homeroomTeacherId?: string;
   homeroomTeacher: string;
+  roomId?: string;
   room: string;
   parentName: string;
   parentPhone: string;
@@ -236,6 +238,80 @@ export interface Student {
 export type SmartImportEntityType = 'STUDENTS' | 'TEACHERS' | 'SCORES' | 'TIMETABLE';
 
 export type TimetableSyncMode = 'UPSERT' | 'APPEND' | 'REPLACE_ALL';
+
+export type PrintTemplateEntityType = 'STUDENTS' | 'TEACHERS';
+
+export type PrintTemplatePreset = 'SIMPLE' | 'FULL' | 'CUSTOM';
+
+export type PrintTemplateGroupBy =
+  | 'NONE'
+  | 'CLASS'
+  | 'GRADE'
+  | 'LEVEL'
+  | 'TEACHER_GROUP'
+  | 'STATUS';
+
+export interface PrintTemplateBlocks {
+  showLogoHeader: boolean;
+  showWatermark: boolean;
+  showFilterSummary: boolean;
+  showRowNumbers: boolean;
+  showSummaryStats: boolean;
+  showSignatures: boolean;
+  signatureLabels: string[];
+}
+
+export interface PrintTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  entityType: PrintTemplateEntityType;
+  presetBase: PrintTemplatePreset;
+  customTitle: string;
+  orientation: 'portrait' | 'landscape';
+  fontSize: 'sm' | 'md' | 'lg';
+  groupBy: PrintTemplateGroupBy;
+  columns: string[];
+  extraBlankColumns: string[];
+  blocks: PrintTemplateBlocks;
+  isSystemDefault?: boolean;
+  createdBy?: string;
+  updatedBy?: string;
+  updatedAt?: string;
+}
+
+export interface DataHealthIssue {
+  id: string;
+  severity: 'HIGH' | 'MEDIUM' | 'LOW';
+  category:
+    | 'ORPHAN_TIMETABLE_TEACHER'
+    | 'ORPHAN_TIMETABLE_ROOM'
+    | 'MISSING_STUDENT_FK'
+    | 'UNLINKED_FAMILY_SIBLING'
+    | 'MISSING_QR_TOKEN'
+    | 'DUPLICATE_STUDENT_CODE'
+    | 'ORPHAN_SCORE_OR_TUITION';
+  entityLabel: string;
+  detail: string;
+  autoFixable: boolean;
+}
+
+export interface DataHealthReport {
+  checkedAt: string;
+  totalChecks: number;
+  healthyScore: number;
+  issues: DataHealthIssue[];
+  stats: {
+    teachers: number;
+    students: number;
+    families: number;
+    rooms: number;
+    timetableSlots: number;
+    scores: number;
+    tuition: number;
+    printTemplates: number;
+  };
+}
 
 export type StudentRecord = Student;
 
@@ -506,6 +582,7 @@ export interface DatabaseState {
   notificationPrefs: UserNotificationPreference[];
   classCheckins: ClassCheckInRecord[];
   reminderDispatchLogs: ReminderDispatchLog[];
+  printTemplates?: PrintTemplate[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
   adminPasscodeHash?: string;

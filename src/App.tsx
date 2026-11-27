@@ -8,6 +8,7 @@ import {
   Check,
   DoorOpen,
   FileBarChart2,
+  GraduationCap,
   Home,
   LayoutDashboard,
   LogIn,
@@ -30,6 +31,7 @@ import type {
   Language,
   NationalExam,
   SiteConfig,
+  Student,
   TimetableSlot,
   UserRole,
 } from './types';
@@ -58,14 +60,27 @@ import {
   canManageFinance,
   isAdminOrSuper,
   isSuperAdminRole,
+  registerSilentSessionRefresher,
   roleLabel,
   setAuthToken,
+  subscribeSessionExpired,
   type BootstrapPayload,
   type WorkspacePayload,
 } from './lib/api';
+import { buildWorkspaceIndexes } from './lib/workspaceIntegrity';
 import { FrontendPortal } from './components/FrontendPortal';
 import type { StudentLoginResult } from './components/PortalAuthGates';
 import { NotificationPrefsModal } from './components/NotificationPrefsModal';
+import {
+  ContextualReloginModal,
+  SessionExpiredBanner,
+} from './components/ContextualReloginBanner';
+import {
+  EntityQuickDrawer,
+  type CrossNavIntent,
+  type QuickDrawerTarget,
+} from './components/EntityQuickDrawer';
+import { DynamicQrLandingView, StudentQrCardModal } from './components/StudentQrHub';
 import { computeQuickClassSnapshot, formatCountdownSeconds } from './lib/quickClassEngine';
 
 const CmsOverview = lazy(() =>
@@ -73,6 +88,11 @@ const CmsOverview = lazy(() =>
 );
 const TimetableModule = lazy(() =>
   import('./components/TimetableModule').then((m) => ({ default: m.TimetableModule })),
+);
+const TeachersDirectoryModule = lazy(() =>
+  import('./components/TeachersDirectoryModule').then((m) => ({
+    default: m.TeachersDirectoryModule,
+  })),
 );
 const StudentsAttendanceModule = lazy(() =>
   import('./components/StudentsAttendanceModule').then((m) => ({
@@ -105,6 +125,7 @@ type CmsTab =
   | 'system'
   | 'social'
   | 'timetable'
+  | 'teachers'
   | 'students'
   | 'scores'
   | 'exams'
@@ -136,6 +157,30 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
+  // Dynamic QR landing token from URL (?qr=...)
+  const [activeQrToken, setActiveQrToken] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const raw = new URLSearchParams(window.location.search).get('qr');
+    return raw ? raw.trim() : null;
+  });
+
+  // Zero-Data-Loss Session Recovery State
+  const [sessionExpiredReason, setSessionExpiredReason] = useState<string | null>(null);
+  const [showReloginModal, setShowReloginModal] = useState(false);
+  const [recoveringSession, setRecoveringSession] = useState(false);
+
+  // Cross-Entity Quick Drawer & Auto-Filtered Navigation Presets
+  const [drawerTarget, setDrawerTarget] = useState<QuickDrawerTarget | null>(null);
+  const [drawerQrStudent, setDrawerQrStudent] = useState<Student | null>(null);
+  const [crossNavPreset, setCrossNavPreset] = useState<{
+    nonce: number;
+    classFilter?: string;
+    teacherId?: string;
+    studentId?: string;
+    timetableSubTab?: 'SCHEDULE' | 'AVAILABILITY' | 'LEAVES' | 'ROOMS';
+    shiftLabel?: string;
+  } | null>(null);
+
   // Notifications, Preferences, Attendance Preset & Mobile Drawer
   const [showNotifDrawer, setShowNotifDrawer] = useState(false);
   const [showNotifPrefsModal, setShowNotifPrefsModal] = useState(false);
@@ -163,8 +208,34 @@ export default function App() {
 
   const handleJumpToAttendance = useCallback((centerClass: string, shiftLabel: string) => {
     setAttendancePreset({ centerClass, shiftLabel });
+    setCrossNavPreset({ nonce: Date.now(), classFilter: centerClass, shiftLabel });
     setActiveTab('students');
     setViewShell('CMS');
+  }, []);
+
+  const handleCrossNavigate = useCallback((intent: CrossNavIntent) => {
+    setCrossNavPreset({
+      nonce: Date.now(),
+      classFilter: intent.classFilter,
+      teacherId: intent.teacherId,
+      studentId: intent.studentId,
+      timetableSubTab: intent.timetableSubTab,
+      shiftLabel: intent.shiftLabel,
+    });
+    if (intent.tab === 'students' && (intent.classFilter || intent.shiftLabel)) {
+      setAttendancePreset({ centerClass: intent.classFilter, shiftLabel: intent.shiftLabel });
+    }
+    setActiveTab(intent.tab);
+    setViewShell('CMS');
+  }, []);
+
+  const handleExitQrView = useCallback(() => {
+    setActiveQrToken(null);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('qr');
+      window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    }
   }, []);
 
   // Client-side Live T-10m Pre-Class Reminder Engine (Vietnam Time UTC+7)
@@ -319,6 +390,58 @@ export default function App() {
     [siteConfig.authPolicy, workspace?.authPolicy, bootstrap?.authPolicy],
   );
 
+  // Memoized O(1) relational indexes across Teachers, Students, Timetable, Scores, Tuition
+  const workspaceIndexes = useMemo(
+    () => (workspace ? buildWorkspaceIndexes(workspace) : null),
+    [workspace],
+  );
+
+  // Silent single-flight Firebase session recovery (prevents 401 interruption on server restart)
+  const attemptSilentSessionRecovery = useCallback(async (): Promise<string | null> => {
+    const fbUser = auth.currentUser;
+    if (!fbUser) return null;
+    setRecoveringSession(true);
+    try {
+      const profile = await ensureUserProfileFromGmail(fbUser);
+      const idToken = await fbUser.getIdToken(true);
+      const res = await fetch('/api/v1/auth/firebase-bridge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idToken,
+          requestedRole: profile.role,
+          portalIntent: 'AUTO',
+        }),
+      });
+      if (!res.ok) return null;
+      const bridged = (await res.json()) as { token?: string; user?: AuthUser };
+      if (!bridged.token || !bridged.user) return null;
+      setAuthToken(bridged.token);
+      setCurrentUser({
+        ...bridged.user,
+        photoURL: fbUser.photoURL || profile.photoURL,
+        authProvider: 'GOOGLE_FIREBASE',
+      });
+      setSessionExpiredReason(null);
+      return bridged.token;
+    } catch {
+      return null;
+    } finally {
+      setRecoveringSession(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    registerSilentSessionRefresher(attemptSilentSessionRecovery);
+    const unsub = subscribeSessionExpired((reason) => {
+      setSessionExpiredReason(reason);
+    });
+    return () => {
+      registerSilentSessionRefresher(null);
+      unsub();
+    };
+  }, [attemptSilentSessionRecovery]);
+
   // Subscribe to Firebase Auth state (Gmail login auto-restore)
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
@@ -349,6 +472,7 @@ export default function App() {
           };
           setAuthToken(bridged.token);
           setCurrentUser(resolvedUser);
+          setSessionExpiredReason(null);
           const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
           setWorkspace({ ...ws, user: resolvedUser });
         }
@@ -645,70 +769,123 @@ export default function App() {
   const activeRole = currentUser?.role || workspace?.user.role;
   const showSystemCmsNav = isAdminOrSuper(activeRole);
   const showSocialCmsNav = isAdminOrSuper(activeRole) || activeRole === 'MANAGER';
+  const showTeachersNav =
+    isAdminOrSuper(activeRole) || activeRole === 'MANAGER' || activeRole === 'TEACHER';
   const showTuitionNav =
     canManageFinance(activeRole) || activeRole === 'PARENT' || activeRole === 'STUDENT';
 
-  const navItems: { id: CmsTab; label: string; icon: React.ReactNode }[] = [
+  const rawNavGroups: {
+    id: string;
+    title: string;
+    items: { id: CmsTab; label: string; icon: React.ReactNode }[];
+  }[] = [
     {
-      id: 'overview',
-      label: lang === 'vi' ? 'Tổng quan & Phân tích' : 'Analytics Overview',
-      icon: <LayoutDashboard className="w-4 h-4" />,
-    },
-    ...(showSystemCmsNav
-      ? [
-          {
-            id: 'system' as CmsTab,
-            label: lang === 'vi' ? 'Cấu hình CMS & Phân quyền' : 'Site CMS & RBAC',
-            icon: <Settings className="w-4 h-4" />,
-          },
-        ]
-      : []),
-    ...(showSocialCmsNav
-      ? [
-          {
-            id: 'social' as CmsTab,
-            label: lang === 'vi' ? 'Truyền thông & Nhắc lịch' : 'Social Hub & Reminders',
-            icon: <Tv className="w-4 h-4" />,
-          },
-        ]
-      : []),
-    {
-      id: 'timetable',
-      label: lang === 'vi' ? 'Thời khóa biểu động' : 'Dynamic Timetable',
-      icon: <Calendar className="w-4 h-4" />,
+      id: 'operations',
+      title: lang === 'vi' ? 'Điều hành & Học vụ' : 'Operations',
+      items: [
+        {
+          id: 'overview',
+          label: lang === 'vi' ? 'Tổng quan & Phân tích' : 'Analytics Overview',
+          icon: <LayoutDashboard className="w-4 h-4 shrink-0" />,
+        },
+        {
+          id: 'timetable',
+          label: lang === 'vi' ? 'Thời khóa biểu & Phòng học' : 'Timetable & Rooms',
+          icon: <Calendar className="w-4 h-4 shrink-0" />,
+        },
+      ],
     },
     {
-      id: 'students',
-      label: lang === 'vi' ? 'Học sinh & Điểm danh' : 'Students & Attendance',
-      icon: <Users className="w-4 h-4" />,
+      id: 'directory',
+      title: lang === 'vi' ? 'Hồ sơ Nhân sự & Học viên' : 'Directory',
+      items: [
+        ...(showTeachersNav
+          ? [
+              {
+                id: 'teachers' as CmsTab,
+                label: lang === 'vi' ? 'Quản lý Giáo viên' : 'Teachers Directory',
+                icon: <Users className="w-4 h-4 shrink-0" />,
+              },
+            ]
+          : []),
+        {
+          id: 'students',
+          label: lang === 'vi' ? 'Quản lý Học sinh & Điểm danh' : 'Students & Attendance',
+          icon: <GraduationCap className="w-4 h-4 shrink-0" />,
+        },
+      ],
     },
     {
-      id: 'scores',
-      label: lang === 'vi' ? 'Học bạ Online & AI' : 'Report Card & AI Scan',
-      icon: <FileBarChart2 className="w-4 h-4" />,
+      id: 'academics',
+      title: lang === 'vi' ? 'Đào tạo & Chuyên môn' : 'Academics',
+      items: [
+        {
+          id: 'scores',
+          label: lang === 'vi' ? 'Học bạ Online & Điểm AI' : 'Report Card & AI Scan',
+          icon: <FileBarChart2 className="w-4 h-4 shrink-0" />,
+        },
+        {
+          id: 'exams',
+          label: lang === 'vi' ? 'Thư viện Đề chuẩn' : 'National Exam Bank',
+          icon: <BookOpen className="w-4 h-4 shrink-0" />,
+        },
+      ],
     },
     {
-      id: 'exams',
-      label: lang === 'vi' ? 'Thư viện Đề chuẩn' : 'National Exam Bank',
-      icon: <BookOpen className="w-4 h-4" />,
-    },
-    ...(showTuitionNav
-      ? [
-          {
-            id: 'tuition' as CmsTab,
-            label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing',
-            icon: <Wallet className="w-4 h-4" />,
-          },
-        ]
-      : []),
-    {
-      id: 'support',
-      label: lang === 'vi' ? 'Hỗ trợ 24/7 & Hạ tầng' : '24/7 AI & System',
-      icon: <MessageSquare className="w-4 h-4" />,
+      id: 'finance-system',
+      title: lang === 'vi' ? 'Tài chính & Hệ thống' : 'Finance & System',
+      items: [
+        ...(showTuitionNav
+          ? [
+              {
+                id: 'tuition' as CmsTab,
+                label: lang === 'vi' ? 'Học phí & Công nợ' : 'Tuition & Billing',
+                icon: <Wallet className="w-4 h-4 shrink-0" />,
+              },
+            ]
+          : []),
+        ...(showSocialCmsNav
+          ? [
+              {
+                id: 'social' as CmsTab,
+                label: lang === 'vi' ? 'Truyền thông & Nhắc lịch 10p' : 'Social & Reminders',
+                icon: <Tv className="w-4 h-4 shrink-0" />,
+              },
+            ]
+          : []),
+        ...(showSystemCmsNav
+          ? [
+              {
+                id: 'system' as CmsTab,
+                label: lang === 'vi' ? 'Cấu hình CMS & Toàn vẹn' : 'Site CMS & Integrity',
+                icon: <Settings className="w-4 h-4 shrink-0" />,
+              },
+            ]
+          : []),
+        {
+          id: 'support',
+          label: lang === 'vi' ? 'Hỗ trợ 24/7 & Hạ tầng' : '24/7 AI & System',
+          icon: <MessageSquare className="w-4 h-4 shrink-0" />,
+        },
+      ],
     },
   ];
+  const navGroups = rawNavGroups.filter((g) => g.items.length > 0);
 
+  const navItems = navGroups.flatMap((g) => g.items);
   const activeNavLabel = navItems.find((n) => n.id === activeTab)?.label || 'Tổng quan';
+
+  // Dynamic QR Student Card Landing View (?qr=<token>)
+  if (activeQrToken) {
+    return (
+      <DynamicQrLandingView
+        qrToken={activeQrToken}
+        currentUser={currentUser}
+        siteConfig={siteConfig}
+        onExitQr={handleExitQrView}
+      />
+    );
+  }
 
   return (
     <>
@@ -759,21 +936,28 @@ export default function App() {
                 </div>
               </div>
 
-              <nav className="p-3 space-y-1">
-                {navItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setActiveTab(item.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                      activeTab === item.id
-                        ? 'bg-blue-900 text-white'
-                        : 'text-slate-700 hover:bg-slate-100 hover:text-slate-950'
-                    }`}
-                  >
-                    {item.icon}
-                    <span className="truncate">{item.label}</span>
-                  </button>
+              <nav className="p-3 space-y-4 overflow-y-auto max-h-[calc(100vh-220px)]">
+                {navGroups.map((group) => (
+                  <div key={group.id} className="space-y-1">
+                    <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      {group.title}
+                    </p>
+                    {group.items.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setActiveTab(item.id)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                          activeTab === item.id
+                            ? 'bg-blue-900 text-white'
+                            : 'text-slate-700 hover:bg-slate-100 hover:text-slate-950'
+                        }`}
+                      >
+                        {item.icon}
+                        <span className="truncate">{item.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </nav>
             </div>
@@ -834,22 +1018,29 @@ export default function App() {
                       <X className="w-5 h-5" />
                     </button>
                   </div>
-                  <nav className="mt-4 space-y-1">
-                    {navItems.map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => {
-                          setActiveTab(item.id);
-                          setMobileMenuOpen(false);
-                        }}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium cursor-pointer ${
-                          activeTab === item.id ? 'bg-blue-900 text-white' : 'text-slate-700'
-                        }`}
-                      >
-                        {item.icon}
-                        <span>{item.label}</span>
-                      </button>
+                  <nav className="mt-4 space-y-4 overflow-y-auto max-h-[calc(100vh-200px)]">
+                    {navGroups.map((group) => (
+                      <div key={group.id} className="space-y-1">
+                        <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                          {group.title}
+                        </p>
+                        {group.items.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setActiveTab(item.id);
+                              setMobileMenuOpen(false);
+                            }}
+                            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium cursor-pointer ${
+                              activeTab === item.id ? 'bg-blue-900 text-white' : 'text-slate-700'
+                            }`}
+                          >
+                            {item.icon}
+                            <span className="truncate">{item.label}</span>
+                          </button>
+                        ))}
+                      </div>
                     ))}
                   </nav>
                 </div>
@@ -927,6 +1118,21 @@ export default function App() {
             </header>
 
             <main className="flex-1 p-4 lg:p-8 max-w-[1360px] w-full mx-auto">
+              <SessionExpiredBanner
+                reason={sessionExpiredReason}
+                recovering={recoveringSession}
+                onAttemptSilentRefresh={async () => {
+                  const ok = await attemptSilentSessionRecovery();
+                  if (ok) {
+                    showToast('Đã khôi phục phiên làm việc thành công.');
+                    await refreshWorkspace();
+                  } else {
+                    setShowReloginModal(true);
+                  }
+                }}
+                onOpenReloginModal={() => setShowReloginModal(true)}
+                onDismiss={() => setSessionExpiredReason(null)}
+              />
               <Suspense
                 fallback={
                   <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-xs text-slate-500">
@@ -960,6 +1166,7 @@ export default function App() {
                       setEditMode(true);
                       setViewShell('FRONTEND');
                     }}
+                    onRefreshWorkspace={refreshWorkspace}
                   />
                 )}
                 {activeTab === 'social' && showSocialCmsNav && (
@@ -979,22 +1186,47 @@ export default function App() {
                   <TimetableModule
                     workspace={workspace}
                     siteConfig={siteConfig}
+                    initialClassFilter={crossNavPreset?.classFilter}
+                    initialTeacherFilter={crossNavPreset?.teacherId}
+                    initialSubTab={crossNavPreset?.timetableSubTab}
                     onRefresh={refreshWorkspace}
+                    onOpenDrawer={setDrawerTarget}
+                    onCrossNavigate={handleCrossNavigate}
+                    onRequestRelogin={() => setShowReloginModal(true)}
+                  />
+                )}
+                {activeTab === 'teachers' && showTeachersNav && (
+                  <TeachersDirectoryModule
+                    workspace={workspace}
+                    indexes={workspaceIndexes}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                    onOpenDrawer={setDrawerTarget}
+                    onCrossNavigate={handleCrossNavigate}
+                    onRequestRelogin={() => setShowReloginModal(true)}
                   />
                 )}
                 {activeTab === 'students' && (
                   <StudentsAttendanceModule
                     workspace={workspace}
+                    indexes={workspaceIndexes}
+                    siteConfig={siteConfig}
                     onRefresh={refreshWorkspace}
-                    initialClassFilter={attendancePreset?.centerClass}
-                    initialShiftLabel={attendancePreset?.shiftLabel}
+                    initialClassFilter={crossNavPreset?.classFilter || attendancePreset?.centerClass}
+                    initialShiftLabel={crossNavPreset?.shiftLabel || attendancePreset?.shiftLabel}
+                    initialTeacherId={crossNavPreset?.teacherId}
+                    onOpenDrawer={setDrawerTarget}
+                    onCrossNavigate={handleCrossNavigate}
+                    onRequestRelogin={() => setShowReloginModal(true)}
                   />
                 )}
                 {activeTab === 'scores' && (
                   <ScoresAiModule
                     workspace={workspace}
                     siteConfig={siteConfig}
+                    initialStudentId={crossNavPreset?.studentId}
                     onRefresh={refreshWorkspace}
+                    onOpenDrawer={setDrawerTarget}
                   />
                 )}
                 {activeTab === 'exams' && (
@@ -1008,7 +1240,9 @@ export default function App() {
                   <TuitionModule
                     workspace={workspace}
                     siteConfig={siteConfig}
+                    initialStudentId={crossNavPreset?.studentId}
                     onRefresh={refreshWorkspace}
+                    onOpenDrawer={setDrawerTarget}
                   />
                 )}
                 {activeTab === 'support' && (
@@ -1216,6 +1450,68 @@ export default function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Contextual In-Place Re-Login Modal (Preserves Active CMS Forms & Tabs) */}
+      <ContextualReloginModal
+        open={showReloginModal}
+        user={currentUser}
+        reason={sessionExpiredReason}
+        allowDemoPreview={activeAuthPolicy.allowDemoPreview}
+        onClose={() => setShowReloginModal(false)}
+        onGoogleRelogin={async () => {
+          const silentOk = await attemptSilentSessionRecovery();
+          if (silentOk) {
+            await refreshWorkspace();
+            return true;
+          }
+          await handleSignInGmail('AUTO');
+          setSessionExpiredReason(null);
+          return true;
+        }}
+        onDemoRoleRelogin={
+          activeAuthPolicy.allowDemoPreview && currentUser
+            ? async () => {
+                await signInPreviewRole(currentUser.role);
+                setSessionExpiredReason(null);
+                return true;
+              }
+            : undefined
+        }
+        onSwitchToFullLogin={() => setShowRoleModal(true)}
+      />
+
+      {/* Cross-Entity Quick-Inspect & Inline-Edit Slide-Over Drawer */}
+      {workspace && (
+        <EntityQuickDrawer
+          target={drawerTarget}
+          workspace={workspace}
+          indexes={workspaceIndexes}
+          canEdit={
+            isAdminOrSuper(activeRole) || activeRole === 'MANAGER'
+          }
+          canSeeFinance={canManageFinance(activeRole)}
+          onClose={() => setDrawerTarget(null)}
+          onSaved={refreshWorkspace}
+          onCrossNavigate={handleCrossNavigate}
+          onOpenQrCard={(st) => setDrawerQrStudent(st)}
+          onRequestRelogin={() => setShowReloginModal(true)}
+        />
+      )}
+
+      {/* Quick QR Modal triggered from EntityQuickDrawer */}
+      {workspace && (
+        <StudentQrCardModal
+          student={drawerQrStudent}
+          allStudents={workspace.students}
+          canManage={isAdminOrSuper(activeRole)}
+          siteConfig={siteConfig}
+          onClose={() => setDrawerQrStudent(null)}
+          onRotated={async () => {
+            await refreshWorkspace();
+            showToast('Đã cấp lại Mã QR động mới cho học sinh.');
+          }}
+        />
       )}
 
       {/* Subtle Toast Confirmation */}

@@ -292,7 +292,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'ownerUid', 'familyId', 'code', 'qrToken', 'parentLinkCode', 'fullName', 'grade', 'level', 'centerClass', 'enrolledClasses',
-          'schoolClass', 'school', 'homeroomTeacher', 'room', 'parentName',
+          'schoolClass', 'school', 'homeroomTeacherId', 'homeroomTeacher', 'roomId', 'room', 'parentName',
           'parentPhone', 'parentSecondaryPhone', 'parentZalo', 'parentEmails', 'studentEmail',
           'allowPersonalGmailOverride', 'accessPin', 'accessStatus', 'accessNote', 'lastLoginAt',
           'packageType', 'hasBoarding', 'hasShuttle',
@@ -312,7 +312,9 @@ service cloud.firestore {
         && (!('enrolledClasses' in data) || isBoundedStringList(data.enrolledClasses, 10))
         && isOptionalString(data, 'schoolClass', 40)
         && isNonEmptyString(data.school, 140)
+        && isOptionalString(data, 'homeroomTeacherId', 128)
         && isOptionalString(data, 'homeroomTeacher', 80)
+        && isOptionalString(data, 'roomId', 128)
         && isOptionalString(data, 'room', 60)
         && isNonEmptyString(data.parentName, 120)
         && isNonEmptyString(data.parentPhone, 40)
@@ -535,6 +537,34 @@ service cloud.firestore {
         && isOptionalString(data, 'zaloPhone', 40)
         && isOptionalString(data, 'email', 160)
         && isOptionalString(data, 'facebookPsid', 120)
+        && isOptionalString(data, 'updatedAt', 40);
+    }
+
+    function isValidPrintTemplate(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'entityType', 'presetBase', 'customTitle',
+          'orientation', 'fontSize', 'groupBy', 'columns', 'blocks'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'description', 'entityType', 'presetBase', 'customTitle',
+          'orientation', 'fontSize', 'groupBy', 'columns', 'extraBlankColumns',
+          'blocks', 'isSystemDefault', 'createdBy', 'updatedBy', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isNonEmptyString(data.name, 120)
+        && isOptionalString(data, 'description', 300)
+        && data.entityType in ['STUDENTS', 'TEACHERS']
+        && data.presetBase in ['SIMPLE', 'FULL', 'CUSTOM']
+        && isNonEmptyString(data.customTitle, 200)
+        && data.orientation in ['portrait', 'landscape']
+        && data.fontSize in ['sm', 'md', 'lg']
+        && data.groupBy in ['NONE', 'CLASS', 'GRADE', 'LEVEL', 'TEACHER_GROUP', 'STATUS']
+        && isBoundedStringList(data.columns, 20)
+        && (!('extraBlankColumns' in data) || isBoundedStringList(data.extraBlankColumns, 6))
+        && data.blocks is map
+        && (!('isSystemDefault' in data) || data.isSystemDefault is bool)
+        && isOptionalString(data, 'createdBy', 160)
+        && isOptionalString(data, 'updatedBy', 160)
         && isOptionalString(data, 'updatedAt', 40);
     }
 
@@ -830,6 +860,15 @@ service cloud.firestore {
         isAdmin() || (request.auth.uid == uid && incoming().userId == request.auth.uid && existing().userId == request.auth.uid)
       );
       allow delete: if isValidId(uid) && isAdmin();
+    }
+
+    // 19. Shared Center-Standard Custom Print Templates (Staff Read; Manager / Admin / SuperAdmin Write)
+    match /print_templates/{templateId} {
+      allow get: if isValidId(templateId) && isVerified() && isStaff();
+      allow list: if isVerified() && isStaff();
+      allow create: if isValidId(templateId) && isValidPrintTemplate(incoming()) && isManager();
+      allow update: if isValidId(templateId) && isValidPrintTemplate(incoming()) && isManager();
+      allow delete: if isValidId(templateId) && isManager() && (!('isSystemDefault' in existing()) || existing().isSystemDefault == false);
     }
   }
 }

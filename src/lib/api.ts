@@ -12,6 +12,7 @@ import type {
   FeedbackTicket,
   NationalExam,
   NotificationSystemConfig,
+  PrintTemplate,
   ReminderDispatchLog,
   Room,
   ScoreRecord,
@@ -29,6 +30,71 @@ import type {
 // Session token held strictly in memory (never localStorage/sessionStorage)
 let memoryAuthToken: string | null = null;
 
+// Single-flight silent session refresher (registered by App.tsx for Firebase Gmail auto-recovery)
+type SilentRefresher = () => Promise<string | null>;
+let silentRefresher: SilentRefresher | null = null;
+let inFlightRefreshPromise: Promise<string | null> | null = null;
+
+// Global session-expired event subscribers (for contextual "Đăng nhập lại" banner/modal)
+type SessionExpiredListener = (reason: string) => void;
+const sessionExpiredListeners = new Set<SessionExpiredListener>();
+
+export class SessionExpiredError extends Error {
+  status = 401;
+  isSessionExpired = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionExpiredError';
+  }
+}
+
+export function isSessionExpiredError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof SessionExpiredError) return true;
+  if (typeof err === 'object' && 'isSessionExpired' in err && (err as { isSessionExpired?: boolean }).isSessionExpired) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('Vui lòng đăng nhập phiên làm việc') ||
+    msg.includes('Phiên làm việc hết hạn') ||
+    msg.includes('(401)')
+  );
+}
+
+export function registerSilentSessionRefresher(fn: SilentRefresher | null): void {
+  silentRefresher = fn;
+}
+
+export function subscribeSessionExpired(listener: SessionExpiredListener): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+}
+
+export function notifySessionExpired(reason: string): void {
+  for (const listener of sessionExpiredListeners) {
+    try {
+      listener(reason);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+async function trySilentRefreshToken(): Promise<string | null> {
+  if (!silentRefresher) return null;
+  if (!inFlightRefreshPromise) {
+    inFlightRefreshPromise = silentRefresher()
+      .catch(() => null)
+      .finally(() => {
+        inFlightRefreshPromise = null;
+      });
+  }
+  return inFlightRefreshPromise;
+}
+
 export function setAuthToken(token: string | null): void {
   memoryAuthToken = token;
 }
@@ -37,7 +103,11 @@ export function getAuthToken(): string | null {
   return memoryAuthToken;
 }
 
-export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function apiRequest<T>(
+  path: string,
+  options: RequestInit = {},
+  _retried = false,
+): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> | undefined),
@@ -59,6 +129,21 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
         // ignore JSON parse errors
       }
     }
+
+    if (res.status === 401 && !path.startsWith('/api/v1/auth/')) {
+      // Tier 1: Attempt single-flight silent Firebase token refresh and seamlessly retry once
+      if (!_retried) {
+        const freshToken = await trySilentRefreshToken();
+        if (freshToken) {
+          memoryAuthToken = freshToken;
+          return apiRequest<T>(path, options, true);
+        }
+      }
+      // Tier 2: Emit contextual session-expired signal (keeps open forms & drafts intact)
+      notifySessionExpired(errorMsg);
+      throw new SessionExpiredError(errorMsg);
+    }
+
     throw new Error(errorMsg);
   }
 
@@ -135,6 +220,7 @@ export interface WorkspacePayload {
   myNotificationPref?: UserNotificationPreference;
   classCheckins: ClassCheckInRecord[];
   reminderDispatchLogs: ReminderDispatchLog[];
+  printTemplates?: PrintTemplate[];
   authPolicy?: AuthPolicy;
   auditLogs?: AccessAuditLog[];
 }

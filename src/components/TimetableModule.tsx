@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeftRight,
@@ -60,11 +60,19 @@ import {
 import { ParentTimetableView } from './ParentTimetableView';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { TimetablePdfDispatchModal } from './TimetablePdfDispatchModal';
+import { InlineErrorAlert } from './ContextualReloginBanner';
+import type { CrossNavIntent, QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface TimetableModuleProps {
   workspace: WorkspacePayload;
   siteConfig?: SiteConfig;
+  initialClassFilter?: string;
+  initialTeacherFilter?: string;
+  initialSubTab?: 'SCHEDULE' | 'AVAILABILITY' | 'LEAVES' | 'ROOMS';
   onRefresh: () => Promise<void>;
+  onOpenDrawer?: (target: QuickDrawerTarget) => void;
+  onCrossNavigate?: (intent: CrossNavIntent) => void;
+  onRequestRelogin?: () => void;
 }
 
 const CLASS_OPTIONS = [
@@ -113,7 +121,13 @@ interface PendingSwapConfirm {
 export const TimetableModule: React.FC<TimetableModuleProps> = ({
   workspace,
   siteConfig,
+  initialClassFilter,
+  initialTeacherFilter,
+  initialSubTab,
   onRefresh,
+  onOpenDrawer,
+  onCrossNavigate,
+  onRequestRelogin,
 }) => {
   const canEdit = isTimetableManager(workspace.user.role);
   const isTeacher = workspace.user.role === 'TEACHER';
@@ -124,9 +138,28 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
   const [busy, setBusy] = useState(false);
 
   // Filters on Master Grid
-  const [classFilter, setClassFilter] = useState('Tất cả lớp');
-  const [teacherFilter, setTeacherFilter] = useState('ALL');
+  const [classFilter, setClassFilter] = useState(initialClassFilter || 'Tất cả lớp');
+  const [teacherFilter, setTeacherFilter] = useState(initialTeacherFilter || 'ALL');
   const [groupFilter, setGroupFilter] = useState<'ALL' | TeacherGroup>('ALL');
+
+  useEffect(() => {
+    if (initialClassFilter) {
+      setClassFilter(initialClassFilter);
+      setTeacherFilter('ALL');
+      if (canEdit) setActiveTab('GRID');
+    }
+    if (initialTeacherFilter) {
+      setTeacherFilter(initialTeacherFilter);
+      setClassFilter('Tất cả lớp');
+      if (canEdit) setActiveTab(initialSubTab === 'AVAILABILITY' ? 'TEACHERS' : 'GRID');
+    }
+    if (initialSubTab && canEdit) {
+      if (initialSubTab === 'AVAILABILITY') setActiveTab('TEACHERS');
+      else if (initialSubTab === 'LEAVES') setActiveTab('LEAVES');
+      else if (initialSubTab === 'ROOMS') setActiveTab('ROOMS');
+      else setActiveTab('GRID');
+    }
+  }, [initialClassFilter, initialTeacherFilter, initialSubTab, canEdit]);
 
   // Smart Multi-Dimensional Import & Personalized PDF Dispatch Modals
   const [smartImportEntity, setSmartImportEntity] = useState<SmartImportEntityType | null>(null);
@@ -979,15 +1012,65 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
         </div>
       )}
 
-      {errorMessage && (
-        <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs font-medium text-red-800 flex items-center justify-between gap-3">
-          <span className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>{errorMessage}</span>
+      <InlineErrorAlert
+        message={errorMessage || null}
+        onRequestRelogin={onRequestRelogin}
+        onDismiss={() => setErrorMessage('')}
+      />
+
+      {canEdit && (classFilter !== 'Tất cả lớp' || teacherFilter !== 'ALL') && (
+        <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-xl text-xs text-blue-950 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            Đang lọc Thời khóa biểu theo:{' '}
+            {classFilter !== 'Tất cả lớp' && <strong>{classFilter}</strong>}
+            {teacherFilter !== 'ALL' && (
+              <strong>
+                {workspace.teachers.find((t) => t.id === teacherFilter)?.name || teacherFilter}
+              </strong>
+            )}
           </span>
-          <button type="button" onClick={() => setErrorMessage('')} className="cursor-pointer">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {teacherFilter !== 'ALL' && onOpenDrawer && (
+              <button
+                type="button"
+                onClick={() => onOpenDrawer({ type: 'TEACHER', id: teacherFilter })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-blue-300 bg-white font-semibold text-blue-950 hover:bg-blue-100 cursor-pointer"
+              >
+                <Pencil className="w-3 h-3" />
+                Sửa nhanh hồ sơ GV
+              </button>
+            )}
+            {classFilter !== 'Tất cả lớp' && onCrossNavigate && (
+              <button
+                type="button"
+                onClick={() => onCrossNavigate({ tab: 'students', classFilter })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-blue-300 bg-white font-semibold text-blue-950 hover:bg-blue-100 cursor-pointer"
+              >
+                <Users className="w-3 h-3" />
+                Danh sách HS {classFilter}
+              </button>
+            )}
+            {teacherFilter !== 'ALL' && onCrossNavigate && (
+              <button
+                type="button"
+                onClick={() => onCrossNavigate({ tab: 'students', teacherId: teacherFilter })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-blue-300 bg-white font-semibold text-blue-950 hover:bg-blue-100 cursor-pointer"
+              >
+                <Users className="w-3 h-3" />
+                HS giáo viên phụ trách
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setClassFilter('Tất cả lớp');
+                setTeacherFilter('ALL');
+              }}
+              className="px-2.5 py-1 rounded-lg bg-blue-900 text-white font-semibold hover:bg-blue-800 cursor-pointer"
+            >
+              Xem toàn bộ TKB
+            </button>
+          </div>
         </div>
       )}
 

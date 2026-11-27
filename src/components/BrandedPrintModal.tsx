@@ -5,6 +5,7 @@ import { BrandLogo } from './BrandLogo';
 interface BrandedPrintModalProps {
   open: boolean;
   title: string;
+  subtitle?: string;
   fileName: string;
   htmlContent: string;
   onClose: () => void;
@@ -16,6 +17,7 @@ interface BrandedPrintModalProps {
 export const BrandedPrintModal: React.FC<BrandedPrintModalProps> = ({
   open,
   title,
+  subtitle,
   fileName,
   htmlContent,
   onClose,
@@ -55,6 +57,7 @@ export const BrandedPrintModal: React.FC<BrandedPrintModalProps> = ({
                 <span>Tài liệu gắn Logo &amp; Watermark bản quyền Trung Tâm Nhân Trí</span>
               </p>
               <h3 className="text-sm font-bold text-slate-950 truncate">{title}</h3>
+              {subtitle && <p className="text-[11px] text-slate-600 truncate">{subtitle}</p>}
             </div>
           </div>
 

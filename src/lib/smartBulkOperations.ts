@@ -619,17 +619,16 @@ export function smartSyncTimetable(
       note: String(row.note || '').trim() || undefined,
     };
 
-    const issues = evaluateSlotConstraints(candidate, {
+    const check = evaluateSlotConstraints(candidate, {
       timetable: working,
       teachers: db.teachers,
       rooms: db.rooms,
       students: db.students,
       leaves: db.teacherLeaves,
     });
-    const hardErrors = issues.filter((it) => it.severity === 'ERROR');
-    if (hardErrors.length > 0) {
+    if (check.hardConflicts.length > 0) {
       warnings.push(
-        `Dòng ${i + 1} (${centerClass} · ${day} ${period} ${shift}): ${hardErrors.map((e) => e.message).join(' | ')}`,
+        `Dòng ${i + 1} (${centerClass} · ${day} ${period} ${shift}): ${check.hardConflicts.join(' | ')}`,
       );
     }
 

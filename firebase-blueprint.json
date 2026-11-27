@@ -220,7 +220,9 @@
         "enrolledClasses": { "type": "array" },
         "schoolClass": { "type": "string", "maxLength": 40 },
         "school": { "type": "string", "maxLength": 140 },
+        "homeroomTeacherId": { "type": "string", "maxLength": 128 },
         "homeroomTeacher": { "type": "string", "maxLength": 80 },
+        "roomId": { "type": "string", "maxLength": 128 },
         "room": { "type": "string", "maxLength": 60 },
         "parentName": { "type": "string", "maxLength": 120 },
         "parentPhone": { "type": "string", "maxLength": 40 },
@@ -460,6 +462,30 @@
         "updatedAt": { "type": "string", "maxLength": 40 }
       },
       "required": ["userId", "role", "enabled", "leadMinutes", "channels"]
+    },
+    "PrintTemplate": {
+      "title": "PrintTemplate",
+      "description": "Shared center-standard customizable print template for Student and Teacher rosters.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 300 },
+        "entityType": { "type": "string", "enum": ["STUDENTS", "TEACHERS"] },
+        "presetBase": { "type": "string", "enum": ["SIMPLE", "FULL", "CUSTOM"] },
+        "customTitle": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "orientation": { "type": "string", "enum": ["portrait", "landscape"] },
+        "fontSize": { "type": "string", "enum": ["sm", "md", "lg"] },
+        "groupBy": { "type": "string", "enum": ["NONE", "CLASS", "GRADE", "LEVEL", "TEACHER_GROUP", "STATUS"] },
+        "columns": { "type": "array" },
+        "extraBlankColumns": { "type": "array" },
+        "blocks": { "type": "object" },
+        "isSystemDefault": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 160 },
+        "updatedBy": { "type": "string", "maxLength": 160 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "name", "entityType", "presetBase", "customTitle", "orientation", "fontSize", "groupBy", "columns", "blocks"]
     }
   },
   "firestore": {
@@ -546,6 +572,10 @@
     "/notification_prefs/{uid}": {
       "schema": { "$ref": "#/entities/NotificationPref" },
       "description": "Per-user reminder opt-in settings isolated to the owning user or Admin."
+    },
+    "/print_templates/{templateId}": {
+      "schema": { "$ref": "#/entities/PrintTemplate" },
+      "description": "Shared center-standard print templates readable by Staff and managed by Manager, Admin, and SuperAdmin."
     }
   }
 }

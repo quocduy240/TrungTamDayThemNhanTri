@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Camera,
   Check,
   Copy,
   FilePlus2,
   FileSpreadsheet,
+  Pencil,
   Printer,
   Sparkles,
   Upload,
@@ -20,11 +21,14 @@ import { compressImageFile } from '../lib/imageOptimizer';
 import { buildReportCardDocumentHtml } from '../lib/brandedDocumentExporter';
 import { BrandedPrintModal } from './BrandedPrintModal';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
+import type { QuickDrawerTarget } from './EntityQuickDrawer';
 
 interface ScoresAiModuleProps {
   workspace: WorkspacePayload;
   siteConfig?: SiteConfig;
+  initialStudentId?: string;
   onRefresh: () => Promise<void>;
+  onOpenDrawer?: (target: QuickDrawerTarget) => void;
 }
 
 interface AnalyzedResult {
@@ -43,7 +47,9 @@ interface AnalyzedResult {
 export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
   workspace,
   siteConfig,
+  initialStudentId,
   onRefresh,
+  onOpenDrawer,
 }) => {
   const canBulkImport =
     workspace.user.role === 'SUPER_ADMIN' ||
@@ -51,7 +57,9 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
     workspace.user.role === 'MANAGER' ||
     workspace.user.role === 'TEACHER';
 
-  const [selectedStudentId, setSelectedStudentId] = useState<string>(workspace.students[0]?.id || '');
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(
+    initialStudentId || workspace.students[0]?.id || '',
+  );
   const [printReportOpen, setPrintReportOpen] = useState(false);
   const [smartImportOpen, setSmartImportOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -64,7 +72,7 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
 
   // Manual Score Entry
   const [manualForm, setManualForm] = useState({
-    studentId: workspace.students[0]?.id || '',
+    studentId: initialStudentId || workspace.students[0]?.id || '',
     subject: 'Toán',
     examType: '15_PHUT' as '15_PHUT' | '1_TIET' | 'GIUA_KY' | 'CUOI_KY',
     score: '9.0',
@@ -73,6 +81,13 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
   });
   const [manualSaving, setManualSaving] = useState(false);
   const [copiedZalo, setCopiedZalo] = useState(false);
+
+  useEffect(() => {
+    if (initialStudentId) {
+      setSelectedStudentId(initialStudentId);
+      setManualForm((prev) => ({ ...prev, studentId: initialStudentId }));
+    }
+  }, [initialStudentId]);
 
   const selectedStudent = useMemo(
     () => workspace.students.find((s) => s.id === selectedStudentId) || workspace.students[0],
@@ -219,6 +234,16 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
               </option>
             ))}
           </select>
+          {selectedStudent && onOpenDrawer && canBulkImport && (
+            <button
+              type="button"
+              onClick={() => onOpenDrawer({ type: 'STUDENT', id: selectedStudent.id })}
+              className="inline-flex items-center gap-1 px-2.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:border-blue-900 hover:text-blue-900 rounded-lg whitespace-nowrap cursor-pointer"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              <span>Hồ sơ nhanh</span>
+            </button>
+          )}
         </div>
       </div>
 

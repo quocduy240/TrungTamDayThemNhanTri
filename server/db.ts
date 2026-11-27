@@ -3,6 +3,7 @@ import path from 'path';
 import type { DatabaseState } from '../src/types.ts';
 import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
 import { buildDeterministicQrToken } from '../src/lib/smartCodeAndQr.ts';
+import { ensureSystemPrintTemplates, normalizeLookupKey } from '../src/lib/workspaceIntegrity.ts';
 import { INITIAL_DB } from './seedData.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -44,14 +45,27 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
   if (!Array.isArray(parsed.reminderDispatchLogs)) {
     parsed.reminderDispatchLogs = structuredClone(INITIAL_DB.reminderDispatchLogs);
   }
+  parsed.printTemplates = ensureSystemPrintTemplates(parsed.printTemplates);
   parsed.teachers = (parsed.teachers || []).map((t) => ({
     ...t,
     teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
     availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
   }));
+  const teacherByKey = new Map<string, string>();
+  parsed.teachers.forEach((t) => {
+    teacherByKey.set(normalizeLookupKey(t.name), t.id);
+    teacherByKey.set(normalizeLookupKey(t.shortName), t.id);
+  });
+  const roomByKey = new Map<string, string>();
+  parsed.rooms.forEach((r) => {
+    roomByKey.set(normalizeLookupKey(r.name), r.id);
+    roomByKey.set(normalizeLookupKey(r.code), r.id);
+  });
   parsed.students = (parsed.students || []).map((st) => ({
     ...st,
     qrToken: st.qrToken || buildDeterministicQrToken(st.id, st.code),
+    homeroomTeacherId: st.homeroomTeacherId || teacherByKey.get(normalizeLookupKey(st.homeroomTeacher)),
+    roomId: st.roomId || roomByKey.get(normalizeLookupKey(st.room)),
   }));
   return parsed;
 }
