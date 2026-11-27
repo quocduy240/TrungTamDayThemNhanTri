@@ -886,23 +886,14 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
     return;
   }
 
-  const requestedRole = req.body?.requestedRole;
-  const fallbackRole: UserRole =
-    requestedRole === 'MANAGER' ||
-    requestedRole === 'TEACHER' ||
-    requestedRole === 'PARENT' ||
-    requestedRole === 'STUDENT'
-      ? requestedRole
-      : 'STUDENT';
   const user: AuthUser = {
     id: verified.uid,
     name: verified.displayName,
     email,
     photoURL: verified.photoURL,
-    role: fallbackRole,
-    linkedTeacherId: teacherMatch?.id,
+    role: 'STUDENT',
     authProvider: 'GOOGLE_FIREBASE',
-    loginChannel: fallbackRole === 'TEACHER' || fallbackRole === 'MANAGER' ? 'STAFF_GMAIL' : 'STUDENT_GMAIL',
+    loginChannel: 'STUDENT_GMAIL',
   };
   const token = signSessionToken(user);
   res.json({ token, user });

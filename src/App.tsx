@@ -405,33 +405,43 @@ export default function App() {
     [workspace],
   );
 
+  // Guard against duplicate bridge calls when interactive popup login is active
+  const interactiveAuthInFlightRef = useRef(false);
+
   // Silent single-flight Firebase session recovery (prevents 401 interruption on server restart)
   const attemptSilentSessionRecovery = useCallback(async (): Promise<string | null> => {
     const fbUser = auth.currentUser;
     if (!fbUser) return null;
     setRecoveringSession(true);
     try {
-      const profile = await ensureUserProfileFromGmail(fbUser);
       const idToken = await fbUser.getIdToken(true);
-      const res = await fetch('/api/v1/auth/firebase-bridge', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          idToken,
-          requestedRole: profile.role,
-          portalIntent: 'AUTO',
-        }),
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      let res: Response;
+      try {
+        res = await fetch('/api/v1/auth/firebase-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idToken,
+            portalIntent: 'AUTO',
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
       if (!res.ok) return null;
       const bridged = (await res.json()) as { token?: string; user?: AuthUser };
       if (!bridged.token || !bridged.user) return null;
       setAuthToken(bridged.token);
       setCurrentUser({
         ...bridged.user,
-        photoURL: fbUser.photoURL || profile.photoURL,
+        photoURL: fbUser.photoURL || bridged.user.photoURL,
         authProvider: 'GOOGLE_FIREBASE',
       });
       setSessionExpiredReason(null);
+      ensureUserProfileFromGmail(fbUser).catch(() => {});
       return bridged.token;
     } catch {
       return null;
@@ -451,16 +461,16 @@ export default function App() {
     };
   }, [attemptSilentSessionRecovery]);
 
-  // Subscribe to Firebase Auth state (Gmail login auto-restore)
+  // Subscribe to Firebase Auth state (passive background Gmail session restore — never locks login button)
   useEffect(() => {
+    let cancelled = false;
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) {
+      if (!fbUser || interactiveAuthInFlightRef.current) {
         return;
       }
-      setAuthBusy(true);
       try {
-        const profile = await ensureUserProfileFromGmail(fbUser);
         const idToken = await fbUser.getIdToken();
+        if (cancelled || interactiveAuthInFlightRef.current) return;
         const bridged = await apiRequest<{
           token?: string;
           user?: AuthUser;
@@ -469,42 +479,47 @@ export default function App() {
           method: 'POST',
           body: JSON.stringify({
             idToken,
-            requestedRole: profile.role,
             portalIntent: 'AUTO',
           }),
         });
+        if (cancelled || interactiveAuthInFlightRef.current) return;
         if (bridged.token && bridged.user) {
           const resolvedUser: AuthUser = {
             ...bridged.user,
-            photoURL: fbUser.photoURL || profile.photoURL,
+            photoURL: fbUser.photoURL || bridged.user.photoURL,
             authProvider: 'GOOGLE_FIREBASE',
           };
           setAuthToken(bridged.token);
           setCurrentUser(resolvedUser);
           setSessionExpiredReason(null);
           const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
-          setWorkspace({ ...ws, user: resolvedUser });
+          if (!cancelled) {
+            setWorkspace({ ...ws, user: resolvedUser });
+          }
+          ensureUserProfileFromGmail(fbUser).catch(() => {});
         }
       } catch (err) {
         console.error('Firebase auth sync error:', err);
-      } finally {
-        setAuthBusy(false);
       }
     });
-    return () => unsub();
+    return () => {
+      cancelled = true;
+      unsub();
+    };
   }, []);
 
   async function handleSignInGmail(
     portalIntent: 'PARENT' | 'STUDENT' | 'TEACHER' | 'AUTO' = 'AUTO',
     studentId?: string,
   ): Promise<StudentLoginResult | void> {
+    if (interactiveAuthInFlightRef.current) return;
+    interactiveAuthInFlightRef.current = true;
     setAuthBusy(true);
     setAuthError('');
     try {
       const fbUser =
         studentId && auth.currentUser ? auth.currentUser : (await signInWithGmailPopup()).user;
-      const profile = await ensureUserProfileFromGmail(fbUser);
-      const idToken = await fbUser.getIdToken();
+      const idToken = await fbUser.getIdToken(true);
       const bridged = await apiRequest<{
         token?: string;
         user?: AuthUser;
@@ -514,7 +529,6 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({
           idToken,
-          requestedRole: profile.role,
           portalIntent,
           studentId,
         }),
@@ -533,34 +547,58 @@ export default function App() {
 
       const resolvedUser: AuthUser = {
         ...bridged.user,
-        photoURL: fbUser.photoURL || profile.photoURL,
+        photoURL: fbUser.photoURL || bridged.user.photoURL,
         authProvider: 'GOOGLE_FIREBASE',
       };
       setAuthToken(bridged.token);
       setCurrentUser(resolvedUser);
+      setSessionExpiredReason(null);
       const ws = await apiRequest<WorkspacePayload>('/api/v1/workspace');
       setWorkspace({ ...ws, user: resolvedUser });
       setShowRoleModal(false);
 
+      // Sync Firestore profile non-blocking in the background
+      ensureUserProfileFromGmail(fbUser).catch(() => {});
+
       if (portalIntent === 'PARENT') {
         setFrontendMode('PARENT');
         setViewShell('FRONTEND');
+      } else if (portalIntent === 'STUDENT') {
+        setFrontendMode('TEACHER_STUDENT');
+        setViewShell('FRONTEND');
+      } else if (
+        resolvedUser.role === 'SUPER_ADMIN' ||
+        resolvedUser.role === 'ADMIN' ||
+        resolvedUser.role === 'MANAGER'
+      ) {
+        setActiveTab('overview');
+        setViewShell('CMS');
       } else if (resolvedUser.role === 'TEACHER') {
         setActiveTab('teacher-portal');
         setFrontendMode('TEACHER_STUDENT');
         setViewShell('CMS');
-      } else if (portalIntent === 'STUDENT' || portalIntent === 'TEACHER') {
+      } else if (resolvedUser.role === 'PARENT') {
+        setFrontendMode('PARENT');
+        setViewShell('FRONTEND');
+      } else {
         setFrontendMode('TEACHER_STUDENT');
         setViewShell('FRONTEND');
       }
       showToast(`Chào mừng ${resolvedUser.name} (${roleLabel(resolvedUser.role, 'vi')})`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Đăng nhập Gmail chưa thành công.';
-      if (!msg.includes('popup-closed-by-user')) {
-        setAuthError(msg);
+      const rawMsg = err instanceof Error ? err.message : 'Đăng nhập Gmail chưa thành công.';
+      const isCancelled =
+        rawMsg.includes('popup-closed-by-user') || rawMsg.includes('cancelled-popup-request');
+      if (!isCancelled) {
+        const friendlyMsg = rawMsg.includes('popup-blocked')
+          ? 'Trình duyệt đang chặn cửa sổ đăng nhập Google. Vui lòng cho phép popup rồi thử lại.'
+          : rawMsg;
+        setAuthError(friendlyMsg);
+        showToast(friendlyMsg);
       }
       throw err;
     } finally {
+      interactiveAuthInFlightRef.current = false;
       setAuthBusy(false);
     }
   }
@@ -951,6 +989,9 @@ export default function App() {
           onOpenCms={(tab) => {
             if (tab) setActiveTab(tab as CmsTab);
             setViewShell('CMS');
+            if (!workspace && currentUser) {
+              void refreshWorkspace();
+            }
           }}
           onOpenNotificationPrefs={currentUser ? () => setShowNotifPrefsModal(true) : undefined}
           onJumpToAttendance={handleJumpToAttendance}

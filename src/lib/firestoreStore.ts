@@ -175,6 +175,21 @@ function sanitizeSiteConfig(cfg: SiteConfig): SiteConfig {
   };
 }
 
+async function withShortTimeout<T>(promise: Promise<T>, ms = 2500): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('firestore-timeout')), ms);
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<AuthUser> {
   const email = (fbUser.email || '').toLowerCase();
   const userRef = doc(db, 'users', fbUser.uid);
@@ -190,9 +205,9 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
     resolvedRole = 'ADMIN';
     linkedStudentId = undefined;
   } else if (email) {
-    // Check if SuperAdmin pre-assigned a role invite for this Gmail address
+    // Check if SuperAdmin pre-assigned a role invite for this Gmail address (bounded timeout)
     try {
-      const inviteSnap = await getDoc(doc(db, 'role_invites', email));
+      const inviteSnap = await withShortTimeout(getDoc(doc(db, 'role_invites', email)), 2000);
       if (inviteSnap.exists()) {
         const invite = inviteSnap.data() as RoleInviteDoc;
         resolvedRole = invite.role;
@@ -200,12 +215,24 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
         linkedTeacherId = invite.linkedTeacherId;
       }
     } catch {
-      // No invite or permission denied -> default cleanly to STUDENT
+      // No invite, timeout, or permission denied -> default cleanly to STUDENT
     }
   }
 
+  const fallbackProfile: AuthUser = {
+    id: fbUser.uid,
+    name: clampStr(fbUser.displayName || email.split('@')[0], 120, 'Người dùng Nhân Trí'),
+    email,
+    photoURL: fbUser.photoURL || undefined,
+    role: resolvedRole,
+    linkedStudentId,
+    linkedStudentIds: linkedStudentId ? [linkedStudentId] : undefined,
+    linkedTeacherId,
+    authProvider: 'GOOGLE_FIREBASE',
+  };
+
   try {
-    const existingSnap = await getDoc(userRef);
+    const existingSnap = await withShortTimeout(getDoc(userRef), 2500);
     const nowIso = new Date().toISOString();
 
     if (existingSnap.exists()) {
@@ -249,7 +276,7 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
       ...(linkedTeacherId ? { linkedTeacherId } : {}),
     };
 
-    await setDoc(userRef, profilePayload);
+    await withShortTimeout(setDoc(userRef, profilePayload), 2500);
 
     return {
       id: fbUser.uid,
@@ -262,7 +289,9 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
       authProvider: 'GOOGLE_FIREBASE',
     };
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `users/${fbUser.uid}`);
+    // Non-fatal: never block or crash Firebase Auth login when Firestore is offline/slow/restricted
+    console.warn('Firestore user profile sync skipped (non-blocking fallback):', error);
+    return fallbackProfile;
   }
 }
 

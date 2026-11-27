@@ -123,7 +123,23 @@ export async function apiRequest<T>(
     headers.Authorization = `Bearer ${memoryAuthToken}`;
   }
 
-  const res = await fetch(path, { ...options, headers });
+  const controller = !options.signal ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), 20000) : null;
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...options,
+      headers,
+      signal: options.signal ?? controller?.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Kết nối máy chủ quá thời gian chờ. Vui lòng thử lại.');
+    }
+    throw err;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
   const contentType = res.headers.get('content-type') || '';
 
   if (!res.ok) {

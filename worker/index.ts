@@ -1278,22 +1278,14 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       return json({ token, user: studentUser });
     }
 
-    const fallbackRole: UserRole =
-      body.requestedRole === 'MANAGER' ||
-      body.requestedRole === 'TEACHER' ||
-      body.requestedRole === 'PARENT' ||
-      body.requestedRole === 'STUDENT'
-        ? body.requestedRole
-        : 'STUDENT';
     const bridgedUser: AuthUser = {
       id: fb.localId,
       name: fb.displayName || email.split('@')[0],
       email,
       photoURL: fb.photoUrl,
-      role: fallbackRole,
-      linkedTeacherId: teacherMatch?.id,
+      role: 'STUDENT',
       authProvider: 'GOOGLE_FIREBASE',
-      loginChannel: fallbackRole === 'TEACHER' || fallbackRole === 'MANAGER' ? 'STAFF_GMAIL' : 'STUDENT_GMAIL',
+      loginChannel: 'STUDENT_GMAIL',
     };
     const token = await signToken(bridgedUser, env);
     return json({ token, user: bridgedUser });
