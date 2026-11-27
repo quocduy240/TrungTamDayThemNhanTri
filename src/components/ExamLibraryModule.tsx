@@ -1,10 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, CheckCircle2, Clock, RotateCcw, XCircle } from 'lucide-react';
-import type { NationalExam } from '../types';
+import { BookOpen, CheckCircle2, Clock, Printer, RotateCcw, XCircle } from 'lucide-react';
+import type { NationalExam, SiteConfig } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
+import { buildExamDocumentHtml } from '../lib/brandedDocumentExporter';
+import { BrandedPrintModal } from './BrandedPrintModal';
+import { ExamSmartWorkbench } from './ExamSmartWorkbench';
 
 interface ExamLibraryModuleProps {
   workspace: WorkspacePayload;
+  siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
 }
 
@@ -21,7 +25,11 @@ interface SubmissionResult {
   }[];
 }
 
-export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({ workspace, onRefresh }) => {
+export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({
+  workspace,
+  siteConfig,
+  onRefresh,
+}) => {
   const [levelFilter, setLevelFilter] = useState<'ALL' | 'CAP_1' | 'CAP_2' | 'CAP_3'>('ALL');
   const [activeExam, setActiveExam] = useState<NationalExam | null>(null);
   const [answers, setAnswers] = useState<number[]>([]);
@@ -29,6 +37,31 @@ export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({ workspace,
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmissionResult | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [printDoc, setPrintDoc] = useState<{ title: string; fileName: string; html: string } | null>(
+    null,
+  );
+
+  function openBrandedExamPrint(exam: NationalExam, includeAnswerKey: boolean) {
+    const answerMap: Record<string, number> = {};
+    if (activeExam?.id === exam.id) {
+      exam.questions.forEach((q, idx) => {
+        if (answers[idx] >= 0) answerMap[q.id] = answers[idx];
+      });
+    }
+    const html = buildExamDocumentHtml({
+      exam,
+      includeAnswerKey,
+      studentName: workspace.user.name,
+      studentAnswers: activeExam?.id === exam.id ? answerMap : undefined,
+      scoreOutOf10: activeExam?.id === exam.id && result ? result.score : undefined,
+      siteConfig,
+    });
+    setPrintDoc({
+      title: `${exam.title}${includeAnswerKey ? ' (Kèm Đáp án)' : ''}`,
+      fileName: `DeThi_NhanTri_Lop${exam.grade}_${exam.id.slice(0, 6)}.html`,
+      html,
+    });
+  }
 
   useEffect(() => {
     if (!activeExam || result) return;
@@ -84,11 +117,19 @@ export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({ workspace,
             </p>
             <h1 className="text-lg font-bold text-slate-950 mt-0.5">{activeExam.title}</h1>
           </div>
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <span className="inline-flex items-center gap-1.5 font-mono-num text-sm font-bold text-slate-900 bg-slate-100 px-3 py-1.5 rounded-lg">
               <Clock className="w-4 h-4 text-blue-900" />
               {formatTimer(secondsLeft)}
             </span>
+            <button
+              type="button"
+              onClick={() => openBrandedExamPrint(activeExam, Boolean(result))}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer whitespace-nowrap"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>{result ? 'In đề + Đáp án (Logo)' : 'In đề (Logo)'}</span>
+            </button>
             <button
               type="button"
               onClick={() => setActiveExam(null)}
@@ -212,6 +253,15 @@ export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({ workspace,
             </button>
           </div>
         )}
+        <div className="pb-16" />
+        <ExamSmartWorkbench examTitle={activeExam.title} />
+        <BrandedPrintModal
+          open={Boolean(printDoc)}
+          title={printDoc?.title || ''}
+          fileName={printDoc?.fileName || 'de-thi-nhan-tri.html'}
+          htmlContent={printDoc?.html || ''}
+          onClose={() => setPrintDoc(null)}
+        />
       </div>
     );
   }
@@ -273,22 +323,40 @@ export const ExamLibraryModule: React.FC<ExamLibraryModuleProps> = ({ workspace,
               <p className="text-xs text-slate-600">{ex.curriculumStandard}</p>
             </div>
 
-            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
               <span className="text-xs text-slate-500 font-mono-num">
                 {ex.attemptsCount} lượt luyện tập
               </span>
-              <button
-                type="button"
-                onClick={() => startExam(ex)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>Bắt đầu làm bài</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => openBrandedExamPrint(ex, false)}
+                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Tải / In đề</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => startExam(ex)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer whitespace-nowrap"
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  <span>Bắt đầu làm bài</span>
+                </button>
+              </div>
             </div>
           </div>
         ))}
       </div>
+
+      <BrandedPrintModal
+        open={Boolean(printDoc)}
+        title={printDoc?.title || ''}
+        fileName={printDoc?.fileName || 'de-thi-nhan-tri.html'}
+        htmlContent={printDoc?.html || ''}
+        onClose={() => setPrintDoc(null)}
+      />
     </div>
   );
 };

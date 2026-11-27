@@ -9,6 +9,7 @@ import {
   MessageSquare,
   Percent,
   Plus,
+  Printer,
   QrCode,
   Save,
   Send,
@@ -22,6 +23,8 @@ import { apiRequest, formatVnd, type WorkspacePayload } from '../lib/api';
 import { DEFAULT_SITE_CONFIG } from '../lib/firestoreStore';
 import { getStudentsInFamily } from '../lib/tuitionCalculator';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
+import { buildTuitionReceiptDocumentHtml } from '../lib/brandedDocumentExporter';
+import { BrandedPrintModal } from './BrandedPrintModal';
 
 interface TuitionViewProps {
   workspace: WorkspacePayload;
@@ -37,6 +40,7 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
   const isAdmin = workspace.user.role === 'SUPER_ADMIN' || workspace.user.role === 'ADMIN';
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'PAID' | 'DUE_SOON' | 'OVERDUE'>('ALL');
   const [payModal, setPayModal] = useState<TuitionRecord | null>(null);
+  const [printTuitionRecord, setPrintTuitionRecord] = useState<TuitionRecord | null>(null);
   const [payMethod, setPayMethod] = useState<'VIETQR' | 'MOMO' | 'ZALOPAY'>('VIETQR');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string>('');
@@ -536,31 +540,42 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
                     )}
                   </td>
                   <td className="py-3 px-4 text-right whitespace-nowrap">
-                    {t.status !== 'PAID' ? (
-                      <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setPayModal(t)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
-                        >
-                          <CreditCard className="w-3.5 h-3.5" />
-                          <span>Thanh toán QR</span>
-                        </button>
-                        {isAdmin && (
+                    <div className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setPrintTuitionRecord(t)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer"
+                        title="In / Tải Phiếu học phí có Logo & Watermark Nhân Trí"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>{t.status === 'PAID' ? 'Biên nhận' : 'In phiếu'}</span>
+                      </button>
+                      {t.status !== 'PAID' ? (
+                        <>
                           <button
                             type="button"
-                            disabled={busyId === t.id}
-                            onClick={() => handleSendReminder(t)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg cursor-pointer"
+                            onClick={() => setPayModal(t)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg cursor-pointer"
                           >
-                            <BellRing className="w-3.5 h-3.5" />
-                            <span>Nhắc Zalo</span>
+                            <CreditCard className="w-3.5 h-3.5" />
+                            <span>Thanh toán QR</span>
                           </button>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-slate-400">Hoàn tất {t.paidAt}</span>
-                    )}
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              disabled={busyId === t.id}
+                              onClick={() => handleSendReminder(t)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-lg cursor-pointer"
+                            >
+                              <BellRing className="w-3.5 h-3.5" />
+                              <span>Nhắc Zalo</span>
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-xs text-slate-400 pl-1">Xong {t.paidAt}</span>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );
@@ -728,6 +743,23 @@ export const TuitionModule: React.FC<TuitionViewProps> = ({
           </div>
         );
       })()}
+
+      {printTuitionRecord && (
+        <BrandedPrintModal
+          open={Boolean(printTuitionRecord)}
+          title={
+            printTuitionRecord.status === 'PAID'
+              ? `Biên nhận Học phí — ${printTuitionRecord.studentName}`
+              : `Phiếu Học phí — ${printTuitionRecord.studentName}`
+          }
+          fileName={`HocPhi_NhanTri_${printTuitionRecord.id.slice(0, 8)}.html`}
+          htmlContent={buildTuitionReceiptDocumentHtml({
+            record: printTuitionRecord,
+            siteConfig,
+          })}
+          onClose={() => setPrintTuitionRecord(null)}
+        />
+      )}
     </div>
   );
 };

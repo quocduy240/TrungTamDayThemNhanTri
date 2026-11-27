@@ -21,6 +21,7 @@ import {
   Pencil,
   Phone,
   Play,
+  Printer,
   Send,
   ShieldCheck,
   Sparkles,
@@ -51,8 +52,17 @@ import {
 } from '../lib/api';
 import { buildTuitionTransferMemo, buildVietQrUrl } from '../lib/vietqr';
 import { calculateTuitionBreakdown, findFamilyForStudent } from '../lib/tuitionCalculator';
-import { dayLabel, studentBelongsToClass } from '../lib/timetableEngine';
+import { studentBelongsToClass } from '../lib/timetableEngine';
+import {
+  buildExamDocumentHtml,
+  buildReportCardDocumentHtml,
+  buildTuitionReceiptDocumentHtml,
+} from '../lib/brandedDocumentExporter';
+import { BrandLogo } from './BrandLogo';
+import { BrandedPrintModal } from './BrandedPrintModal';
+import { ExamSmartWorkbench } from './ExamSmartWorkbench';
 import { InlineEditable } from './InlineEditable';
+import { ParentTimetableView } from './ParentTimetableView';
 import {
   ClassroomAuthGate,
   ParentAuthGate,
@@ -194,6 +204,11 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
 }) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showQuickLookup, setShowQuickLookup] = useState(false);
+  const [frontendPrintDoc, setFrontendPrintDoc] = useState<{
+    title: string;
+    fileName: string;
+    html: string;
+  } | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const canInlineEdit = isAdminOrSuper(currentUser?.role);
@@ -674,9 +689,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           {/* Zone 1: Brand Mark */}
           <div className="flex items-center gap-2.5 shrink-0 min-w-0">
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-blue-900 text-white font-bold text-sm shrink-0">
-              NT
-            </span>
+            <BrandLogo size="sm" />
             <div className="leading-tight">
               <InlineEditable
                 value={siteConfig.shortName}
@@ -1183,17 +1196,44 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                         </p>
                         <h3 className="text-lg font-bold text-slate-950 mt-0.5">{activeExam.title}</h3>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveExam(null);
-                          setExamResult(null);
-                          setExamAnswers({});
-                        }}
-                        className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
-                      >
-                        Quay lại danh sách đề
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const ansByQ: Record<string, number> = {};
+                            activeExam.questions.forEach((q, idx) => {
+                              if (examAnswers[idx] !== undefined) ansByQ[q.id] = examAnswers[idx];
+                            });
+                            setFrontendPrintDoc({
+                              title: `${activeExam.title}${examResult ? ' (Kèm Đáp án)' : ''}`,
+                              fileName: `DeThi_NhanTri_Lop${activeExam.grade}_${activeExam.id.slice(0, 6)}.html`,
+                              html: buildExamDocumentHtml({
+                                exam: activeExam,
+                                includeAnswerKey: Boolean(examResult),
+                                studentName: currentUser?.name,
+                                studentAnswers: ansByQ,
+                                scoreOutOf10: examResult?.score,
+                                siteConfig,
+                              }),
+                            });
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer whitespace-nowrap"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>{examResult ? 'In đề + Đáp án (Logo)' : 'In / Tải đề (Logo)'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveExam(null);
+                            setExamResult(null);
+                            setExamAnswers({});
+                          }}
+                          className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
+                        >
+                          Quay lại danh sách đề
+                        </button>
+                      </div>
                     </div>
 
                     <div className="space-y-5">
@@ -1266,13 +1306,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                         </button>
                       )}
                     </div>
+                    <ExamSmartWorkbench examTitle={activeExam.title} />
                   </div>
                 ) : (
                   <div className="grid md:grid-cols-2 gap-4">
                     {liveExams.map((ex) => (
                       <div
                         key={ex.id}
-                        className="p-5 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-4"
+                        className="p-5 bg-white border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                       >
                         <div className="space-y-1">
                           <p className="text-xs text-slate-500">
@@ -1281,17 +1322,39 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                           <h3 className="text-sm font-bold text-slate-950">{ex.title}</h3>
                           <p className="text-xs text-slate-600">{ex.curriculumStandard}</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveExam(ex);
-                            setExamAnswers({});
-                            setExamResult(null);
-                          }}
-                          className="px-3.5 py-2 text-xs font-semibold text-blue-900 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          Làm bài ngay
-                        </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setFrontendPrintDoc({
+                                title: ex.title,
+                                fileName: `DeThi_NhanTri_Lop${ex.grade}_${ex.id.slice(0, 6)}.html`,
+                                html: buildExamDocumentHtml({
+                                  exam: ex,
+                                  includeAnswerKey: false,
+                                  studentName: currentUser?.name,
+                                  siteConfig,
+                                }),
+                              })
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                            title="In hoặc tải đề thi có gắn Logo & Watermark Nhân Trí"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            <span>In đề</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveExam(ex);
+                              setExamAnswers({});
+                              setExamResult(null);
+                            }}
+                            className="px-3.5 py-2 text-xs font-semibold text-white bg-blue-900 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            Làm bài ngay
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1639,9 +1702,29 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                           </div>
 
                           <div>
-                            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3">
-                              Học bạ Online gần đây
-                            </h3>
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                              <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                                Học bạ Online gần đây
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setFrontendPrintDoc({
+                                    title: `Học bạ Online — ${focusedStudent.fullName}`,
+                                    fileName: `HocBa_NhanTri_${focusedStudent.code}.html`,
+                                    html: buildReportCardDocumentHtml({
+                                      student: focusedStudent,
+                                      scores: focusedScores,
+                                      siteConfig,
+                                    }),
+                                  })
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md cursor-pointer whitespace-nowrap"
+                              >
+                                <Printer className="w-3 h-3" />
+                                <span>In / Tải Học bạ (Logo)</span>
+                              </button>
+                            </div>
                             <div className="divide-y divide-slate-100 border border-slate-100 rounded-lg">
                               {focusedScores.length === 0 ? (
                                 <p className="p-4 text-xs text-slate-400">Chưa có cột điểm mới.</p>
@@ -1692,44 +1775,14 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                             </div>
                           </div>
 
-                          <div>
-                            <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2.5">
-                              Thời khóa biểu Cá nhân của con ({focusedTimetable.length} buổi/tuần)
-                            </h3>
-                            <div className="space-y-2">
-                              {focusedTimetable.length === 0 ? (
-                                <p className="text-xs text-slate-400">
-                                  Chưa có lịch học được phân công cho lớp {focusedStudent.centerClass}.
-                                </p>
-                              ) : (
-                                focusedTimetable.map((sl) => (
-                                  <div
-                                    key={sl.id}
-                                    className="flex flex-wrap items-center justify-between gap-2 text-xs p-2.5 bg-slate-50 border border-slate-100 rounded-lg"
-                                  >
-                                    <div>
-                                      <span className="font-semibold text-blue-950">
-                                        {dayLabel(sl.day)}
-                                      </span>
-                                      <span className="font-mono-num text-slate-600 ml-2">
-                                        {sl.timeRange}
-                                      </span>
-                                      <span className="font-bold text-slate-900 ml-2">
-                                        · {sl.subject}
-                                      </span>
-                                    </div>
-                                    <div className="text-slate-600">
-                                      <span>{sl.teacherName}</span>
-                                      <span className="mx-1.5 text-slate-300">|</span>
-                                      <span className="font-mono-num font-semibold text-slate-800">
-                                        {sl.room}
-                                      </span>
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </div>
+                          <ParentTimetableView
+                            slots={focusedTimetable}
+                            student={focusedStudent}
+                            title={`Thời khóa biểu của ${focusedStudent.fullName}`}
+                            subtitle={`${focusedStudent.centerClass} · ${focusedTimetable.length} buổi/tuần · Mặc định bảng đồ họa theo môn học`}
+                            siteConfig={siteConfig}
+                            emptyMessage={`Chưa có lịch học được phân công cho lớp ${focusedStudent.centerClass}.`}
+                          />
                         </div>
                       </div>
 
@@ -1848,6 +1901,32 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
                                       </button>
                                     </div>
                                   )}
+                                  <div className="pt-1 flex justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setFrontendPrintDoc({
+                                          title:
+                                            t.status === 'PAID'
+                                              ? `Biên nhận Học phí — ${t.studentName}`
+                                              : `Phiếu Học phí — ${t.studentName}`,
+                                          fileName: `HocPhi_NhanTri_${t.id.slice(0, 8)}.html`,
+                                          html: buildTuitionReceiptDocumentHtml({
+                                            record: t,
+                                            siteConfig,
+                                          }),
+                                        })
+                                      }
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-blue-950 bg-white hover:bg-blue-50 border border-blue-200 rounded-md cursor-pointer"
+                                    >
+                                      <Printer className="w-3 h-3" />
+                                      <span>
+                                        {t.status === 'PAID'
+                                          ? 'In / Tải Biên nhận (Logo)'
+                                          : 'In / Tải Phiếu học phí (Logo)'}
+                                      </span>
+                                    </button>
+                                  </div>
                                 </div>
                               );
                             })}
@@ -2541,16 +2620,24 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
       {/* Unified Clean Footer */}
       <footer className="bg-white border-t border-slate-200 py-10">
         <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 text-sm text-slate-600">
-          <div>
-            <InlineEditable
-              value={siteConfig.centerName}
-              editMode={isEditingActive}
-              onSave={(val) => onQuickSaveConfig({ centerName: val })}
-              className="font-bold text-slate-950 block"
-            />
-            <p className="text-xs text-slate-500 mt-1">
-              {siteConfig.campus1} · {siteConfig.campus2}
-            </p>
+          <div className="flex items-center gap-3.5">
+            <BrandLogo size="md" />
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <InlineEditable
+                  value={siteConfig.centerName}
+                  editMode={isEditingActive}
+                  onSave={(val) => onQuickSaveConfig({ centerName: val })}
+                  className="font-bold text-slate-950 block"
+                />
+                <span className="text-[10px] font-mono-num font-bold tracking-wider text-blue-900 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
+                  SINCE 2023
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                {siteConfig.campus1} · {siteConfig.campus2}
+              </p>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-4 text-xs">
             <span className="font-mono-num font-semibold text-blue-900">{siteConfig.domain}</span>
@@ -2604,7 +2691,7 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
       </footer>
 
       {/* Slim Floating 1-Click Visual Inline Editor Bar (SuperAdmin & Admin Only) */}
-      {canInlineEdit && (
+      {canInlineEdit && !activeExam && (
         <div className="fixed bottom-4 right-4 z-40 flex items-center gap-2 bg-slate-950/95 text-white border border-slate-700 rounded-xl px-3.5 py-2 shadow-xl">
           <div className="text-[11px] pr-2 border-r border-slate-700 hidden sm:block">
             <p className="font-bold text-blue-300">{roleLabel(currentUser!.role, 'vi')}</p>
@@ -2632,6 +2719,15 @@ export const FrontendPortal: React.FC<FrontendPortalProps> = ({
           </button>
         </div>
       )}
+
+      {/* Branded Print & Download Modal for Frontend Documents */}
+      <BrandedPrintModal
+        open={Boolean(frontendPrintDoc)}
+        title={frontendPrintDoc?.title || ''}
+        fileName={frontendPrintDoc?.fileName || 'tai-lieu-nhan-tri.html'}
+        htmlContent={frontendPrintDoc?.html || ''}
+        onClose={() => setFrontendPrintDoc(null)}
+      />
 
       {/* Enrollment Modal */}
       {selectedCourse && (

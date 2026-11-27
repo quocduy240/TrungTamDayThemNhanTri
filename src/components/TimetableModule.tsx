@@ -27,6 +27,7 @@ import type {
   Room,
   SessionPeriod,
   ShiftCode,
+  SiteConfig,
   Teacher,
   TeacherGroup,
   TeacherLeave,
@@ -53,9 +54,11 @@ import {
   studentBelongsToClass,
   type MoveOrSwapEvaluation,
 } from '../lib/timetableEngine';
+import { ParentTimetableView } from './ParentTimetableView';
 
 interface TimetableModuleProps {
   workspace: WorkspacePayload;
+  siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
 }
 
@@ -102,7 +105,11 @@ interface PendingSwapConfirm {
   evaluation: MoveOrSwapEvaluation;
 }
 
-export const TimetableModule: React.FC<TimetableModuleProps> = ({ workspace, onRefresh }) => {
+export const TimetableModule: React.FC<TimetableModuleProps> = ({
+  workspace,
+  siteConfig,
+  onRefresh,
+}) => {
   const canEdit = isTimetableManager(workspace.user.role);
   const isTeacher = workspace.user.role === 'TEACHER';
 
@@ -2162,43 +2169,22 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({ workspace, onR
               )}
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs text-slate-500 border-y border-slate-200">
-                  <tr>
-                    <th className="py-2.5 px-4 font-medium">Thứ</th>
-                    <th className="py-2.5 px-4 font-medium">Khung giờ</th>
-                    <th className="py-2.5 px-4 font-medium">Lớp</th>
-                    <th className="py-2.5 px-4 font-medium">Môn học / Hoạt động</th>
-                    <th className="py-2.5 px-4 font-medium">Giáo viên</th>
-                    <th className="py-2.5 px-4 font-medium">Phòng</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {personalSlots.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-8 text-center text-xs text-slate-500">
-                        Chưa có ca học nào được phân công trong tuần này.
-                      </td>
-                    </tr>
-                  ) : (
-                    personalSlots.map((sl) => (
-                      <tr key={sl.id}>
-                        <td className="py-3 px-4 font-semibold text-slate-900">{dayLabel(sl.day)}</td>
-                        <td className="py-3 px-4 font-mono-num text-xs text-slate-600">{sl.timeRange}</td>
-                        <td className="py-3 px-4 font-semibold text-slate-800">{sl.centerClass}</td>
-                        <td className="py-3 px-4 font-medium text-blue-950">
-                          {sl.subject}
-                          {sl.note && <span className="block text-xs text-amber-700 font-normal">{sl.note}</span>}
-                        </td>
-                        <td className="py-3 px-4 text-slate-700">{sl.teacherName}</td>
-                        <td className="py-3 px-4 text-slate-600 font-mono-num text-xs">{sl.room}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <ParentTimetableView
+              slots={personalSlots}
+              student={personalPerspective === 'STUDENT' ? selectedStudent : undefined}
+              title={
+                personalPerspective === 'STUDENT' && selectedStudent
+                  ? `Thời khóa biểu cá nhân — ${selectedStudent.fullName} (${selectedStudent.centerClass})`
+                  : 'Lịch giảng dạy cá nhân theo tuần'
+              }
+              subtitle={
+                personalPerspective === 'STUDENT' && selectedStudent
+                  ? `${selectedStudent.school} · Phòng mặc định ${selectedStudent.room} · ${personalSlots.length} ca/tuần`
+                  : `${personalSlots.length} ca giảng dạy/tuần`
+              }
+              siteConfig={siteConfig}
+              emptyMessage="Chưa có ca học nào được phân công trong tuần này."
+            />
           </div>
 
           {/* PE Makeup List */}

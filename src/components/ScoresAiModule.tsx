@@ -4,19 +4,24 @@ import {
   Check,
   Copy,
   FilePlus2,
+  Printer,
   Sparkles,
   Upload,
   X,
 } from 'lucide-react';
+import type { SiteConfig } from '../types';
 import {
   apiRequest,
   buildZaloReportText,
   type WorkspacePayload,
 } from '../lib/api';
 import { compressImageFile } from '../lib/imageOptimizer';
+import { buildReportCardDocumentHtml } from '../lib/brandedDocumentExporter';
+import { BrandedPrintModal } from './BrandedPrintModal';
 
 interface ScoresAiModuleProps {
   workspace: WorkspacePayload;
+  siteConfig?: SiteConfig;
   onRefresh: () => Promise<void>;
 }
 
@@ -33,8 +38,13 @@ interface AnalyzedResult {
   improvements: string[];
 }
 
-export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRefresh }) => {
+export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
+  workspace,
+  siteConfig,
+  onRefresh,
+}) => {
   const [selectedStudentId, setSelectedStudentId] = useState<string>(workspace.students[0]?.id || '');
+  const [printReportOpen, setPrintReportOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
   const [aiResult, setAiResult] = useState<AnalyzedResult | null>(null);
@@ -424,13 +434,25 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
       {/* Bottom Row: Online Report Card Table + Zalo Parent Report Box */}
       <div className="grid lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-            <h2 className="text-base font-bold text-slate-950">
-              Bảng điểm Học bạ Online · {selectedStudent?.fullName}
-            </h2>
-            <span className="text-xs text-slate-500 font-mono-num">
-              {studentScores.length} cột điểm
-            </span>
+          <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-950">
+                Bảng điểm Học bạ Online · {selectedStudent?.fullName}
+              </h2>
+              <span className="text-xs text-slate-500 font-mono-num">
+                {studentScores.length} cột điểm
+              </span>
+            </div>
+            {selectedStudent && (
+              <button
+                type="button"
+                onClick={() => setPrintReportOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-950 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>In / Tải Học bạ có Logo</span>
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
@@ -503,6 +525,23 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({ workspace, onRef
           </pre>
         </div>
       </div>
+      {selectedStudent && (
+        <BrandedPrintModal
+          open={printReportOpen}
+          title={`Học bạ Online — ${selectedStudent.fullName}`}
+          fileName={`HocBa_NhanTri_${selectedStudent.code}.html`}
+          htmlContent={
+            printReportOpen
+              ? buildReportCardDocumentHtml({
+                  student: selectedStudent,
+                  scores: studentScores,
+                  siteConfig,
+                })
+              : ''
+          }
+          onClose={() => setPrintReportOpen(false)}
+        />
+      )}
     </div>
   );
 };

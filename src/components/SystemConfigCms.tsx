@@ -24,7 +24,7 @@ import type {
   UserProfileDoc,
   UserRole,
 } from '../types';
-import { ADMIN_EMAIL, SUPER_ADMIN_EMAIL } from '../lib/firebase';
+import { ADMIN_EMAIL, ADMIN_EMAIL_SECONDARY, SUPER_ADMIN_EMAIL } from '../lib/firebase';
 import {
   deleteRoleInvite,
   saveCourseToFirestore,
@@ -191,7 +191,9 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
 
   async function handleSyncSeed() {
     if (currentUser.authProvider !== 'GOOGLE_FIREBASE') {
-      setErrorMsg('Vui lòng đăng nhập bằng Gmail (duyweb5@gmail.com hoặc lethituman2021@gmail.com) để đồng bộ Firestore.');
+      setErrorMsg(
+        `Vui lòng đăng nhập bằng Gmail (${SUPER_ADMIN_EMAIL}, ${ADMIN_EMAIL} hoặc ${ADMIN_EMAIL_SECONDARY}) để đồng bộ Firestore.`,
+      );
       return;
     }
     setSyncingSeed(true);
@@ -526,7 +528,7 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
               <Lock className="w-4 h-4 shrink-0" />
               <span>
                 Phân khu cấu hình tên miền, SEO, tài khoản nhận học phí và bật/tắt mô-đun chỉ dành riêng cho{' '}
-                <strong>SuperAdmin ({SUPER_ADMIN_EMAIL})</strong>. Tài khoản Admin ({ADMIN_EMAIL}) có quyền xem thông số.
+                <strong>SuperAdmin ({SUPER_ADMIN_EMAIL})</strong>. Các tài khoản Admin ({ADMIN_EMAIL}, {ADMIN_EMAIL_SECONDARY}) có quyền xem thông số.
               </span>
             </div>
           )}
@@ -703,8 +705,9 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
             <div className="p-5 bg-white border border-slate-200 rounded-xl space-y-1.5">
               <p className="text-xs font-bold text-blue-900 uppercase tracking-wider">Admin Vận hành (Gốc)</p>
               <p className="font-mono-num text-sm font-bold text-slate-950">{ADMIN_EMAIL}</p>
+              <p className="font-mono-num text-sm font-bold text-slate-950">{ADMIN_EMAIL_SECONDARY}</p>
               <p className="text-xs text-slate-600">
-                Cấp/khóa tài khoản Giáo viên, Phụ huynh, Học sinh; gắn SĐT/Gmail &amp; cấp lại Mã PIN cho từng hồ sơ học sinh trong mục Học sinh &amp; Điểm danh.
+                Đồng cấp quản trị vận hành (dưới cấp SuperAdmin): cấp/khóa tài khoản Giáo viên, Quản lý, Phụ huynh, Học sinh; gắn SĐT/Gmail &amp; cấp lại Mã PIN cho hồ sơ học sinh.
               </p>
             </div>
           </div>
@@ -1018,8 +1021,8 @@ export const SystemConfigCms: React.FC<SystemConfigCmsProps> = ({
             </>
           ) : (
             <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600">
-              Đăng nhập bằng Gmail <strong>{SUPER_ADMIN_EMAIL}</strong> hoặc{' '}
-              <strong>{ADMIN_EMAIL}</strong> để cấp/khóa lời mời Gmail trực tiếp trên Cloud Firestore.
+              Đăng nhập bằng Gmail <strong>{SUPER_ADMIN_EMAIL}</strong>,{' '}
+              <strong>{ADMIN_EMAIL}</strong> hoặc <strong>{ADMIN_EMAIL_SECONDARY}</strong> để cấp/khóa lời mời Gmail trực tiếp trên Cloud Firestore.
             </div>
           )}
 

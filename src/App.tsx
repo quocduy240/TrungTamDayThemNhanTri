@@ -35,11 +35,13 @@ import type {
 } from './types';
 import {
   ADMIN_EMAIL,
+  ADMIN_EMAIL_SECONDARY,
   auth,
   signInWithGmailPopup,
   signOutGmail,
   SUPER_ADMIN_EMAIL,
 } from './lib/firebase';
+import { BrandLogo } from './components/BrandLogo';
 import {
   DEFAULT_SITE_CONFIG,
   ensureUserProfileFromGmail,
@@ -117,9 +119,8 @@ export default function App() {
   const [liveTimetable, setLiveTimetable] = useState<TimetableSlot[]>([]);
   const [liveExams, setLiveExams] = useState<NationalExam[]>([]);
 
-  // Default Frontend Display Mode: New Customer (Khách hàng mới)
+  // Default Frontend Display Mode: Always New Customer (Khách hàng mới) on initial visit
   const [frontendMode, setFrontendMode] = useState<FrontendMode>('NEW_CUSTOMER');
-  const [modeInitializedFromConfig, setModeInitializedFromConfig] = useState(false);
 
   const [viewShell, setViewShell] = useState<'FRONTEND' | 'CMS'>('FRONTEND');
   const [activeTab, setActiveTab] = useState<CmsTab>('overview');
@@ -263,20 +264,16 @@ export default function App() {
     loadBootstrap();
   }, [loadBootstrap]);
 
-  // Subscribe to live Firestore SiteConfig
+  // Subscribe to live Firestore SiteConfig (keep guest landing strictly on NEW_CUSTOMER)
   useEffect(() => {
     const unsub = subscribeSiteConfig((cfg) => {
       setSiteConfig(cfg);
       if (cfg.seoTitle) {
         document.title = cfg.seoTitle;
       }
-      if (!modeInitializedFromConfig && cfg.defaultFrontendMode) {
-        setFrontendMode(cfg.defaultFrontendMode);
-        setModeInitializedFromConfig(true);
-      }
     });
     return () => unsub();
-  }, [modeInitializedFromConfig]);
+  }, []);
 
   // Subscribe to live Firestore Courses & Exams (public catalog)
   useEffect(() => {
@@ -632,9 +629,9 @@ export default function App() {
   if (!bootstrap) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="text-center space-y-2">
-          <div className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-blue-900 text-white font-bold">
-            NT
+        <div className="text-center space-y-2.5">
+          <div className="flex justify-center">
+            <BrandLogo size="lg" />
           </div>
           <p className="text-sm font-semibold text-slate-900">
             Đang khởi tạo daythemnhantri.com...
@@ -752,10 +749,8 @@ export default function App() {
           {/* Desktop Sidebar */}
           <aside className="hidden lg:flex w-64 shrink-0 bg-white border-r border-slate-200 flex-col justify-between">
             <div>
-              <div className="h-16 px-5 border-b border-slate-200 flex items-center gap-2.5">
-                <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-blue-900 text-white font-bold text-sm">
-                  NT
-                </span>
+              <div className="h-16 px-4 border-b border-slate-200 flex items-center gap-2.5">
+                <BrandLogo size="sm" />
                 <div className="min-w-0">
                   <p className="text-sm font-extrabold text-blue-950 truncate">Nhân Trí CMS</p>
                   <p className="text-[11px] font-mono-num text-slate-500 truncate">
@@ -981,7 +976,11 @@ export default function App() {
                   />
                 )}
                 {activeTab === 'timetable' && (
-                  <TimetableModule workspace={workspace} onRefresh={refreshWorkspace} />
+                  <TimetableModule
+                    workspace={workspace}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                  />
                 )}
                 {activeTab === 'students' && (
                   <StudentsAttendanceModule
@@ -992,10 +991,18 @@ export default function App() {
                   />
                 )}
                 {activeTab === 'scores' && (
-                  <ScoresAiModule workspace={workspace} onRefresh={refreshWorkspace} />
+                  <ScoresAiModule
+                    workspace={workspace}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                  />
                 )}
                 {activeTab === 'exams' && (
-                  <ExamLibraryModule workspace={workspace} onRefresh={refreshWorkspace} />
+                  <ExamLibraryModule
+                    workspace={workspace}
+                    siteConfig={siteConfig}
+                    onRefresh={refreshWorkspace}
+                  />
                 )}
                 {activeTab === 'tuition' && showTuitionNav && (
                   <TuitionModule
@@ -1043,14 +1050,20 @@ export default function App() {
             )}
 
             <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
-              <div className="text-xs text-slate-700 space-y-1">
-                <p className="font-bold text-blue-950">Đăng nhập chính thức bằng Gmail (Firebase Auth)</p>
-                <p>
-                  SuperAdmin: <span className="font-mono-num font-semibold">{SUPER_ADMIN_EMAIL}</span>
-                </p>
-                <p>
-                  Admin Vận hành: <span className="font-mono-num font-semibold">{ADMIN_EMAIL}</span>
-                </p>
+              <div className="flex items-start gap-3">
+                <BrandLogo size="sm" />
+                <div className="text-xs text-slate-700 space-y-1 min-w-0">
+                  <p className="font-bold text-blue-950">Đăng nhập chính thức bằng Gmail (Firebase Auth)</p>
+                  <p className="truncate">
+                    SuperAdmin: <span className="font-mono-num font-semibold">{SUPER_ADMIN_EMAIL}</span>
+                  </p>
+                  <p className="truncate">
+                    Admin Vận hành: <span className="font-mono-num font-semibold">{ADMIN_EMAIL}</span>
+                  </p>
+                  <p className="truncate">
+                    Admin Vận hành 2: <span className="font-mono-num font-semibold">{ADMIN_EMAIL_SECONDARY}</span>
+                  </p>
+                </div>
               </div>
               <button
                 type="button"

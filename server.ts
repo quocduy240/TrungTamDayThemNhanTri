@@ -6,10 +6,10 @@ import { createServer as createViteServer } from 'vite';
 import { loadDb, saveDb, CLOUDFLARE_D1_SCHEMA_SQL } from './server/db.ts';
 import { FANPAGE_POSTS_FEED, OFFICIAL_FANPAGE_URL, REAL_CENTER_GALLERY } from './server/seedData.ts';
 import {
-  ADMIN_EMAIL,
   DEMO_ACCOUNTS,
   extractAuth,
   hashPassword,
+  isBootstrappedAdminEmail,
   requireAuth,
   signSessionToken,
   SUPER_ADMIN_EMAIL,
@@ -618,7 +618,7 @@ app.post('/api/v1/auth/firebase-bridge', async (req, res) => {
   const portalIntent = String(req.body?.portalIntent || 'AUTO').toUpperCase();
   const requestedStudentId = typeof req.body?.studentId === 'string' ? req.body.studentId.trim() : '';
 
-  if (email === SUPER_ADMIN_EMAIL || email === ADMIN_EMAIL) {
+  if (email === SUPER_ADMIN_EMAIL || isBootstrappedAdminEmail(email)) {
     const role: UserRole = email === SUPER_ADMIN_EMAIL ? 'SUPER_ADMIN' : 'ADMIN';
     const user: AuthUser = {
       id: verified.uid,

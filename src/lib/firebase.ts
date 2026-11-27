@@ -13,7 +13,14 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 export const SUPER_ADMIN_EMAIL = 'duyweb5@gmail.com';
 export const ADMIN_EMAIL = 'lethituman2021@gmail.com';
+export const ADMIN_EMAIL_SECONDARY = 'trungtamnhantri2026@gmail.com';
+export const ADMIN_EMAILS: readonly string[] = [ADMIN_EMAIL, ADMIN_EMAIL_SECONDARY];
 export const OFFICIAL_DOMAIN = 'daythemnhantri.com';
+
+export function isBootstrappedAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return ADMIN_EMAILS.includes(email.trim().toLowerCase());
+}
 
 const app = initializeApp(firebaseConfig);
 

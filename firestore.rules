@@ -42,7 +42,9 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isVerified() && request.auth.token.email == 'lethituman2021@gmail.com';
+      return isVerified()
+        && (request.auth.token.email == 'lethituman2021@gmail.com'
+            || request.auth.token.email == 'trungtamnhantri2026@gmail.com');
     }
 
     function userDocExists() {

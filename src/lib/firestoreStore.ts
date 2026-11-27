@@ -10,8 +10,10 @@ import {
 } from 'firebase/firestore';
 import {
   ADMIN_EMAIL,
+  ADMIN_EMAIL_SECONDARY,
   db,
   handleFirestoreError,
+  isBootstrappedAdminEmail,
   OFFICIAL_DOMAIN,
   OperationType,
   SUPER_ADMIN_EMAIL,
@@ -184,7 +186,7 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
   if (email === SUPER_ADMIN_EMAIL) {
     resolvedRole = 'SUPER_ADMIN';
     linkedStudentId = undefined;
-  } else if (email === ADMIN_EMAIL) {
+  } else if (isBootstrappedAdminEmail(email)) {
     resolvedRole = 'ADMIN';
     linkedStudentId = undefined;
   } else if (email) {
@@ -212,7 +214,7 @@ export async function ensureUserProfileFromGmail(fbUser: FirebaseUser): Promise<
       const effectiveRole: UserRole =
         email === SUPER_ADMIN_EMAIL
           ? 'SUPER_ADMIN'
-          : email === ADMIN_EMAIL
+          : isBootstrappedAdminEmail(email)
             ? 'ADMIN'
             : existingData.role;
 
@@ -612,13 +614,19 @@ export async function syncInitialSeedToFirestore(
     }
   }
 
-  // 6. Ensure bootstrapped lethituman2021@gmail.com invite exists if SuperAdmin triggered sync
+  // 6. Ensure bootstrapped Admin invites exist if SuperAdmin triggered sync
   if (userEmail.toLowerCase() === SUPER_ADMIN_EMAIL) {
     try {
       await upsertRoleInvite({
         email: ADMIN_EMAIL,
         role: 'ADMIN',
         displayName: 'Admin Quản trị Vận hành (Lê Thị Tú Mẫn)',
+        createdBy: userEmail,
+      });
+      await upsertRoleInvite({
+        email: ADMIN_EMAIL_SECONDARY,
+        role: 'ADMIN',
+        displayName: 'Admin Quản trị Vận hành (Trung Tâm Nhân Trí 2026)',
         createdBy: userEmail,
       });
     } catch {

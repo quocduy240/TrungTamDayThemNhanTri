@@ -104,6 +104,13 @@ export interface WorkerEnv {
 
 const SUPER_ADMIN_EMAIL = 'duyweb5@gmail.com';
 const ADMIN_EMAIL = 'lethituman2021@gmail.com';
+const ADMIN_EMAIL_SECONDARY = 'trungtamnhantri2026@gmail.com';
+const ADMIN_EMAILS: readonly string[] = [ADMIN_EMAIL, ADMIN_EMAIL_SECONDARY];
+
+function isBootstrappedAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return ADMIN_EMAILS.includes(email.trim().toLowerCase());
+}
 
 const DEMO_ACCOUNTS: Record<UserRole, AuthUser> = {
   SUPER_ADMIN: {
@@ -986,7 +993,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const portalIntent = String(body.portalIntent || 'AUTO').toUpperCase();
     const requestedStudentId = typeof body.studentId === 'string' ? body.studentId.trim() : '';
 
-    if (email === SUPER_ADMIN_EMAIL || email === ADMIN_EMAIL) {
+    if (email === SUPER_ADMIN_EMAIL || isBootstrappedAdminEmail(email)) {
       const role: UserRole = email === SUPER_ADMIN_EMAIL ? 'SUPER_ADMIN' : 'ADMIN';
       const staffUser: AuthUser = {
         id: fb.localId,
