@@ -18,6 +18,9 @@ import {
   ALL_SHIFT_KEYS,
   evaluateSlotConstraints,
   getTimeRangeForShift,
+  MULTI_SUBJECT_SUPPORT_LABEL,
+  sanitizeCampuses,
+  sanitizeTeachableGrades,
   studentBelongsToClass,
 } from './timetableEngine.ts';
 import {
@@ -169,6 +172,19 @@ export function bulkUpsertTeachers(
         ? 'TUTOR_REVIEW'
         : 'SUBJECT';
 
+    const multiSubjectSupport =
+      teacherGroup === 'TUTOR_REVIEW' ||
+      subjects.some((s) => normalizeVn(s).includes('nhieu mon')) ||
+      String(row.multiSubjectSupport || '').toLowerCase() === 'true';
+    if (
+      multiSubjectSupport &&
+      !subjects.some((s) => s.toLowerCase() === MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase())
+    ) {
+      subjects.unshift(MULTI_SUBJECT_SUPPORT_LABEL);
+    }
+    const teachableGrades = sanitizeTeachableGrades(row.teachableGrades);
+    const campuses = sanitizeCampuses(row.campuses);
+
     const phone = normalizePhoneVN(String(row.phone || '')) || String(row.phone || '').trim();
     const email = String(row.email || '').trim().toLowerCase() || undefined;
     const degree = String(row.degree || '').trim() || 'Cử nhân Sư phạm';
@@ -187,6 +203,9 @@ export function bulkUpsertTeachers(
       existing.shortName = shortName;
       existing.teacherGroup = teacherGroup;
       existing.subjects = subjects;
+      existing.teachableGrades = teachableGrades;
+      existing.campuses = campuses;
+      existing.multiSubjectSupport = multiSubjectSupport;
       existing.degree = degree;
       existing.experienceYears = experienceYears;
       if (phone) existing.phone = phone;
@@ -201,6 +220,9 @@ export function bulkUpsertTeachers(
         shortName,
         teacherGroup,
         subjects,
+        teachableGrades,
+        campuses,
+        multiSubjectSupport,
         degree,
         experienceYears,
         phone,

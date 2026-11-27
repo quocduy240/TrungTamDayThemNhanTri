@@ -29,6 +29,7 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  CampusCode,
   DayOfWeek,
   Room,
   SessionPeriod,
@@ -55,11 +56,16 @@ import {
   evaluateMoveOrSwap,
   evaluateSlotConstraints,
   findTeacherLeave,
+  formatTeachableGrades,
   getTimeRangeForShift,
   makeShiftKey,
+  rankTeachersForSlot,
+  resolveCampusFromRoom,
   SHIFT_ROWS,
   shiftLabel,
+  SMALL_GROUP_PRESETS,
   studentBelongsToClass,
+  teacherSupportsMultiSubject,
   type MoveOrSwapEvaluation,
 } from '../lib/timetableEngine';
 import {
@@ -70,6 +76,7 @@ import {
   sanitizeHexColor,
 } from '../lib/timetableSpecialBlocks';
 import { ParentTimetableView } from './ParentTimetableView';
+import { SmartTimetableAdvisorPanel } from './SmartTimetableAdvisorPanel';
 import { TimetableSpecialBlockStudio } from './TimetableSpecialBlockStudio';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { TimetablePdfDispatchModal } from './TimetablePdfDispatchModal';
@@ -102,7 +109,7 @@ const CLASS_OPTIONS = [
   'Lớp 12',
 ];
 
-type SubTab = 'GRID' | 'SPECIAL_BLOCKS' | 'ROOMS' | 'TEACHERS' | 'LEAVES' | 'PERSONAL';
+type SubTab = 'GRID' | 'SMART_ADVISOR' | 'SPECIAL_BLOCKS' | 'ROOMS' | 'TEACHERS' | 'LEAVES' | 'PERSONAL';
 
 interface SubstituteSuggestion {
   slot: TimetableSlot;
@@ -155,6 +162,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
   const [classFilter, setClassFilter] = useState(initialClassFilter || 'Tất cả lớp');
   const [teacherFilter, setTeacherFilter] = useState(initialTeacherFilter || 'ALL');
   const [groupFilter, setGroupFilter] = useState<'ALL' | TeacherGroup>('ALL');
+  const [campusFilter, setCampusFilter] = useState<'ALL' | CampusCode>('ALL');
 
   useEffect(() => {
     if (initialClassFilter) {
@@ -196,6 +204,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
     shift: ShiftCode;
     timeRange: string;
     centerClass: string;
+    groupLabel: string;
     subject: string;
     teacherId: string;
     roomId: string;
@@ -209,8 +218,9 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
     shift: 'CA_1',
     timeRange: '07:15–08:45',
     centerClass: 'Lớp 6A1',
+    groupLabel: '',
     subject: 'Toán',
-    teacherId: workspace.teachers[0]?.id || 't-man',
+    teacherId: workspace.teachers[0]?.id || '',
     roomId: workspace.rooms[0]?.id || 'room-1',
     room: workspace.rooms[0]?.name || 'Phòng 1',
     slotType: 'MAIN',
@@ -306,9 +316,14 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
         const t = teacherMap.get(slot.teacherId);
         if (!t || t.teacherGroup !== groupFilter) return false;
       }
+      if (campusFilter !== 'ALL') {
+        const rm = workspace.rooms.find((r) => r.id === slot.roomId || r.name === slot.room);
+        const slotCampus = slot.campus || resolveCampusFromRoom(rm, slot.room);
+        if (slotCampus !== campusFilter) return false;
+      }
       return true;
     });
-  }, [workspace.timetable, classFilter, teacherFilter, groupFilter, teacherMap]);
+  }, [workspace.timetable, workspace.rooms, classFilter, teacherFilter, groupFilter, campusFilter, teacherMap]);
 
   const draggedSlot = useMemo(
     () => (draggedSlotId ? workspace.timetable.find((s) => s.id === draggedSlotId) || null : null),
@@ -318,8 +333,9 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
   // Live 5-layer constraint preview inside Block Inspector / Create Modal
   const draftConstraintResult = useMemo(() => {
     if (!editorMode || slotDraft.status === 'OFF') {
-      return { valid: true, hardConflicts: [], suggestedFreeRooms: [], roomOnlyConflict: false };
+      return { valid: true, hardConflicts: [], warnings: [], suggestedFreeRooms: [], roomOnlyConflict: false };
     }
+    const matchedRoom = workspace.rooms.find((r) => r.id === slotDraft.roomId || r.name === slotDraft.room);
     return evaluateSlotConstraints(
       {
         id: editingSlotId || undefined,
@@ -327,10 +343,12 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
         period: slotDraft.period,
         shift: slotDraft.shift,
         centerClass: slotDraft.centerClass,
+        groupLabel: slotDraft.groupLabel.trim() || undefined,
         subject: slotDraft.subject,
         teacherId: slotDraft.teacherId,
         roomId: slotDraft.roomId,
         room: slotDraft.room,
+        campus: resolveCampusFromRoom(matchedRoom, slotDraft.room),
         slotType: slotDraft.slotType,
         status: slotDraft.status,
       },
@@ -339,7 +357,30 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
         ignoreSlotIds: editingSlotId ? [editingSlotId] : [],
       },
     );
-  }, [editorMode, editingSlotId, slotDraft, engineCtx]);
+  }, [editorMode, editingSlotId, slotDraft, engineCtx, workspace.rooms]);
+
+  const rankedDraftTeachers = useMemo(() => {
+    if (!editorMode) return [];
+    const matchedRoom = workspace.rooms.find((r) => r.id === slotDraft.roomId || r.name === slotDraft.room);
+    return rankTeachersForSlot(
+      {
+        id: editingSlotId || undefined,
+        day: slotDraft.day,
+        period: slotDraft.period,
+        shift: slotDraft.shift,
+        centerClass: slotDraft.centerClass,
+        subject: slotDraft.subject,
+        slotType: slotDraft.slotType,
+        room: slotDraft.room,
+        roomId: slotDraft.roomId,
+        campus: resolveCampusFromRoom(matchedRoom, slotDraft.room),
+      },
+      {
+        ...engineCtx,
+        ignoreSlotIds: editingSlotId ? [editingSlotId] : [],
+      },
+    );
+  }, [editorMode, editingSlotId, slotDraft, engineCtx, workspace.rooms]);
 
   const selectedTeacher = useMemo(() => {
     if (isTeacher && workspace.user.linkedTeacherId) {
@@ -369,11 +410,25 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
     );
   }, [personalPerspective, isTeacher, workspace.user.linkedTeacherId, personalTeacherId, selectedStudent, workspace.timetable]);
 
-  function openCreateModal(preset?: { day?: DayOfWeek; period?: SessionPeriod; shift?: ShiftCode }) {
+  function openCreateModal(preset?: {
+    day?: DayOfWeek;
+    period?: SessionPeriod;
+    shift?: ShiftCode;
+    teacherId?: string;
+    roomId?: string;
+    room?: string;
+    slotType?: TimetableSlot['slotType'];
+    subject?: string;
+    centerClass?: string;
+    groupLabel?: string;
+  }) {
     const day = preset?.day || 'T2';
     const period = preset?.period || 'SANG';
     const shift = preset?.shift || 'CA_1';
-    const activeRoom = workspace.rooms.find((r) => r.active) || workspace.rooms[0];
+    const activeRoom =
+      workspace.rooms.find((r) => (preset?.roomId && r.id === preset.roomId) || (preset?.room && r.name === preset.room)) ||
+      workspace.rooms.find((r) => r.active) ||
+      workspace.rooms[0];
     setEditorMode('CREATE');
     setEditingSlotId(null);
     setSlotDraft({
@@ -381,12 +436,13 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
       period,
       shift,
       timeRange: getTimeRangeForShift(period, shift),
-      centerClass: classFilter !== 'Tất cả lớp' ? classFilter : 'Lớp 6A1',
-      subject: 'Toán',
-      teacherId: workspace.teachers[0]?.id || 't-man',
+      centerClass: preset?.centerClass || (classFilter !== 'Tất cả lớp' ? classFilter : 'Lớp 6A1'),
+      groupLabel: preset?.groupLabel || '',
+      subject: preset?.subject || 'Toán',
+      teacherId: preset?.teacherId || workspace.teachers[0]?.id || '',
       roomId: activeRoom?.id || '',
       room: activeRoom?.name || 'Phòng 1',
-      slotType: 'MAIN',
+      slotType: preset?.slotType || 'MAIN',
       status: 'SCHEDULED',
       note: '',
     });
@@ -403,6 +459,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
       shift: slot.shift,
       timeRange: slot.timeRange || getTimeRangeForShift(slot.period, slot.shift),
       centerClass: slot.centerClass,
+      groupLabel: slot.groupLabel || '',
       subject: slot.subject,
       teacherId: slot.teacherId,
       roomId: matchedRoom?.id || slot.roomId || '',
@@ -998,6 +1055,11 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
             icon: <Calendar className="w-3.5 h-3.5" />,
           },
           {
+            id: 'SMART_ADVISOR' as SubTab,
+            label: 'Trợ lý Xếp lịch & Chia nhóm',
+            icon: <Sparkles className="w-3.5 h-3.5" />,
+          },
+          {
             id: 'SPECIAL_BLOCKS' as SubTab,
             label: 'Block Đặc biệt (NGHỈ / PHỤ ĐẠO)',
             icon: <Layers className="w-3.5 h-3.5" />,
@@ -1286,6 +1348,19 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
             </div>
 
             <div className="flex items-center gap-2 text-xs">
+              <span className="font-medium text-slate-600">Cơ sở:</span>
+              <select
+                value={campusFilter}
+                onChange={(e) => setCampusFilter(e.target.value as 'ALL' | CampusCode)}
+                className="h-8 px-2.5 border border-slate-300 rounded-lg text-slate-900 bg-white"
+              >
+                <option value="ALL">Cả 2 cơ sở (CS1 &amp; CS2)</option>
+                <option value="CS1">Cơ sở 1 (CS1)</option>
+                <option value="CS2">Cơ sở 2 (CS2)</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs">
               <span className="font-medium text-slate-600">Giáo viên:</span>
               <select
                 value={teacherFilter}
@@ -1302,7 +1377,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
             </div>
 
             <div className="ml-auto flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-              <span>Kéo block thả sang ô trống để dời · Thả đè lên block khác để Hoán đổi 2 chiều · Nhấn block để sửa chi tiết</span>
+              <span>Kéo block thả sang ô trống để dời · Thả đè để Hoán đổi 2 chiều · Nhấn block để sửa hoặc chia nhóm nhỏ</span>
             </div>
           </div>
 
@@ -1548,18 +1623,28 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                                 <div className="flex items-center justify-between gap-1">
                                   <div className="flex items-center gap-1 min-w-0">
                                     <GripVertical className="w-3 h-3 text-slate-400 shrink-0 cursor-grab" />
-                                    <span className="font-bold text-blue-950 truncate">{slot.centerClass}</span>
+                                    <span className="font-bold text-blue-950 truncate">
+                                      {slot.centerClass}
+                                      {slot.groupLabel ? ` · ${slot.groupLabel}` : ''}
+                                    </span>
                                   </div>
                                   <span className="text-[11px] font-mono-num text-slate-500 shrink-0">
                                     {slot.room}
+                                    {slot.campus ? ` (${slot.campus})` : ''}
                                   </span>
                                 </div>
 
                                 <p className="font-semibold text-slate-900 mt-0.5 leading-snug">{slot.subject}</p>
                                 <div className="flex items-center justify-between gap-1 text-[11px] text-slate-600 mt-0.5">
                                   <span className="truncate">{slot.teacherName}</span>
-                                  <span className="text-[10px] text-slate-400 shrink-0">
-                                    {teacherObj?.teacherGroup === 'TUTOR_REVIEW' ? 'Trả bài' : 'Bộ môn'}
+                                  <span className="text-[10px] text-slate-500 shrink-0">
+                                    {slot.slotType !== 'MAIN'
+                                      ? slot.groupLabel
+                                        ? 'Trả bài nhóm'
+                                        : 'Trả bài / Kèm'
+                                      : teacherObj?.teacherGroup === 'TUTOR_REVIEW'
+                                        ? 'Trả bài'
+                                        : 'Bộ môn'}
                                   </span>
                                 </div>
 
@@ -2734,6 +2819,17 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
         />
       )}
 
+      {activeTab === 'SMART_ADVISOR' && canEdit && (
+        <SmartTimetableAdvisorPanel
+          workspace={workspace}
+          engineCtx={engineCtx}
+          classOptions={CLASS_OPTIONS.filter((c) => c !== 'Tất cả lớp')}
+          onRefresh={onRefresh}
+          onQuickAddSlot={(preset) => openCreateModal(preset)}
+          onJumpToGrid={() => setActiveTab('GRID')}
+        />
+      )}
+
       {/* ===================================================================== */}
       {/* MODAL 1: FULL BLOCK INSPECTOR / CREATE MODAL WITH 5-LAYER CHECK       */}
       {/* ===================================================================== */}
@@ -2837,7 +2933,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
               </div>
 
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Phòng học (từ danh mục)</label>
+                <label className="block font-medium text-slate-700 mb-1">Phòng học (Mọi phòng CS1 &amp; CS2)</label>
                 <select
                   value={slotDraft.roomId || slotDraft.room}
                   onChange={(e) => {
@@ -2852,24 +2948,46 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                 >
                   {workspace.rooms.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.name} ({r.code}){!r.active ? ' · Tạm ngưng' : ''}
+                      {r.name} · {resolveCampusFromRoom(r)} ({r.code}){!r.active ? ' · Tạm ngưng' : ''}
                     </option>
                   ))}
                 </select>
               </div>
 
               <div className="sm:col-span-2">
-                <label className="block font-medium text-slate-700 mb-1">Giáo viên đứng lớp</label>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Giáo viên đứng lớp (Tự xếp hạng theo lịch rảnh, môn, khối &amp; cơ sở)
+                </label>
                 <select
                   value={slotDraft.teacherId}
                   onChange={(e) => setSlotDraft({ ...slotDraft, teacherId: e.target.value })}
                   className="w-full h-9 px-2.5 border border-slate-300 rounded-lg bg-white"
                 >
-                  {workspace.teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.shortName} — {t.teacherGroup === 'TUTOR_REVIEW' ? '[GV Trả bài]' : `[GV Bộ môn: ${t.subjects.join(', ')}]`}
-                    </option>
-                  ))}
+                  {rankedDraftTeachers.length > 0 ? (
+                    rankedDraftTeachers.map((opt) => {
+                      const t = opt.teacher;
+                      const roleTag =
+                        t.teacherGroup === 'TUTOR_REVIEW'
+                          ? teacherSupportsMultiSubject(t)
+                            ? 'GV Trả bài · Hỗ trợ nhiều môn'
+                            : 'GV Trả bài'
+                          : `GV Bộ môn: ${t.subjects.join(', ')} · ${formatTeachableGrades(t.teachableGrades)}`;
+                      const statusTag = opt.canAssign
+                        ? `✓ Rảnh (${opt.weeklyLoad} ca/tuần)`
+                        : `✕ ${opt.blockReason}`;
+                      return (
+                        <option key={t.id} value={t.id}>
+                          {t.shortName} — {statusTag} — {roleTag}
+                        </option>
+                      );
+                    })
+                  ) : (
+                    workspace.teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.shortName} — {t.teacherGroup === 'TUTOR_REVIEW' ? '[GV Trả bài]' : `[GV Bộ môn: ${t.subjects.join(', ')}]`}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 
@@ -2877,19 +2995,48 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                 <label className="block font-medium text-slate-700 mb-1">Phân loại ca</label>
                 <select
                   value={slotDraft.slotType}
-                  onChange={(e) =>
-                    setSlotDraft({ ...slotDraft, slotType: e.target.value as TimetableSlot['slotType'] })
-                  }
+                  onChange={(e) => {
+                    const nextType = e.target.value as TimetableSlot['slotType'];
+                    setSlotDraft({
+                      ...slotDraft,
+                      slotType: nextType,
+                      groupLabel:
+                        nextType === 'MAIN'
+                          ? ''
+                          : slotDraft.groupLabel || (nextType === 'TRA_BAI' ? 'Nhóm 1' : ''),
+                    });
+                  }}
                   className="w-full h-9 px-2.5 border border-slate-300 rounded-lg bg-white"
                 >
-                  <option value="MAIN">Học chính môn</option>
-                  <option value="TRA_BAI">Trả bài &amp; Soạn bài</option>
+                  <option value="MAIN">Học chính môn (GV Bộ môn)</option>
+                  <option value="TRA_BAI">Trả bài &amp; Kiểm tra (Nhóm nhỏ)</option>
+                  <option value="PHU_DAO">Phụ đạo / Bổ túc (Nhóm nhỏ)</option>
                   <option value="BU_THE_DUC">Học bù Thể dục</option>
-                  <option value="PHU_DAO">Phụ đạo / Nâng cao</option>
                 </select>
               </div>
 
-              <div className="sm:col-span-2">
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Phân nhóm trong ca (để chia nhiều GV Trả bài song song)
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={slotDraft.groupLabel}
+                    onChange={(e) => setSlotDraft({ ...slotDraft, groupLabel: e.target.value })}
+                    placeholder={slotDraft.slotType === 'MAIN' ? 'Cả lớp (để trống)' : 'VD: Nhóm 1, Nhóm 2...'}
+                    list="nhantri-small-group-presets"
+                    className="w-full h-9 px-2.5 border border-slate-300 rounded-lg"
+                  />
+                  <datalist id="nhantri-small-group-presets">
+                    {SMALL_GROUP_PRESETS.map((g) => (
+                      <option key={g} value={g} />
+                    ))}
+                  </datalist>
+                </div>
+              </div>
+
+              <div>
                 <label className="block font-medium text-slate-700 mb-1">Ghi chú ca học</label>
                 <input
                   type="text"
@@ -2917,7 +3064,7 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
               </div>
             </div>
 
-            {/* Live 5-Layer Conflict Result */}
+            {/* Live 5-Layer Conflict Result + Soft Warnings */}
             {!draftConstraintResult.valid ? (
               <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 space-y-2">
                 <p className="font-bold flex items-center gap-1.5">
@@ -2937,17 +3084,30 @@ export const TimetableModule: React.FC<TimetableModuleProps> = ({
                         onClick={() => setSlotDraft({ ...slotDraft, roomId: rm.id, room: rm.name })}
                         className="px-2.5 py-1 bg-white border border-blue-300 text-blue-900 font-semibold rounded hover:bg-blue-50 cursor-pointer"
                       >
-                        {rm.name} ({rm.code})
+                        {rm.name} ({resolveCampusFromRoom(rm)})
                       </button>
                     ))}
                   </div>
                 )}
               </div>
             ) : (
-              <p className="text-xs text-emerald-700 font-medium flex items-center gap-1.5">
-                <Check className="w-4 h-4" />
-                Hợp lệ cả 5 lớp: không trùng giáo viên, không trùng học sinh/lớp, phòng trống, khớp lịch rảnh &amp; không trùng ngày nghỉ.
-              </p>
+              <div className="space-y-2">
+                <p className="text-xs text-emerald-700 font-medium flex items-center gap-1.5">
+                  <Check className="w-4 h-4" />
+                  Hợp lệ cả 5 lớp: không trùng giáo viên, phòng trống, khớp lịch rảnh &amp; hỗ trợ chia nhóm nhỏ song song.
+                </p>
+                {draftConstraintResult.warnings && draftConstraintResult.warnings.length > 0 && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-1">
+                    <p className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-700" />
+                      Lưu ý tối ưu điều phối (vẫn cho phép lưu):
+                    </p>
+                    {draftConstraintResult.warnings.map((w, idx) => (
+                      <p key={idx}>• {w}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">

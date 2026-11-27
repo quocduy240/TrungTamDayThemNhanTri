@@ -19,6 +19,11 @@ import {
   evaluateMoveOrSwap,
   evaluateSlotConstraints,
   getTimeRangeForShift,
+  MULTI_SUBJECT_SUPPORT_LABEL,
+  normalizeGroupLabel,
+  resolveCampusFromRoom,
+  sanitizeCampuses,
+  sanitizeTeachableGrades,
   studentBelongsToClass,
   suggestAvailableSubstitutes,
 } from '../src/lib/timetableEngine.ts';
@@ -1860,12 +1865,33 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         ? b.subjects.split(/[,;]/)
         : [];
     const subjects = subjectsRaw.map((s) => String(s || '').trim()).filter(Boolean);
+    const multiSubjectSupport =
+      typeof b.multiSubjectSupport === 'boolean'
+        ? b.multiSubjectSupport
+        : group === 'TUTOR_REVIEW' || subjects.some((s) => s.toLowerCase().includes('nhiều môn'));
+    const normalizedSubjects =
+      subjects.length > 0
+        ? subjects
+        : group === 'TUTOR_REVIEW'
+          ? [MULTI_SUBJECT_SUPPORT_LABEL, 'Trả bài', 'Soạn bài']
+          : ['Toán'];
+    if (
+      multiSubjectSupport &&
+      !normalizedSubjects.some((s) => s.toLowerCase() === MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase())
+    ) {
+      normalizedSubjects.unshift(MULTI_SUBJECT_SUPPORT_LABEL);
+    }
+    const teachableGrades = sanitizeTeachableGrades(b.teachableGrades);
+    const campuses = sanitizeCampuses(b.campuses);
     const teacher: Teacher = {
       id: `t-${Date.now()}`,
       name: name.slice(0, 120),
       shortName: (shortName || name).slice(0, 60),
       teacherGroup: group,
-      subjects: subjects.length > 0 ? subjects : group === 'TUTOR_REVIEW' ? ['Trả bài', 'Soạn bài'] : ['Toán'],
+      subjects: normalizedSubjects,
+      teachableGrades,
+      campuses,
+      multiSubjectSupport,
       degree: String(b.degree || 'Cử nhân Sư phạm').trim().slice(0, 140),
       experienceYears: Math.max(0, Math.min(60, Number(b.experienceYears) || 3)),
       phone: normalizePhoneVN(String(b.phone || '')) || String(b.phone || '').trim().slice(0, 40),
@@ -2067,6 +2093,26 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       const arr = Array.isArray(b.subjects) ? b.subjects : String(b.subjects).split(/[,;]/);
       const cleaned = arr.map((s) => String(s || '').trim()).filter(Boolean);
       if (cleaned.length > 0) teacher.subjects = cleaned;
+    }
+    if (b.teachableGrades !== undefined) {
+      teacher.teachableGrades = sanitizeTeachableGrades(b.teachableGrades);
+    }
+    if (b.campuses !== undefined) {
+      teacher.campuses = sanitizeCampuses(b.campuses);
+    }
+    if (typeof b.multiSubjectSupport === 'boolean') {
+      teacher.multiSubjectSupport = b.multiSubjectSupport;
+      const hasLabel = (teacher.subjects || []).some(
+        (s) => s.toLowerCase() === MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase(),
+      );
+      if (b.multiSubjectSupport && !hasLabel) {
+        teacher.subjects = [MULTI_SUBJECT_SUPPORT_LABEL, ...(teacher.subjects || [])];
+      } else if (!b.multiSubjectSupport && hasLabel) {
+        const remaining = (teacher.subjects || []).filter(
+          (s) => s.toLowerCase() !== MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase(),
+        );
+        teacher.subjects = remaining.length > 0 ? remaining : teacher.subjects;
+      }
     }
     if (typeof b.degree === 'string' && b.degree.trim()) teacher.degree = b.degree.trim().slice(0, 140);
     if (b.experienceYears !== undefined) teacher.experienceYears = Math.max(0, Math.min(60, Number(b.experienceYears) || 0));
@@ -2304,6 +2350,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     if (denied) return denied;
     const db = await loadState(env);
     const b = await readJson<Record<string, unknown>>();
+    const matchedRoom = db.rooms.find((r) => (b.roomId && r.id === b.roomId) || r.name === b.room);
     const result = evaluateSlotConstraints(
       {
         id: typeof b.id === 'string' ? b.id : undefined,
@@ -2312,8 +2359,11 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         shift: b.shift as ShiftCode,
         teacherId: String(b.teacherId || ''),
         room: String(b.room || ''),
-        roomId: typeof b.roomId === 'string' ? b.roomId : undefined,
+        roomId: matchedRoom?.id || (typeof b.roomId === 'string' ? b.roomId : undefined),
+        campus: resolveCampusFromRoom(matchedRoom, String(b.room || '')),
         centerClass: String(b.centerClass || ''),
+        groupLabel: normalizeGroupLabel(typeof b.groupLabel === 'string' ? b.groupLabel : undefined) || undefined,
+        studentIds: Array.isArray(b.studentIds) ? b.studentIds.map(String).filter(Boolean) : undefined,
         subject: String(b.subject || ''),
         slotType: (b.slotType as TimetableSlot['slotType']) || 'MAIN',
       },
@@ -2329,9 +2379,101 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     return json({
       hasConflict: !result.valid,
       conflicts: result.hardConflicts,
+      warnings: result.warnings,
       suggestedFreeRooms: result.suggestedFreeRooms,
       roomOnlyConflict: result.roomOnlyConflict,
     });
+  }
+
+  if (method === 'POST' && pathname === '/api/v1/timetable/batch-groups') {
+    const denied = requireRole(['MANAGER']);
+    if (denied) return denied;
+    const db = await loadState(env);
+    const b = await readJson<{ slots?: Record<string, unknown>[] }>();
+    const rawSlots = Array.isArray(b.slots) ? b.slots : [];
+    if (rawSlots.length === 0 || rawSlots.length > 10) {
+      return json({ error: 'Vui lòng gửi từ 1 đến 10 nhóm nhỏ hợp lệ để xếp song song.' }, 400);
+    }
+    const staged: TimetableSlot[] = [];
+    const allWarnings: string[] = [];
+    const workingTimetable = [...db.timetable];
+    for (let i = 0; i < rawSlots.length; i++) {
+      const item = rawSlots[i] || {};
+      const teacher = db.teachers.find((t) => t.id === item.teacherId);
+      const matchedRoom = db.rooms.find((r) => (item.roomId && r.id === item.roomId) || r.name === item.room);
+      const roomName = matchedRoom?.name || String(item.room || '').trim();
+      const cleanedGroup = normalizeGroupLabel(String(item.groupLabel || `Nhóm ${i + 1}`)).slice(0, 60);
+      const campus = resolveCampusFromRoom(matchedRoom, roomName);
+      const day = item.day as DayOfWeek;
+      const period = item.period as SessionPeriod;
+      const shift = item.shift as ShiftCode;
+      const centerClass = String(item.centerClass || '').trim();
+      const subject = String(item.subject || 'Trả bài & Kiểm tra soạn bài (Hỗ trợ nhiều môn)').trim();
+      const slotType = (item.slotType === 'PHU_DAO' ? 'PHU_DAO' : 'TRA_BAI') as TimetableSlot['slotType'];
+      if (!teacher || !day || !period || !shift || !centerClass || !roomName) {
+        return json({ error: `Nhóm #${i + 1} thiếu thông tin bắt buộc.` }, 400);
+      }
+      const check = evaluateSlotConstraints(
+        {
+          day,
+          period,
+          shift,
+          centerClass,
+          groupLabel: cleanedGroup,
+          subject,
+          teacherId: teacher.id,
+          room: roomName,
+          roomId: matchedRoom?.id,
+          campus,
+          slotType,
+        },
+        {
+          timetable: workingTimetable,
+          teachers: db.teachers,
+          rooms: db.rooms,
+          students: db.students,
+          leaves: db.teacherLeaves,
+        },
+      );
+      if (!check.valid) {
+        return json({ error: `[${cleanedGroup}] ${check.hardConflicts[0]}`, conflicts: check.hardConflicts }, 409);
+      }
+      const newSlot: TimetableSlot = {
+        id: `tt-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+        weekLabel: 'Tuần 13 (23/11 – 28/11)',
+        period,
+        shift,
+        timeRange: getTimeRangeForShift(period, shift),
+        day,
+        centerClass,
+        groupLabel: cleanedGroup,
+        subject,
+        teacherId: teacher.id,
+        teacherName: teacher.shortName,
+        roomId: matchedRoom?.id,
+        room: roomName,
+        campus,
+        slotType,
+        status: 'SCHEDULED',
+        note: item.note ? String(item.note).trim().slice(0, 220) : `Chia ${rawSlots.length} nhóm nhỏ trả bài & kiểm tra song song`,
+      };
+      staged.push(newSlot);
+      workingTimetable.push(newSlot);
+      allWarnings.push(...check.warnings);
+    }
+    db.timetable.push(...staged);
+    const affectedTeacherIds = Array.from(new Set(staged.map((s) => s.teacherId)));
+    const first = staged[0];
+    recordTimetableChange(db, {
+      action: 'ADDED',
+      updatedBy: user!.email,
+      slotId: first.id,
+      summary: `Chia ${staged.length} nhóm nhỏ song song cho ${first.centerClass} · ${formatShiftLabel(first.day, first.period, first.shift)}`,
+      after: slotToSnapshot(first),
+      affectedTeacherIds,
+    });
+    await saveState(env, db);
+    return json({ slots: staged, count: staged.length, warnings: allWarnings }, 201);
   }
 
   if (method === 'POST' && pathname === '/api/v1/timetable/move-or-swap') {
@@ -2389,6 +2531,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       sourceSlot.timeRange = getTimeRangeForShift(tgtCopy.period, tgtCopy.shift);
       sourceSlot.room = tgtCopy.room;
       sourceSlot.roomId = tgtCopy.roomId;
+      sourceSlot.campus = tgtCopy.campus || resolveCampusFromRoom(db.rooms.find((r) => r.id === tgtCopy.roomId || r.name === tgtCopy.room), tgtCopy.room);
 
       targetSlot.day = srcCopy.day;
       targetSlot.period = srcCopy.period;
@@ -2396,6 +2539,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       targetSlot.timeRange = getTimeRangeForShift(srcCopy.period, srcCopy.shift);
       targetSlot.room = srcCopy.room;
       targetSlot.roomId = srcCopy.roomId;
+      targetSlot.campus = srcCopy.campus || resolveCampusFromRoom(db.rooms.find((r) => r.id === srcCopy.roomId || r.name === srcCopy.room), srcCopy.room);
 
       recordTimetableChange(db, {
         action: 'UPDATED',
@@ -2408,7 +2552,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       });
 
       await saveState(env, db);
-      return json({ mode: 'SWAP', updatedSlots: [sourceSlot, targetSlot], previousSnapshots });
+      return json({ mode: 'SWAP', updatedSlots: [sourceSlot, targetSlot], previousSnapshots, warnings: evalRes.warnings });
     }
 
     const beforeMove = slotToSnapshot(sourceSlot);
@@ -2421,22 +2565,24 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       if (matched) {
         sourceSlot.room = matched.name;
         sourceSlot.roomId = matched.id;
+        sourceSlot.campus = resolveCampusFromRoom(matched);
       }
     } else if (evalRes.mode === 'MOVE_AUTO_ROOM' && evalRes.autoRoom) {
       sourceSlot.room = evalRes.autoRoom.name;
       sourceSlot.roomId = evalRes.autoRoom.id;
+      sourceSlot.campus = resolveCampusFromRoom(evalRes.autoRoom);
     }
     recordTimetableChange(db, {
       action: 'UPDATED',
       updatedBy: user!.email,
       slotId: sourceSlot.id,
-      summary: `Chuyển ca ${sourceSlot.centerClass} (${sourceSlot.subject}) từ ${formatShiftLabel(beforeMove.day, beforeMove.period, beforeMove.shift)} sang ${formatShiftLabel(sourceSlot.day, sourceSlot.period, sourceSlot.shift)} (${sourceSlot.room})`,
+      summary: `Chuyển ca ${sourceSlot.centerClass}${sourceSlot.groupLabel ? ` · ${sourceSlot.groupLabel}` : ''} (${sourceSlot.subject}) từ ${formatShiftLabel(beforeMove.day, beforeMove.period, beforeMove.shift)} sang ${formatShiftLabel(sourceSlot.day, sourceSlot.period, sourceSlot.shift)} (${sourceSlot.room})`,
       before: beforeMove,
       after: slotToSnapshot(sourceSlot),
       affectedTeacherIds: [sourceSlot.teacherId],
     });
     await saveState(env, db);
-    return json({ mode: evalRes.mode, updatedSlots: [sourceSlot], previousSnapshots, autoRoom: evalRes.autoRoom });
+    return json({ mode: evalRes.mode, updatedSlots: [sourceSlot], previousSnapshots, autoRoom: evalRes.autoRoom, warnings: evalRes.warnings });
   }
 
   if (method === 'POST' && pathname === '/api/v1/timetable') {
@@ -2447,6 +2593,11 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const teacher = db.teachers.find((t) => t.id === b.teacherId);
     const matchedRoom = db.rooms.find((r) => (b.roomId && r.id === b.roomId) || r.name === b.room);
     const roomName = matchedRoom?.name || String(b.room || '').trim();
+    const cleanedGroup = normalizeGroupLabel(typeof b.groupLabel === 'string' ? b.groupLabel : undefined).slice(0, 60) || undefined;
+    const cleanedStudentIds = Array.isArray(b.studentIds)
+      ? Array.from(new Set(b.studentIds.map(String).filter(Boolean))).slice(0, 60)
+      : undefined;
+    const campus = resolveCampusFromRoom(matchedRoom, roomName);
     if (!teacher || !b.day || !b.period || !b.shift || !b.centerClass || !b.subject || !roomName) {
       return json({ error: 'Vui lòng điền đầy đủ thông tin ca học.' }, 400);
     }
@@ -2456,10 +2607,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         period: b.period as SessionPeriod,
         shift: b.shift as ShiftCode,
         centerClass: String(b.centerClass),
+        groupLabel: cleanedGroup,
+        studentIds: cleanedStudentIds,
         subject: String(b.subject),
         teacherId: teacher.id,
         room: roomName,
         roomId: matchedRoom?.id,
+        campus,
         slotType: (b.slotType as TimetableSlot['slotType']) || 'MAIN',
       },
       {
@@ -2471,7 +2625,7 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
       },
     );
     if (!check.valid) {
-      return json({ error: check.hardConflicts[0], conflicts: check.hardConflicts, suggestedFreeRooms: check.suggestedFreeRooms }, 409);
+      return json({ error: check.hardConflicts[0], conflicts: check.hardConflicts, warnings: check.warnings, suggestedFreeRooms: check.suggestedFreeRooms }, 409);
     }
     const newSlot: TimetableSlot = {
       id: `tt-${Date.now()}`,
@@ -2484,26 +2638,30 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           : getTimeRangeForShift(b.period as SessionPeriod, b.shift as ShiftCode),
       day: b.day as DayOfWeek,
       centerClass: String(b.centerClass).trim(),
+      groupLabel: cleanedGroup,
+      studentIds: cleanedStudentIds && cleanedStudentIds.length > 0 ? cleanedStudentIds : undefined,
       subject: String(b.subject).trim(),
       teacherId: teacher.id,
       teacherName: teacher.shortName,
       roomId: matchedRoom?.id,
       room: roomName,
+      campus,
       slotType: (b.slotType as TimetableSlot['slotType']) || 'MAIN',
       status: 'SCHEDULED',
       note: b.note ? String(b.note).trim() : undefined,
     };
     db.timetable.push(newSlot);
+    const groupSuffix = newSlot.groupLabel ? ` · ${newSlot.groupLabel}` : '';
     recordTimetableChange(db, {
       action: 'ADDED',
       updatedBy: user!.email,
       slotId: newSlot.id,
-      summary: `Thêm ca mới ${newSlot.centerClass} (${newSlot.subject}) · ${formatShiftLabel(newSlot.day, newSlot.period, newSlot.shift)} tại ${newSlot.room}`,
+      summary: `Thêm ca mới ${newSlot.centerClass}${groupSuffix} (${newSlot.subject}) · ${formatShiftLabel(newSlot.day, newSlot.period, newSlot.shift)} tại ${newSlot.room} (${campus})`,
       after: slotToSnapshot(newSlot),
       affectedTeacherIds: [newSlot.teacherId],
     });
     await saveState(env, db);
-    return json({ slot: newSlot }, 201);
+    return json({ slot: newSlot, warnings: check.warnings }, 201);
   }
 
   const subSuggestMatch = pathname.match(/^\/api\/v1\/timetable\/([^/]+)\/suggest-substitute$/);
@@ -2618,13 +2776,27 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
     const nextTeacherId = String(b.teacherId || slot.teacherId);
     const teacher = db.teachers.find((t) => t.id === nextTeacherId);
     if (!teacher) return json({ error: 'Giáo viên không hợp lệ.' }, 400);
-    const matchedRoom = db.rooms.find((r) => (b.roomId && r.id === b.roomId) || (b.room && r.name === b.room));
+    const matchedRoom = db.rooms.find(
+      (r) => (b.roomId && r.id === b.roomId) || (b.room && r.name === b.room) || (!b.room && slot.roomId && r.id === slot.roomId) || (!b.room && r.name === slot.room),
+    );
     const nextRoomName = matchedRoom?.name || String(b.room || slot.room);
     const nextRoomId = matchedRoom?.id || (b.room ? undefined : slot.roomId);
+    const nextCampus = resolveCampusFromRoom(matchedRoom, nextRoomName);
     const nextClass = String(b.centerClass || slot.centerClass).trim();
+    const nextGroupLabel =
+      b.groupLabel !== undefined
+        ? normalizeGroupLabel(typeof b.groupLabel === 'string' ? b.groupLabel : '').slice(0, 60) || undefined
+        : slot.groupLabel;
+    const nextStudentIds =
+      b.studentIds !== undefined
+        ? Array.isArray(b.studentIds)
+          ? Array.from(new Set(b.studentIds.map(String).filter(Boolean))).slice(0, 60)
+          : undefined
+        : slot.studentIds;
     const nextSubject = String(b.subject || slot.subject).trim();
     const nextSlotType = (b.slotType || slot.slotType) as TimetableSlot['slotType'];
     const nextStatus = (b.status || slot.status) as TimetableSlot['status'];
+    let softWarnings: string[] = [];
     if (nextStatus !== 'OFF') {
       const check = evaluateSlotConstraints(
         {
@@ -2633,10 +2805,13 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
           period: nextPeriod,
           shift: nextShift,
           centerClass: nextClass,
+          groupLabel: nextGroupLabel,
+          studentIds: nextStudentIds,
           subject: nextSubject,
           teacherId: teacher.id,
           room: nextRoomName,
           roomId: nextRoomId,
+          campus: nextCampus,
           slotType: nextSlotType,
           status: nextStatus,
         },
@@ -2650,8 +2825,9 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         },
       );
       if (!check.valid) {
-        return json({ error: check.hardConflicts[0], conflicts: check.hardConflicts, suggestedFreeRooms: check.suggestedFreeRooms }, 409);
+        return json({ error: check.hardConflicts[0], conflicts: check.hardConflicts, warnings: check.warnings, suggestedFreeRooms: check.suggestedFreeRooms }, 409);
       }
+      softWarnings = check.warnings;
     }
     const beforeSlot = slotToSnapshot(slot);
     slot.day = nextDay;
@@ -2662,26 +2838,30 @@ export async function handleApiRequest(request: Request, env: WorkerEnv): Promis
         ? b.timeRange.trim()
         : getTimeRangeForShift(nextPeriod, nextShift);
     slot.centerClass = nextClass;
+    slot.groupLabel = nextGroupLabel;
+    slot.studentIds = nextStudentIds && nextStudentIds.length > 0 ? nextStudentIds : undefined;
     slot.subject = nextSubject;
     slot.teacherId = teacher.id;
     slot.teacherName = teacher.shortName;
     slot.room = nextRoomName;
     slot.roomId = nextRoomId;
+    slot.campus = nextCampus;
     slot.slotType = nextSlotType;
     slot.status = nextStatus;
     if (b.note !== undefined) slot.note = String(b.note || '').trim() || undefined;
     if (typeof b.weekLabel === 'string' && b.weekLabel.trim()) slot.weekLabel = b.weekLabel.trim();
+    const groupSuffix = slot.groupLabel ? ` · ${slot.groupLabel}` : '';
     recordTimetableChange(db, {
       action: nextStatus === 'OFF' ? 'CANCELLED' : 'UPDATED',
       updatedBy: user!.email,
       slotId: slot.id,
-      summary: `Cập nhật ca ${slot.centerClass} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)} tại ${slot.room}`,
+      summary: `Cập nhật ca ${slot.centerClass}${groupSuffix} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)} tại ${slot.room} (${nextCampus})`,
       before: beforeSlot,
       after: slotToSnapshot(slot),
       affectedTeacherIds: [beforeSlot.teacherId, slot.teacherId],
     });
     await saveState(env, db);
-    return json({ slot });
+    return json({ slot, warnings: softWarnings });
   }
 
   if (method === 'DELETE' && slotIdMatch) {

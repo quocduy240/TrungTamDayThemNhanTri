@@ -15,8 +15,16 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import type { PrintTemplate, SiteConfig, Teacher, TeacherGroup } from '../types';
+import type { CampusCode, PrintTemplate, SiteConfig, Teacher, TeacherGroup } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
+import {
+  ALL_GRADES,
+  CAMPUS_OPTIONS,
+  formatTeachableGrades,
+  MULTI_SUBJECT_SUPPORT_LABEL,
+  resolveCampusFromRoom,
+  teacherSupportsMultiSubject,
+} from '../lib/timetableEngine';
 import { ensureSystemPrintTemplates, type WorkspaceIndexes } from '../lib/workspaceIntegrity';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import { CustomPrintTemplateStudio } from './CustomPrintTemplateStudio';
@@ -71,12 +79,32 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
     shortName: '',
     teacherGroup: 'SUBJECT' as TeacherGroup,
     subjects: 'Toán',
+    teachableGrades: [] as number[],
+    campuses: ['CS1', 'CS2'] as CampusCode[],
+    multiSubjectSupport: false,
     degree: 'Cử nhân Sư phạm',
     experienceYears: 4,
     phone: '',
     email: '',
     roomDefault: workspace.rooms[0]?.name || 'Phòng 1',
   });
+
+  const toggleNewTeacherGrade = (grade: number) => {
+    setNewTeacher((prev) => ({
+      ...prev,
+      teachableGrades: prev.teachableGrades.includes(grade)
+        ? prev.teachableGrades.filter((g) => g !== grade)
+        : [...prev.teachableGrades, grade].sort((a, b) => a - b),
+    }));
+  };
+
+  const toggleNewTeacherCampus = (campus: CampusCode) => {
+    setNewTeacher((prev) => {
+      const exists = prev.campuses.includes(campus);
+      const next = exists ? prev.campuses.filter((c) => c !== campus) : [...prev.campuses, campus];
+      return { ...prev, campuses: next.length > 0 ? next : [campus] };
+    });
+  };
 
   const mergedTemplates = useMemo(
     () => ensureSystemPrintTemplates(workspace.printTemplates?.length ? workspace.printTemplates : localTemplates),
@@ -132,16 +160,20 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
     setErrorMsg(null);
     setFeedback(null);
     try {
+      const parsedSubjects = newTeacher.subjects
+        .split(/[,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       const res = await apiRequest<{ teacher: Teacher }>('/api/v1/teachers', {
         method: 'POST',
         body: JSON.stringify({
           name: newTeacher.name,
           shortName: newTeacher.shortName || newTeacher.name.split(' ').slice(-2).join(' '),
           teacherGroup: newTeacher.teacherGroup,
-          subjects: newTeacher.subjects
-            .split(/[,;]+/)
-            .map((s) => s.trim())
-            .filter(Boolean),
+          subjects: parsedSubjects,
+          teachableGrades: newTeacher.teachableGrades,
+          campuses: newTeacher.campuses,
+          multiSubjectSupport: newTeacher.multiSubjectSupport,
           degree: newTeacher.degree,
           experienceYears: Number(newTeacher.experienceYears) || 0,
           phone: newTeacher.phone,
@@ -155,6 +187,9 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
         shortName: '',
         teacherGroup: 'SUBJECT',
         subjects: 'Toán',
+        teachableGrades: [],
+        campuses: ['CS1', 'CS2'],
+        multiSubjectSupport: false,
         degree: 'Cử nhân Sư phạm',
         experienceYears: 4,
         phone: '',
@@ -301,22 +336,31 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
               <label className="block text-xs font-semibold text-slate-700 mb-1">Phân nhóm GV</label>
               <select
                 value={newTeacher.teacherGroup}
-                onChange={(e) =>
-                  setNewTeacher({ ...newTeacher, teacherGroup: e.target.value as TeacherGroup })
-                }
+                onChange={(e) => {
+                  const nextGroup = e.target.value as TeacherGroup;
+                  setNewTeacher((prev) => ({
+                    ...prev,
+                    teacherGroup: nextGroup,
+                    multiSubjectSupport: nextGroup === 'TUTOR_REVIEW' ? true : prev.multiSubjectSupport,
+                    subjects:
+                      nextGroup === 'TUTOR_REVIEW' && prev.subjects.trim() === 'Toán'
+                        ? `${MULTI_SUBJECT_SUPPORT_LABEL}, Trả bài, Soạn bài`
+                        : prev.subjects,
+                  }));
+                }}
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
               >
-                <option value="SUBJECT">Giáo viên Bộ môn</option>
-                <option value="TUTOR_REVIEW">Giáo viên Trả bài / Kèm sát</option>
+                <option value="SUBJECT">Giáo viên Bộ môn (dạy nhiều khối / nhiều phòng)</option>
+                <option value="TUTOR_REVIEW">Giáo viên Trả bài &amp; Kiểm tra (Hỗ trợ nhiều môn)</option>
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Môn giảng dạy</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Môn chuyên môn</label>
               <input
                 type="text"
                 value={newTeacher.subjects}
                 onChange={(e) => setNewTeacher({ ...newTeacher, subjects: e.target.value })}
-                placeholder="Toán, Lý..."
+                placeholder="Toán, Lý hoặc Hỗ trợ nhiều môn..."
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
@@ -350,7 +394,7 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Phòng mặc định</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Phòng ưu tiên (có thể xếp mọi phòng)</label>
               <select
                 value={newTeacher.roomDefault}
                 onChange={(e) => setNewTeacher({ ...newTeacher, roomDefault: e.target.value })}
@@ -358,10 +402,118 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
               >
                 {workspace.rooms.map((r) => (
                   <option key={r.id} value={r.name}>
-                    {r.name}
+                    {r.name} ({resolveCampusFromRoom(r)})
                   </option>
                 ))}
               </select>
+            </div>
+          </div>
+
+          {/* Multi-grade, Multi-campus (CS1/CS2) & Multi-subject Tutor Specialization */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-2 border-t border-slate-100">
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-800">Khối lớp có thể giảng dạy</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setNewTeacher((p) => ({ ...p, teachableGrades: [] }))}
+                    className={`px-2 py-0.5 rounded text-[11px] font-semibold border cursor-pointer ${
+                      newTeacher.teachableGrades.length === 0
+                        ? 'bg-[#1E3A8A] text-white border-[#1E3A8A]'
+                        : 'bg-white text-slate-600 border-slate-300'
+                    }`}
+                  >
+                    Mọi khối
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewTeacher((p) => ({ ...p, teachableGrades: [6, 7, 8, 9] }))}
+                    className="px-2 py-0.5 rounded text-[11px] font-semibold bg-white text-slate-600 border border-slate-300 hover:border-[#1E3A8A] cursor-pointer"
+                  >
+                    Cấp 2
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewTeacher((p) => ({ ...p, teachableGrades: [10, 11, 12] }))}
+                    className="px-2 py-0.5 rounded text-[11px] font-semibold bg-white text-slate-600 border border-slate-300 hover:border-[#1E3A8A] cursor-pointer"
+                  >
+                    Cấp 3
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {ALL_GRADES.map((g) => {
+                  const selected = newTeacher.teachableGrades.includes(g);
+                  return (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => toggleNewTeacherGrade(g)}
+                      className={`min-w-[36px] px-2 py-1 rounded-lg text-xs font-bold tabular-nums border transition cursor-pointer ${
+                        selected
+                          ? 'bg-[#1E3A8A] text-white border-[#1E3A8A]'
+                          : 'bg-white text-slate-700 border-slate-300 hover:border-[#1E3A8A]'
+                      }`}
+                    >
+                      K{g}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Hiện chọn: <strong className="text-slate-700">{formatTeachableGrades(newTeacher.teachableGrades)}</strong>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <div className="text-xs font-bold text-slate-800">Cơ sở nhận lớp (CS1 / CS2)</div>
+              <div className="space-y-1.5">
+                {CAMPUS_OPTIONS.map((c) => {
+                  const checked = newTeacher.campuses.includes(c.code);
+                  return (
+                    <label
+                      key={c.code}
+                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        checked
+                          ? 'bg-white border-[#1E3A8A] text-[#1E3A8A]'
+                          : 'bg-white/60 border-slate-200 text-slate-600'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleNewTeacherCampus(c.code)}
+                        className="rounded border-slate-300 text-[#1E3A8A]"
+                      />
+                      <span>{c.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Giáo viên được phép xếp linh hoạt mọi phòng trống tại các cơ sở đã chọn.
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <div className="text-xs font-bold text-slate-800">Chuyên môn Hỗ trợ Trả bài &amp; Kiểm tra</div>
+              <label className="flex items-start gap-2.5 p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={newTeacher.multiSubjectSupport}
+                  onChange={(e) =>
+                    setNewTeacher((prev) => ({ ...prev, multiSubjectSupport: e.target.checked }))
+                  }
+                  className="mt-0.5 rounded border-emerald-400 text-emerald-700"
+                />
+                <span className="text-xs text-slate-800 leading-snug">
+                  <strong className="text-emerald-900">{MULTI_SUBJECT_SUPPORT_LABEL}</strong>
+                  <span className="block text-[11px] text-slate-600 mt-0.5">
+                    Dùng cho GV Trả bài / Kèm nhóm nhỏ: kiểm tra soạn bài, dò bài nhiều môn, bổ túc kiến thức.
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
           <div className="flex justify-end gap-2">
@@ -510,8 +662,14 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
                       <td className="py-3 px-3">
                         <div className="text-xs font-bold text-[#1E3A8A]">
                           {t.teacherGroup === 'TUTOR_REVIEW' ? 'GV Trả bài & Kèm sát' : 'GV Bộ môn'}
+                          {teacherSupportsMultiSubject(t) && (
+                            <span className="ml-1.5 font-semibold text-emerald-700">· Hỗ trợ nhiều môn</span>
+                          )}
                         </div>
                         <div className="text-xs text-slate-600 mt-0.5">{(t.subjects || []).join(', ')}</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                          {formatTeachableGrades(t.teachableGrades)} · Cơ sở: {(t.campuses && t.campuses.length > 0 ? t.campuses : ['CS1', 'CS2']).join(' & ')}
+                        </div>
                       </td>
                       <td className="py-3 px-3">
                         <div className="text-xs text-slate-800 tabular-nums flex items-center gap-1.5">
@@ -527,12 +685,12 @@ export const TeachersDirectoryModule: React.FC<TeachersDirectoryModuleProps> = (
                       </td>
                       <td className="py-3 px-3">
                         <div className="text-xs font-semibold text-slate-800">
-                          {t.roomDefault} · <span className="tabular-nums text-[#1E3A8A]">{slots.length} ca/tuần</span>
+                          Ưu tiên {t.roomDefault} · <span className="tabular-nums text-[#1E3A8A]">{slots.length} ca/tuần</span>
                         </div>
-                        <div className="text-xs text-slate-500 mt-0.5 truncate max-w-[200px]">
+                        <div className="text-xs text-slate-500 mt-0.5 truncate max-w-[220px]">
                           {assignedClasses.length > 0
                             ? `${assignedClasses.join(', ')} (${assignedStudents.length} HS)`
-                            : 'Chưa xếp lớp trên TKB'}
+                            : `Rảnh ${(t.availability || []).length}/36 ca tuần`}
                         </div>
                       </td>
                       <td className="py-3 px-3">

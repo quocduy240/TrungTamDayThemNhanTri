@@ -48,6 +48,11 @@ import {
   evaluateMoveOrSwap,
   evaluateSlotConstraints,
   getTimeRangeForShift,
+  MULTI_SUBJECT_SUPPORT_LABEL,
+  normalizeGroupLabel,
+  resolveCampusFromRoom,
+  sanitizeCampuses,
+  sanitizeTeachableGrades,
   studentBelongsToClass,
   suggestAvailableSubstitutes,
 } from './src/lib/timetableEngine.ts';
@@ -1523,12 +1528,35 @@ app.post('/api/v1/teachers', requireAuth(['MANAGER']), (req: AuthedRequest, res)
       ? b.subjects.split(/[,;]/)
       : [];
   const subjects = subjectsRaw.map((s: unknown) => String(s || '').trim()).filter(Boolean);
+  const multiSubjectSupport =
+    typeof b.multiSubjectSupport === 'boolean'
+      ? b.multiSubjectSupport
+      : group === 'TUTOR_REVIEW' ||
+        subjects.some((s: string) => s.toLowerCase().includes('nhiều môn'));
+  const normalizedSubjects =
+    subjects.length > 0
+      ? subjects
+      : group === 'TUTOR_REVIEW'
+        ? [MULTI_SUBJECT_SUPPORT_LABEL, 'Trả bài', 'Soạn bài']
+        : ['Toán'];
+  if (
+    multiSubjectSupport &&
+    !normalizedSubjects.some((s: string) => s.toLowerCase() === MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase())
+  ) {
+    normalizedSubjects.unshift(MULTI_SUBJECT_SUPPORT_LABEL);
+  }
+  const teachableGrades = sanitizeTeachableGrades(b.teachableGrades);
+  const campuses = sanitizeCampuses(b.campuses);
+
   const teacher: Teacher = {
     id: `t-${Date.now()}`,
     name: name.slice(0, 120),
     shortName: (shortName || name).slice(0, 60),
     teacherGroup: group,
-    subjects: subjects.length > 0 ? subjects : group === 'TUTOR_REVIEW' ? ['Trả bài', 'Soạn bài'] : ['Toán'],
+    subjects: normalizedSubjects,
+    teachableGrades,
+    campuses,
+    multiSubjectSupport,
     degree: String(b.degree || 'Cử nhân Sư phạm').trim().slice(0, 140),
     experienceYears: Math.max(0, Math.min(60, Number(b.experienceYears) || 3)),
     phone: normalizePhoneVN(String(b.phone || '')) || String(b.phone || '').trim().slice(0, 40),
@@ -1543,7 +1571,9 @@ app.post('/api/v1/teachers', requireAuth(['MANAGER']), (req: AuthedRequest, res)
     actorRole: req.user!.role,
     action: 'TEACHER_CREATE',
     targetLabel: `${teacher.name} (${group === 'TUTOR_REVIEW' ? 'GV Trả bài' : 'GV Bộ môn'})`,
-    detail: `Môn: ${teacher.subjects.join(', ')}${teacher.email ? ` · Gmail: ${teacher.email}` : ''}.`,
+    detail: `Môn: ${teacher.subjects.join(', ')} · Cơ sở: ${campuses.join(', ')}${
+      teachableGrades.length > 0 ? ` · Khối: ${teachableGrades.join(',')}` : ' · Mọi khối'
+    }${teacher.email ? ` · Gmail: ${teacher.email}` : ''}.`,
   });
   saveDb(db);
   res.status(201).json({ teacher });
@@ -1566,6 +1596,26 @@ app.patch('/api/v1/teachers/:id', requireAuth(['MANAGER']), (req: AuthedRequest,
     const arr = Array.isArray(b.subjects) ? b.subjects : String(b.subjects).split(/[,;]/);
     const cleaned = arr.map((s: unknown) => String(s || '').trim()).filter(Boolean);
     if (cleaned.length > 0) teacher.subjects = cleaned;
+  }
+  if (b.teachableGrades !== undefined) {
+    teacher.teachableGrades = sanitizeTeachableGrades(b.teachableGrades);
+  }
+  if (b.campuses !== undefined) {
+    teacher.campuses = sanitizeCampuses(b.campuses);
+  }
+  if (typeof b.multiSubjectSupport === 'boolean') {
+    teacher.multiSubjectSupport = b.multiSubjectSupport;
+    const hasLabel = (teacher.subjects || []).some(
+      (s) => s.toLowerCase() === MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase(),
+    );
+    if (b.multiSubjectSupport && !hasLabel) {
+      teacher.subjects = [MULTI_SUBJECT_SUPPORT_LABEL, ...(teacher.subjects || [])];
+    } else if (!b.multiSubjectSupport && hasLabel) {
+      const remaining = (teacher.subjects || []).filter(
+        (s) => s.toLowerCase() !== MULTI_SUBJECT_SUPPORT_LABEL.toLowerCase(),
+      );
+      teacher.subjects = remaining.length > 0 ? remaining : teacher.subjects;
+    }
   }
   if (typeof b.degree === 'string' && b.degree.trim()) teacher.degree = b.degree.trim().slice(0, 140);
   if (b.experienceYears !== undefined) teacher.experienceYears = Math.max(0, Math.min(60, Number(b.experienceYears) || 0));
@@ -2093,7 +2143,9 @@ app.delete('/api/v1/teacher-leaves/:id', requireAuth(['MANAGER', 'TEACHER']), (r
 
 app.post('/api/v1/timetable/check-conflict', requireAuth(['MANAGER']), (req, res) => {
   const db = loadDb();
-  const { id, day, period, shift, teacherId, room, roomId, centerClass, subject, slotType } = req.body || {};
+  const { id, day, period, shift, teacherId, room, roomId, centerClass, groupLabel, studentIds, subject, slotType } =
+    req.body || {};
+  const matchedRoom = db.rooms.find((r) => (roomId && r.id === roomId) || r.name === room);
   const result = evaluateSlotConstraints(
     {
       id,
@@ -2102,8 +2154,11 @@ app.post('/api/v1/timetable/check-conflict', requireAuth(['MANAGER']), (req, res
       shift,
       teacherId,
       room: String(room || ''),
-      roomId,
+      roomId: matchedRoom?.id || roomId,
+      campus: resolveCampusFromRoom(matchedRoom, String(room || '')),
       centerClass: String(centerClass || ''),
+      groupLabel: normalizeGroupLabel(groupLabel) || undefined,
+      studentIds: Array.isArray(studentIds) ? studentIds.map(String).filter(Boolean) : undefined,
       subject: String(subject || ''),
       slotType: slotType || 'MAIN',
     },
@@ -2119,6 +2174,7 @@ app.post('/api/v1/timetable/check-conflict', requireAuth(['MANAGER']), (req, res
   res.json({
     hasConflict: !result.valid,
     conflicts: result.hardConflicts,
+    warnings: result.warnings,
     suggestedFreeRooms: result.suggestedFreeRooms,
     roomOnlyConflict: result.roomOnlyConflict,
   });
@@ -2126,10 +2182,30 @@ app.post('/api/v1/timetable/check-conflict', requireAuth(['MANAGER']), (req, res
 
 app.post('/api/v1/timetable', requireAuth(['MANAGER']), (req, res) => {
   const db = loadDb();
-  const { day, period, shift, centerClass, subject, teacherId, room, roomId, slotType, note, timeRange } = req.body || {};
+  const {
+    day,
+    period,
+    shift,
+    centerClass,
+    groupLabel,
+    studentIds,
+    subject,
+    teacherId,
+    room,
+    roomId,
+    slotType,
+    note,
+    timeRange,
+  } = req.body || {};
   const teacher = db.teachers.find((t) => t.id === teacherId);
   const matchedRoom = db.rooms.find((r) => (roomId && r.id === roomId) || r.name === room);
   const roomName = matchedRoom?.name || String(room || '').trim();
+  const cleanedGroup = normalizeGroupLabel(groupLabel).slice(0, 60) || undefined;
+  const cleanedStudentIds: string[] | undefined = Array.isArray(studentIds)
+    ? Array.from(new Set<string>(studentIds.map((x: unknown) => String(x)).filter(Boolean))).slice(0, 60)
+    : undefined;
+  const campus = resolveCampusFromRoom(matchedRoom, roomName);
+
   if (!teacher || !day || !period || !shift || !centerClass || !subject || !roomName) {
     res.status(400).json({ error: 'Vui lòng điền đầy đủ thông tin ca học.' });
     return;
@@ -2141,10 +2217,13 @@ app.post('/api/v1/timetable', requireAuth(['MANAGER']), (req, res) => {
       period,
       shift,
       centerClass: String(centerClass),
+      groupLabel: cleanedGroup,
+      studentIds: cleanedStudentIds,
       subject: String(subject),
       teacherId: teacher.id,
       room: roomName,
       roomId: matchedRoom?.id,
+      campus,
       slotType: slotType || 'MAIN',
     },
     {
@@ -2159,6 +2238,7 @@ app.post('/api/v1/timetable', requireAuth(['MANAGER']), (req, res) => {
     res.status(409).json({
       error: check.hardConflicts[0],
       conflicts: check.hardConflicts,
+      warnings: check.warnings,
       suggestedFreeRooms: check.suggestedFreeRooms,
     });
     return;
@@ -2172,36 +2252,140 @@ app.post('/api/v1/timetable', requireAuth(['MANAGER']), (req, res) => {
     timeRange: typeof timeRange === 'string' && timeRange.trim() ? timeRange.trim() : getTimeRangeForShift(period, shift),
     day,
     centerClass: String(centerClass).trim(),
+    groupLabel: cleanedGroup,
+    studentIds: cleanedStudentIds && cleanedStudentIds.length > 0 ? cleanedStudentIds : undefined,
     subject: String(subject).trim(),
     teacherId: teacher.id,
     teacherName: teacher.shortName,
     roomId: matchedRoom?.id,
     room: roomName,
+    campus,
     slotType: slotType || 'MAIN',
     status: 'SCHEDULED',
     note: note ? String(note).trim() : undefined,
   };
 
   db.timetable.push(newSlot);
+  const groupSuffix = newSlot.groupLabel ? ` · ${newSlot.groupLabel}` : '';
   recordTimetableChange(db, {
     action: 'ADDED',
     updatedBy: (req as AuthedRequest).user?.email || 'Admin',
     slotId: newSlot.id,
-    summary: `Thêm ca mới ${newSlot.centerClass} (${newSlot.subject}) · ${formatShiftLabel(newSlot.day, newSlot.period, newSlot.shift)} tại ${newSlot.room}`,
+    summary: `Thêm ca mới ${newSlot.centerClass}${groupSuffix} (${newSlot.subject}) · ${formatShiftLabel(newSlot.day, newSlot.period, newSlot.shift)} tại ${newSlot.room} (${campus})`,
     after: slotToSnapshot(newSlot),
     affectedTeacherIds: [newSlot.teacherId],
   });
   db.notifications.unshift({
     id: `ntf-${Date.now()}`,
     createdAt: nowFormatted(),
-    title: `Cập nhật Thời khóa biểu ${newSlot.centerClass}`,
-    body: `Đã thêm ca ${newSlot.subject} (${newSlot.teacherName}) vào ${newSlot.day} · ${newSlot.timeRange} tại ${newSlot.room}.`,
+    title: `Cập nhật Thời khóa biểu ${newSlot.centerClass}${groupSuffix}`,
+    body: `Đã thêm ca ${newSlot.subject} (${newSlot.teacherName}) vào ${newSlot.day} · ${newSlot.timeRange} tại ${newSlot.room} (${campus}).`,
     channel: 'APP',
     targetRole: 'ALL',
     read: false,
   });
   saveDb(db);
-  res.status(201).json({ slot: newSlot });
+  res.status(201).json({ slot: newSlot, warnings: check.warnings });
+});
+
+app.post('/api/v1/timetable/batch-groups', requireAuth(['MANAGER']), (req: AuthedRequest, res) => {
+  const db = loadDb();
+  const rawSlots = Array.isArray(req.body?.slots) ? req.body.slots : [];
+  if (rawSlots.length === 0 || rawSlots.length > 10) {
+    res.status(400).json({ error: 'Vui lòng gửi từ 1 đến 10 nhóm nhỏ hợp lệ để xếp song song.' });
+    return;
+  }
+
+  const staged: TimetableSlot[] = [];
+  const allWarnings: string[] = [];
+  const workingTimetable = [...db.timetable];
+
+  for (let i = 0; i < rawSlots.length; i++) {
+    const item = rawSlots[i] || {};
+    const teacher = db.teachers.find((t) => t.id === item.teacherId);
+    const matchedRoom = db.rooms.find((r) => (item.roomId && r.id === item.roomId) || r.name === item.room);
+    const roomName = matchedRoom?.name || String(item.room || '').trim();
+    const cleanedGroup = normalizeGroupLabel(item.groupLabel || `Nhóm ${i + 1}`).slice(0, 60);
+    const campus = resolveCampusFromRoom(matchedRoom, roomName);
+    const day = item.day as DayOfWeek;
+    const period = item.period as SessionPeriod;
+    const shift = item.shift as ShiftCode;
+    const centerClass = String(item.centerClass || '').trim();
+    const subject = String(item.subject || 'Trả bài & Kiểm tra soạn bài (Hỗ trợ nhiều môn)').trim();
+    const slotType = (item.slotType === 'PHU_DAO' ? 'PHU_DAO' : 'TRA_BAI') as TimetableSlot['slotType'];
+
+    if (!teacher || !day || !period || !shift || !centerClass || !roomName) {
+      res.status(400).json({ error: `Nhóm #${i + 1} thiếu thông tin bắt buộc (giáo viên, phòng, ca học hoặc lớp).` });
+      return;
+    }
+
+    const check = evaluateSlotConstraints(
+      {
+        day,
+        period,
+        shift,
+        centerClass,
+        groupLabel: cleanedGroup,
+        subject,
+        teacherId: teacher.id,
+        room: roomName,
+        roomId: matchedRoom?.id,
+        campus,
+        slotType,
+      },
+      {
+        timetable: workingTimetable,
+        teachers: db.teachers,
+        rooms: db.rooms,
+        students: db.students,
+        leaves: db.teacherLeaves,
+      },
+    );
+    if (!check.valid) {
+      res.status(409).json({
+        error: `[${cleanedGroup}] ${check.hardConflicts[0]}`,
+        conflicts: check.hardConflicts,
+      });
+      return;
+    }
+
+    const newSlot: TimetableSlot = {
+      id: `tt-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+      weekLabel: 'Tuần 13 (23/11 – 28/11)',
+      period,
+      shift,
+      timeRange: getTimeRangeForShift(period, shift),
+      day,
+      centerClass,
+      groupLabel: cleanedGroup,
+      subject,
+      teacherId: teacher.id,
+      teacherName: teacher.shortName,
+      roomId: matchedRoom?.id,
+      room: roomName,
+      campus,
+      slotType,
+      status: 'SCHEDULED',
+      note: item.note ? String(item.note).trim().slice(0, 220) : `Chia ${rawSlots.length} nhóm nhỏ trả bài & kiểm tra song song`,
+    };
+    staged.push(newSlot);
+    workingTimetable.push(newSlot);
+    allWarnings.push(...check.warnings);
+  }
+
+  db.timetable.push(...staged);
+  const affectedTeacherIds = Array.from(new Set(staged.map((s) => s.teacherId)));
+  const first = staged[0];
+  recordTimetableChange(db, {
+    action: 'ADDED',
+    updatedBy: req.user?.email || 'Admin',
+    slotId: first.id,
+    summary: `Chia ${staged.length} nhóm nhỏ song song cho ${first.centerClass} · ${formatShiftLabel(first.day, first.period, first.shift)} (${staged.map((s) => `${s.groupLabel}: ${s.teacherName} - ${s.room}`).join('; ')})`,
+    after: slotToSnapshot(first),
+    affectedTeacherIds,
+  });
+  saveDb(db);
+  res.status(201).json({ slots: staged, count: staged.length, warnings: allWarnings });
 });
 
 app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
@@ -2221,14 +2405,26 @@ app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
     res.status(400).json({ error: 'Giáo viên không hợp lệ.' });
     return;
   }
-  const matchedRoom = db.rooms.find((r) => (b.roomId && r.id === b.roomId) || (b.room && r.name === b.room));
+  const matchedRoom = db.rooms.find(
+    (r) => (b.roomId && r.id === b.roomId) || (b.room && r.name === b.room) || (!b.room && slot.roomId && r.id === slot.roomId) || (!b.room && r.name === slot.room),
+  );
   const nextRoomName = matchedRoom?.name || String(b.room || slot.room);
   const nextRoomId = matchedRoom?.id || (b.room ? undefined : slot.roomId);
+  const nextCampus = resolveCampusFromRoom(matchedRoom, nextRoomName);
   const nextClass = String(b.centerClass || slot.centerClass).trim();
+  const nextGroupLabel =
+    b.groupLabel !== undefined ? normalizeGroupLabel(b.groupLabel).slice(0, 60) || undefined : slot.groupLabel;
+  const nextStudentIds: string[] | undefined =
+    b.studentIds !== undefined
+      ? Array.isArray(b.studentIds)
+        ? Array.from(new Set<string>(b.studentIds.map((x: unknown) => String(x)).filter(Boolean))).slice(0, 60)
+        : undefined
+      : slot.studentIds;
   const nextSubject = String(b.subject || slot.subject).trim();
   const nextSlotType = (b.slotType || slot.slotType) as TimetableSlot['slotType'];
   const nextStatus = (b.status || slot.status) as TimetableSlot['status'];
 
+  let softWarnings: string[] = [];
   if (nextStatus !== 'OFF') {
     const check = evaluateSlotConstraints(
       {
@@ -2237,10 +2433,13 @@ app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
         period: nextPeriod,
         shift: nextShift,
         centerClass: nextClass,
+        groupLabel: nextGroupLabel,
+        studentIds: nextStudentIds,
         subject: nextSubject,
         teacherId: teacher.id,
         room: nextRoomName,
         roomId: nextRoomId,
+        campus: nextCampus,
         slotType: nextSlotType,
         status: nextStatus,
       },
@@ -2257,10 +2456,12 @@ app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
       res.status(409).json({
         error: check.hardConflicts[0],
         conflicts: check.hardConflicts,
+        warnings: check.warnings,
         suggestedFreeRooms: check.suggestedFreeRooms,
       });
       return;
     }
+    softWarnings = check.warnings;
   }
 
   const beforeSnap = slotToSnapshot(slot);
@@ -2272,28 +2473,32 @@ app.patch('/api/v1/timetable/:id', requireAuth(['MANAGER']), (req, res) => {
       ? b.timeRange.trim()
       : getTimeRangeForShift(nextPeriod, nextShift);
   slot.centerClass = nextClass;
+  slot.groupLabel = nextGroupLabel;
+  slot.studentIds = nextStudentIds && nextStudentIds.length > 0 ? nextStudentIds : undefined;
   slot.subject = nextSubject;
   slot.teacherId = teacher.id;
   slot.teacherName = teacher.shortName;
   slot.room = nextRoomName;
   slot.roomId = nextRoomId;
+  slot.campus = nextCampus;
   slot.slotType = nextSlotType;
   slot.status = nextStatus;
   if (b.note !== undefined) slot.note = String(b.note || '').trim() || undefined;
   if (typeof b.weekLabel === 'string' && b.weekLabel.trim()) slot.weekLabel = b.weekLabel.trim();
 
+  const groupSuffix = slot.groupLabel ? ` · ${slot.groupLabel}` : '';
   recordTimetableChange(db, {
     action: nextStatus === 'OFF' ? 'CANCELLED' : 'UPDATED',
     updatedBy: (req as AuthedRequest).user?.email || 'Admin',
     slotId: slot.id,
-    summary: `Cập nhật ca ${slot.centerClass} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)} tại ${slot.room} (${slot.teacherName})`,
+    summary: `Cập nhật ca ${slot.centerClass}${groupSuffix} (${slot.subject}) · ${formatShiftLabel(slot.day, slot.period, slot.shift)} tại ${slot.room} (${nextCampus} · ${slot.teacherName})`,
     before: beforeSnap,
     after: slotToSnapshot(slot),
     affectedTeacherIds: [beforeSnap.teacherId, slot.teacherId],
   });
 
   saveDb(db);
-  res.json({ slot });
+  res.json({ slot, warnings: softWarnings });
 });
 
 app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) => {
@@ -2360,6 +2565,7 @@ app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) 
     sourceSlot.timeRange = getTimeRangeForShift(tgtCopy.period, tgtCopy.shift);
     sourceSlot.room = tgtCopy.room;
     sourceSlot.roomId = tgtCopy.roomId;
+    sourceSlot.campus = tgtCopy.campus || resolveCampusFromRoom(db.rooms.find((r) => r.id === tgtCopy.roomId || r.name === tgtCopy.room), tgtCopy.room);
 
     targetSlot.day = srcCopy.day;
     targetSlot.period = srcCopy.period;
@@ -2367,6 +2573,7 @@ app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) 
     targetSlot.timeRange = getTimeRangeForShift(srcCopy.period, srcCopy.shift);
     targetSlot.room = srcCopy.room;
     targetSlot.roomId = srcCopy.roomId;
+    targetSlot.campus = srcCopy.campus || resolveCampusFromRoom(db.rooms.find((r) => r.id === srcCopy.roomId || r.name === srcCopy.room), srcCopy.room);
 
     recordTimetableChange(db, {
       action: 'UPDATED',
@@ -2382,6 +2589,7 @@ app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) 
       mode: 'SWAP',
       updatedSlots: [sourceSlot, targetSlot],
       previousSnapshots,
+      warnings: evalRes.warnings,
     });
     return;
   }
@@ -2397,17 +2605,19 @@ app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) 
     if (matched) {
       sourceSlot.room = matched.name;
       sourceSlot.roomId = matched.id;
+      sourceSlot.campus = resolveCampusFromRoom(matched);
     }
   } else if (evalRes.mode === 'MOVE_AUTO_ROOM' && evalRes.autoRoom) {
     sourceSlot.room = evalRes.autoRoom.name;
     sourceSlot.roomId = evalRes.autoRoom.id;
+    sourceSlot.campus = resolveCampusFromRoom(evalRes.autoRoom);
   }
 
   recordTimetableChange(db, {
     action: 'UPDATED',
     updatedBy: (req as AuthedRequest).user?.email || 'Admin',
     slotId: sourceSlot.id,
-    summary: `Chuyển ca ${sourceSlot.centerClass} (${sourceSlot.subject}) từ ${formatShiftLabel(moveBefore.day, moveBefore.period, moveBefore.shift)} sang ${formatShiftLabel(sourceSlot.day, sourceSlot.period, sourceSlot.shift)} · ${sourceSlot.room}`,
+    summary: `Chuyển ca ${sourceSlot.centerClass}${sourceSlot.groupLabel ? ` · ${sourceSlot.groupLabel}` : ''} (${sourceSlot.subject}) từ ${formatShiftLabel(moveBefore.day, moveBefore.period, moveBefore.shift)} sang ${formatShiftLabel(sourceSlot.day, sourceSlot.period, sourceSlot.shift)} · ${sourceSlot.room}`,
     before: moveBefore,
     after: slotToSnapshot(sourceSlot),
     affectedTeacherIds: [sourceSlot.teacherId],
@@ -2419,6 +2629,7 @@ app.post('/api/v1/timetable/move-or-swap', requireAuth(['MANAGER']), (req, res) 
     updatedSlots: [sourceSlot],
     previousSnapshots,
     autoRoom: evalRes.autoRoom,
+    warnings: evalRes.warnings,
   });
 });
 

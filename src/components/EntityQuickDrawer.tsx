@@ -13,8 +13,16 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import type { EducationLevel, Student, Teacher, TeacherGroup } from '../types';
+import type { CampusCode, EducationLevel, Student, Teacher, TeacherGroup } from '../types';
 import { apiRequest, type WorkspacePayload } from '../lib/api';
+import {
+  ALL_GRADES,
+  CAMPUS_OPTIONS,
+  formatTeachableGrades,
+  MULTI_SUBJECT_SUPPORT_LABEL,
+  resolveCampusFromRoom,
+  teacherSupportsMultiSubject,
+} from '../lib/timetableEngine';
 import { normalizeLookupKey, type WorkspaceIndexes } from '../lib/workspaceIntegrity';
 import { InlineErrorAlert } from './ContextualReloginBanner';
 
@@ -113,6 +121,9 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
     shortName: '',
     teacherGroup: 'SUBJECT' as TeacherGroup,
     subjects: '',
+    teachableGrades: [] as number[],
+    campuses: ['CS1', 'CS2'] as CampusCode[],
+    multiSubjectSupport: false,
     degree: '',
     experienceYears: 3,
     phone: '',
@@ -151,6 +162,9 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
         shortName: teacher.shortName,
         teacherGroup: teacher.teacherGroup,
         subjects: (teacher.subjects || []).join(', '),
+        teachableGrades: Array.isArray(teacher.teachableGrades) ? [...teacher.teachableGrades] : [],
+        campuses: Array.isArray(teacher.campuses) && teacher.campuses.length > 0 ? [...teacher.campuses] : ['CS1', 'CS2'],
+        multiSubjectSupport: teacherSupportsMultiSubject(teacher),
         degree: teacher.degree || '',
         experienceYears: teacher.experienceYears || 0,
         phone: teacher.phone || '',
@@ -260,6 +274,9 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
             .split(/[,;]+/)
             .map((s) => s.trim())
             .filter(Boolean),
+          teachableGrades: teaForm.teachableGrades,
+          campuses: teaForm.campuses,
+          multiSubjectSupport: teaForm.multiSubjectSupport,
           degree: teaForm.degree,
           experienceYears: Number(teaForm.experienceYears) || 0,
           phone: teaForm.phone,
@@ -806,7 +823,7 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Phòng mặc định</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Phòng ưu tiên (có thể dạy nhiều phòng)</label>
                   <select
                     disabled={!canEdit}
                     value={teaForm.roomDefault}
@@ -815,7 +832,7 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
                   >
                     {workspace.rooms.map((r) => (
                       <option key={r.id} value={r.name}>
-                        {r.name} ({r.code})
+                        {r.name} ({resolveCampusFromRoom(r)})
                       </option>
                     ))}
                     {!workspace.rooms.some((r) => r.name === teaForm.roomDefault) && teaForm.roomDefault && (
@@ -834,6 +851,94 @@ export const EntityQuickDrawer: React.FC<EntityQuickDrawerProps> = ({
                     <option value="ACTIVE">Đang giảng dạy</option>
                     <option value="ON_LEAVE">Đang nghỉ phép</option>
                   </select>
+                </div>
+
+                {/* Multi-grade selector */}
+                <div className="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-800">
+                      Các khối lớp giảng dạy ({formatTeachableGrades(teaForm.teachableGrades)})
+                    </span>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => setTeaForm((p) => ({ ...p, teachableGrades: [] }))}
+                        className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
+                      >
+                        Dạy mọi khối
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ALL_GRADES.map((g) => {
+                      const active = teaForm.teachableGrades.includes(g);
+                      return (
+                        <button
+                          key={g}
+                          type="button"
+                          disabled={!canEdit}
+                          onClick={() =>
+                            setTeaForm((p) => ({
+                              ...p,
+                              teachableGrades: active
+                                ? p.teachableGrades.filter((x) => x !== g)
+                                : [...p.teachableGrades, g].sort((a, b) => a - b),
+                            }))
+                          }
+                          className={`min-w-[34px] px-2 py-1 rounded-lg text-xs font-bold tabular-nums border transition ${
+                            active
+                              ? 'bg-[#1E3A8A] text-white border-[#1E3A8A]'
+                              : 'bg-white text-slate-700 border-slate-300'
+                          }`}
+                        >
+                          K{g}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Campuses & Multi-subject Tutor */}
+                <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5">
+                    <div className="text-xs font-bold text-slate-800">Cơ sở giảng dạy</div>
+                    {CAMPUS_OPTIONS.map((c) => {
+                      const checked = teaForm.campuses.includes(c.code);
+                      return (
+                        <label key={c.code} className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            disabled={!canEdit}
+                            checked={checked}
+                            onChange={() =>
+                              setTeaForm((p) => {
+                                const next = checked ? p.campuses.filter((x) => x !== c.code) : [...p.campuses, c.code];
+                                return { ...p, campuses: next.length > 0 ? next : [c.code] };
+                              })
+                            }
+                          />
+                          <span>{c.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 space-y-1">
+                    <label className="flex items-start gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        disabled={!canEdit}
+                        checked={teaForm.multiSubjectSupport}
+                        onChange={(e) => setTeaForm((p) => ({ ...p, multiSubjectSupport: e.target.checked }))}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <strong className="text-emerald-900">{MULTI_SUBJECT_SUPPORT_LABEL}</strong>
+                        <span className="block text-[11px] text-slate-600 mt-0.5">
+                          Hỗ trợ trả bài, kiểm tra soạn bài, bổ túc nhiều môn cho nhóm nhỏ.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
                 </div>
               </div>
               <p className="text-[11px] text-slate-500">

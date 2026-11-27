@@ -143,6 +143,8 @@ export interface CoursePackage {
   imageUrl: string;
 }
 
+export type CampusCode = 'CS1' | 'CS2';
+
 export interface Room {
   id: string;
   code: string;
@@ -159,6 +161,12 @@ export interface Teacher {
   shortName: string;
   teacherGroup: TeacherGroup;
   subjects: string[];
+  /** Các khối lớp GV có thể giảng dạy (3..12). Rỗng/undefined = dạy linh hoạt mọi khối. */
+  teachableGrades?: number[];
+  /** Các cơ sở GV có thể nhận lớp (CS1, CS2). Mặc định hỗ trợ cả CS1 & CS2, dạy linh hoạt mọi phòng. */
+  campuses?: CampusCode[];
+  /** Tùy chọn chuyên môn "Hỗ trợ nhiều môn" cho GV Trả bài, kiểm tra soạn bài, bổ túc. */
+  multiSubjectSupport?: boolean;
   degree: string;
   experienceYears: number;
   phone: string;
@@ -199,10 +207,12 @@ export interface TimetableChangeSnapshot {
   shift: ShiftCode;
   timeRange: string;
   centerClass: string;
+  groupLabel?: string;
   subject: string;
   teacherId: string;
   teacherName: string;
   room: string;
+  campus?: CampusCode;
   status: TimetableSlot['status'];
   slotType: TimetableSlot['slotType'];
   note?: string;
@@ -377,11 +387,17 @@ export interface TimetableSlot {
   timeRange: string;
   day: DayOfWeek;
   centerClass: string;
+  /** Nhãn nhóm nhỏ khi tách 1 lớp ra nhiều nhóm tự học / trả bài song song (VD: "Nhóm 1", "Nhóm 2"). */
+  groupLabel?: string;
+  /** Danh sách ID học sinh cụ thể nếu chia nhóm cố định (tùy chọn). */
+  studentIds?: string[];
   subject: string;
   teacherId: string;
   teacherName: string;
   roomId?: string;
   room: string;
+  /** Cơ sở diễn ra ca học (CS1 / CS2), tự suy luận theo phòng học. */
+  campus?: CampusCode;
   slotType: 'MAIN' | 'TRA_BAI' | 'PHU_DAO' | 'BU_THE_DUC';
   status: 'SCHEDULED' | 'TEACHER_ABSENT' | 'SUBSTITUTED' | 'OFF';
   note?: string;

@@ -462,9 +462,11 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
                                           }`}
                                         >
                                           {sl.subject}
+                                          {sl.groupLabel ? ` (${sl.groupLabel})` : ''}
                                         </p>
                                         <span className="font-mono-num text-[10px] font-bold text-slate-700 bg-white/85 px-1.5 py-0.5 rounded border border-slate-200 shrink-0">
-                                          P.{sl.room}
+                                          {sl.room}
+                                          {sl.campus ? ` · ${sl.campus}` : ''}
                                         </span>
                                       </div>
                                       <p

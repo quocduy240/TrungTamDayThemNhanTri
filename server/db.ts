@@ -1,7 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import type { DatabaseState } from '../src/types.ts';
-import { ALL_SHIFT_KEYS } from '../src/lib/timetableEngine.ts';
+import {
+  ALL_SHIFT_KEYS,
+  resolveCampusFromRoom,
+  sanitizeCampuses,
+  sanitizeTeachableGrades,
+} from '../src/lib/timetableEngine.ts';
 import { buildDeterministicQrToken } from '../src/lib/smartCodeAndQr.ts';
 import { ensureSystemPrintTemplates, normalizeLookupKey } from '../src/lib/workspaceIntegrity.ts';
 import {
@@ -76,13 +81,35 @@ function normalizeDbState(parsed: DatabaseState): DatabaseState {
   if (!Array.isArray(parsed.timetableSpecialBlocks)) {
     parsed.timetableSpecialBlocks = [];
   }
-  parsed.teachers = (parsed.teachers || []).map((t) => ({
-    ...t,
-    teacherGroup: t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT'),
-    availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
-    scheduleAlertEnabled: typeof t.scheduleAlertEnabled === 'boolean' ? t.scheduleAlertEnabled : true,
-    scheduleAlertSound: typeof t.scheduleAlertSound === 'boolean' ? t.scheduleAlertSound : true,
-  }));
+  parsed.teachers = (parsed.teachers || []).map((t) => {
+    const teacherGroup =
+      t.teacherGroup || (t.subjects.some((s) => s.toLowerCase().includes('trả bài')) ? 'TUTOR_REVIEW' : 'SUBJECT');
+    const multiSubjectSupport =
+      typeof t.multiSubjectSupport === 'boolean'
+        ? t.multiSubjectSupport
+        : teacherGroup === 'TUTOR_REVIEW' ||
+          (t.subjects || []).some((s) => s.toLowerCase().includes('nhiều môn'));
+    return {
+      ...t,
+      teacherGroup,
+      teachableGrades: sanitizeTeachableGrades(t.teachableGrades),
+      campuses: sanitizeCampuses(t.campuses),
+      multiSubjectSupport,
+      availability: Array.isArray(t.availability) && t.availability.length > 0 ? t.availability : [...ALL_SHIFT_KEYS],
+      scheduleAlertEnabled: typeof t.scheduleAlertEnabled === 'boolean' ? t.scheduleAlertEnabled : true,
+      scheduleAlertSound: typeof t.scheduleAlertSound === 'boolean' ? t.scheduleAlertSound : true,
+    };
+  });
+  const roomById = new Map(parsed.rooms.map((r) => [r.id, r]));
+  const roomByName = new Map(parsed.rooms.map((r) => [normalizeLookupKey(r.name), r]));
+  parsed.timetable = (parsed.timetable || []).map((sl) => {
+    const matchedRoom = (sl.roomId && roomById.get(sl.roomId)) || roomByName.get(normalizeLookupKey(sl.room));
+    return {
+      ...sl,
+      campus: sl.campus || resolveCampusFromRoom(matchedRoom, sl.room),
+      groupLabel: sl.groupLabel ? sl.groupLabel.trim() : undefined,
+    };
+  });
   const teacherByKey = new Map<string, string>();
   parsed.teachers.forEach((t) => {
     teacherByKey.set(normalizeLookupKey(t.name), t.id);

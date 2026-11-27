@@ -186,6 +186,41 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
     });
   }, [entityType, singleForm.centerClass, singleForm.grade, existingCodesSet]);
 
+  // Compute smart preview codes & sibling notices for STUDENTS (MUST stay above early return!)
+  const studentCodePreviews = useMemo(() => {
+    if (entityType !== 'STUDENTS') return new Map<string, { code: string; siblingOf?: string }>();
+    const map = new Map<string, { code: string; siblingOf?: string }>();
+    const workingCodes = new Set(existingCodesSet);
+    const batchPhoneNames = new Map<string, string>();
+
+    previewRows.forEach((r) => {
+      if (!r._selected) return;
+      const requested = r.data.code?.trim().toUpperCase();
+      const code =
+        requested && !workingCodes.has(requested)
+          ? requested
+          : generateSmartStudentCode(r.data.centerClass || 'Lớp 7A1', workingCodes, {
+              fallbackGrade: Number(r.data.grade) || 7,
+            });
+      workingCodes.add(code);
+
+      const normPhone = normalizePhoneVN(r.data.parentPhone || '');
+      let siblingOf: string | undefined;
+      if (normPhone.length >= 8) {
+        const existingSib = existingPhoneMap.get(normPhone);
+        if (existingSib && existingSib.length > 0) {
+          siblingOf = existingSib[0];
+        } else if (batchPhoneNames.has(normPhone)) {
+          siblingOf = batchPhoneNames.get(normPhone);
+        } else {
+          batchPhoneNames.set(normPhone, r.data.fullName || 'Anh/chị trong danh sách');
+        }
+      }
+      map.set(r._id, { code, siblingOf });
+    });
+    return map;
+  }, [entityType, previewRows, existingCodesSet, existingPhoneMap]);
+
   if (!open) return null;
 
   function stopCamera() {
@@ -433,41 +468,6 @@ export const UniversalSmartImportModal: React.FC<UniversalSmartImportModalProps>
       { _id: `row-${Date.now()}`, _selected: true, data: makeEmptyRow(entityType, workspace) },
     ]);
   }
-
-  // Compute smart preview codes & sibling notices for STUDENTS
-  const studentCodePreviews = useMemo(() => {
-    if (entityType !== 'STUDENTS') return new Map<string, { code: string; siblingOf?: string }>();
-    const map = new Map<string, { code: string; siblingOf?: string }>();
-    const workingCodes = new Set(existingCodesSet);
-    const batchPhoneNames = new Map<string, string>();
-
-    previewRows.forEach((r) => {
-      if (!r._selected) return;
-      const requested = r.data.code?.trim().toUpperCase();
-      const code =
-        requested && !workingCodes.has(requested)
-          ? requested
-          : generateSmartStudentCode(r.data.centerClass || 'Lớp 7A1', workingCodes, {
-              fallbackGrade: Number(r.data.grade) || 7,
-            });
-      workingCodes.add(code);
-
-      const normPhone = normalizePhoneVN(r.data.parentPhone || '');
-      let siblingOf: string | undefined;
-      if (normPhone.length >= 8) {
-        const existingSib = existingPhoneMap.get(normPhone);
-        if (existingSib && existingSib.length > 0) {
-          siblingOf = existingSib[0];
-        } else if (batchPhoneNames.has(normPhone)) {
-          siblingOf = batchPhoneNames.get(normPhone);
-        } else {
-          batchPhoneNames.set(normPhone, r.data.fullName || 'Anh/chị trong danh sách');
-        }
-      }
-      map.set(r._id, { code, siblingOf });
-    });
-    return map;
-  }, [entityType, previewRows, existingCodesSet, existingPhoneMap]);
 
   const selectedRows = previewRows.filter((r) => r._selected);
 
