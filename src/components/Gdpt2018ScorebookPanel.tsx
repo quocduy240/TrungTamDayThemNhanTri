@@ -1,16 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Award,
-  BookOpen,
   Check,
   CheckCircle2,
-  FileSpreadsheet,
   GraduationCap,
-  Layers,
-  Printer,
   Save,
   Search,
-  Sparkles,
   UserCheck,
   Users,
   X,
@@ -21,7 +16,6 @@ import {
   buildBatchUpsertItemsForRow,
   buildEnrollmentConfigUpsertItem,
   buildStudentFullTranscript,
-  calculateFullYearSummary,
   calculateSemesterSummary,
   CURRENT_ACADEMIC_YEAR,
   extractStudentSubjectSemesterRow,
@@ -29,7 +23,6 @@ import {
   getGradeCurriculum,
   getStudentEnrollmentConfig,
   normalizeGdptGradeLevel,
-  SUBJECT_BY_CODE,
   SUBJECTS_23,
   validateThptElectiveSelection,
   type GdptBatchUpsertItem,
@@ -57,7 +50,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
   const [academicYear, setAcademicYear] = useState<string>(CURRENT_ACADEMIC_YEAR);
   const [semester, setSemester] = useState<1 | 2>(1);
 
-  // Determine available grades & center classes from students
   const allGrades: GdptGradeLevel[] = [6, 7, 8, 9, 10, 11, 12];
   const selectedStudent = useMemo(
     () => workspace.students.find((s) => s.id === selectedStudentId) || workspace.students[0] || null,
@@ -97,16 +89,14 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
   }, [workspace.students, selectedGrade]);
 
   const studentsInBulkScope = useMemo(() => {
-    const byGrade = workspace.students.filter((st) => {
+    return workspace.students.filter((st) => {
       const g = normalizeGdptGradeLevel(st.grade, st.centerClass);
       if (g !== selectedGrade) return false;
       if (selectedClassFilter !== 'ALL' && st.centerClass !== selectedClassFilter) return false;
       return true;
     });
-    return byGrade.length > 0 && selectedClassFilter === 'ALL' ? byGrade : byGrade;
   }, [workspace.students, selectedGrade, selectedClassFilter]);
 
-  // --- Draft state for Bulk Class/Subject Entry ---
   const [bulkDrafts, setBulkDrafts] = useState<Record<string, GdptSemesterInputRow>>({});
   const [savingBulk, setSavingBulk] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
@@ -126,7 +116,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
     setBulkDrafts(nextDrafts);
   }, [studentsInBulkScope, activeCurriculumItem, semester, workspace.scores, academicYear]);
 
-  // --- Draft state for Single Student All-Subjects Entry & THPT Electives ---
   const [singleDrafts, setSingleDrafts] = useState<Record<string, GdptSemesterInputRow>>({});
   const [electiveDraft, setElectiveDraft] = useState<string[]>([]);
   const [studyTopicDraft, setStudyTopicDraft] = useState<string[]>([]);
@@ -159,9 +148,9 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
     setSavingBulk(true);
     setNotice(null);
     try {
-      await apiRequest('/api/v1/scores/gdpt-batch', {
+      await apiRequest('/api/v1/scores/bulk-import', {
         method: 'POST',
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({ rows: items }),
       });
       await onRefresh();
       setNotice({ ok: true, text: successText });
@@ -345,7 +334,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
 
   return (
     <div className="bg-white border-2 border-blue-900/15 rounded-2xl p-5 shadow-sm space-y-5">
-      {/* Header Banner */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 border border-blue-200 text-[11px] font-bold text-blue-950 mb-1.5">
@@ -360,7 +348,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
           </p>
         </div>
 
-        {/* Sub-navigation Tabs */}
         <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
           <button
             type="button"
@@ -419,12 +406,8 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* TAB 1: BULK SCORE ENTRY BY GRADE / CLASS & SUBJECT                    */}
-      {/* ===================================================================== */}
       {subTab === 'BULK_CLASS' && (
         <div className="space-y-4">
-          {/* Filter Bar */}
           <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-slate-50 border border-slate-200 rounded-xl p-3.5">
             <div>
               <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1">
@@ -530,7 +513,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
             </div>
           </div>
 
-          {/* Subject Spec Metadata Bar */}
           {activeCurriculumItem && (
             <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-blue-50/70 border border-blue-200 text-xs">
               <div className="flex flex-wrap items-center gap-2">
@@ -597,7 +579,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
             </div>
           )}
 
-          {/* Bulk Spreadsheet Table */}
           {studentsInBulkScope.length === 0 ? (
             <div className="p-8 text-center bg-slate-50 border border-dashed border-slate-300 rounded-xl text-xs text-slate-600">
               Hiện chưa có học sinh nào thuộc <strong>Khối {selectedGrade}</strong> trong danh sách. Hãy chọn Khối lớp khác hoặc thêm học sinh ở tab Học sinh &amp; Điểm danh.
@@ -662,7 +643,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           {st.centerClass}
                         </td>
 
-                        {/* Cột ĐĐGtx 1..N */}
                         {Array.from({ length: activeCurriculumItem.requiredTxCount }).map(
                           (_, txIdx) => (
                             <td key={txIdx} className="py-1.5 px-1.5 text-center">
@@ -696,7 +676,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           ),
                         )}
 
-                        {/* Cột Cụm chuyên đề học tập (THPT Khối 10-12) */}
                         {selectedGrade >= 10 && (
                           <td className="py-1.5 px-1.5 text-center bg-amber-50/20">
                             {!row.hasStudyTopic ? (
@@ -726,7 +705,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           </td>
                         )}
 
-                        {/* Giữa kì (HS2) */}
                         <td className="py-1.5 px-1.5 text-center">
                           {activeCurriculumItem.evaluationType === 'SCORE' ? (
                             <input
@@ -752,7 +730,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* Cuối kì (HS3) */}
                         <td className="py-1.5 px-1.5 text-center">
                           {activeCurriculumItem.evaluationType === 'SCORE' ? (
                             <input
@@ -778,7 +755,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* Kết quả ĐTBmhk / Đạt-Chưa đạt */}
                         <td className="py-2 px-3 text-center font-mono-num bg-slate-50">
                           {activeCurriculumItem.evaluationType === 'SCORE' ? (
                             summary.avgScore !== null ? (
@@ -816,7 +792,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* Nhận xét của giáo viên */}
                         <td className="py-1.5 px-2">
                           <input
                             type="text"
@@ -838,9 +813,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* TAB 2: INDIVIDUAL STUDENT ALL-SUBJECTS & THPT ELECTIVE CONFIGURATION  */}
-      {/* ===================================================================== */}
       {subTab === 'SINGLE_STUDENT' && selectedStudent && (
         <div className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-200 rounded-xl p-3.5">
@@ -909,7 +881,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
             </button>
           </div>
 
-          {/* THPT (Grades 10-12) Elective 4/9 + Study Topics 3 Selector */}
           {selectedStudentGrade >= 10 && (
             <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -981,7 +952,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                   })}
               </div>
 
-              {/* Study topics (Chuyên đề học tập) */}
               <div className="pt-2 border-t border-amber-200/80">
                 <p className="text-[11px] font-bold text-amber-950 mb-1.5">
                   Đánh dấu các môn có học Cụm chuyên đề học tập (Tối đa 3 môn · thêm 1 cột ĐĐGchuyên_đề hệ số 1):
@@ -1023,7 +993,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
             </div>
           )}
 
-          {/* Individual Student All-Subjects Table */}
           <div className="overflow-x-auto border border-slate-200 rounded-xl">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-100 text-slate-700 border-b border-slate-200">
@@ -1084,7 +1053,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           {item.periodsPerYear}t · <strong>{item.requiredTxCount} TX</strong>
                         </td>
 
-                        {/* 4 TX columns (disable cells > requiredTxCount) */}
                         {[0, 1, 2, 3].map((txIdx) => {
                           const enabled = txIdx < item.requiredTxCount;
                           if (!enabled) {
@@ -1172,7 +1140,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           </td>
                         )}
 
-                        {/* GK */}
                         <td className="py-1.5 px-1.5 text-center">
                           {item.evaluationType === 'SCORE' ? (
                             <input
@@ -1202,7 +1169,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* CK */}
                         <td className="py-1.5 px-1.5 text-center">
                           {item.evaluationType === 'SCORE' ? (
                             <input
@@ -1232,7 +1198,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* Summary */}
                         <td className="py-2 px-3 text-center font-mono-num font-extrabold bg-slate-50">
                           {item.evaluationType === 'SCORE' ? (
                             summary.avgScore !== null ? (
@@ -1255,7 +1220,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
                           )}
                         </td>
 
-                        {/* Comment */}
                         <td className="py-1.5 px-2">
                           <input
                             type="text"
@@ -1276,9 +1240,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* TAB 3: FULL YEAR TRANSCRIPT & 23-SUBJECT MASTER MATRIX                */}
-      {/* ===================================================================== */}
       {subTab === 'TRANSCRIPT_CURRICULUM' && (
         <div className="space-y-6">
           {selectedStudent && selectedStudentTranscript && (
@@ -1289,7 +1250,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
             />
           )}
 
-          {/* Master 23 Subjects Reference Matrix */}
           <div className="border border-slate-200 rounded-xl overflow-hidden">
             <div className="bg-slate-100 px-4 py-3 border-b border-slate-200 flex items-center justify-between">
               <div>
@@ -1345,10 +1305,6 @@ export const Gdpt2018BackendScorebookPanel: React.FC<Gdpt2018BackendScorebookPan
     </div>
   );
 };
-
-// ============================================================================
-// REUSABLE TRANSCRIPT CARD (USED IN BOTH BACKEND & FRONTEND PORTAL)
-// ============================================================================
 
 export const GdptStudentTranscriptCard: React.FC<{
   transcript: ReturnType<typeof buildStudentFullTranscript>;
@@ -1538,10 +1494,6 @@ export const GdptStudentTranscriptCard: React.FC<{
   );
 };
 
-// ============================================================================
-// FRONTEND STUDENT & PARENT GDPT 2018 TRANSCRIPT LOOKUP PORTAL
-// ============================================================================
-
 export const Gdpt2018FrontendTranscriptLookup: React.FC<{
   workspaceStudents?: Student[];
   workspaceScores?: ScoreRecord[];
@@ -1584,21 +1536,64 @@ export const Gdpt2018FrontendTranscriptLookup: React.FC<{
     setSearching(true);
     setLookupError('');
     try {
-      const res = await apiRequest<{ students: Student[]; scores: ScoreRecord[] }>(
-        `/api/v1/scores/gdpt-lookup?q=${encodeURIComponent(q)}`,
+      // 1. Check in already-loaded workspaceStudents first
+      const qLower = q.toLowerCase();
+      const localMatches = workspaceStudents.filter(
+        (s) =>
+          s.code.toLowerCase().includes(qLower) ||
+          s.fullName.toLowerCase().includes(qLower) ||
+          s.parentPhone.includes(q),
       );
-      setFetchedStudents(res.students || []);
-      setFetchedScores(res.scores || []);
-      if (res.students?.length > 0) {
-        setSelectedStudentId(res.students[0].id);
-      } else {
-        setLookupError(
-          'Không tìm thấy hồ sơ học sinh khớp với Mã HS / Họ tên / SĐT Phụ huynh đã nhập.',
-        );
+      if (localMatches.length > 0 && workspaceScores.length >= 0) {
+        setFetchedStudents(localMatches);
+        setFetchedScores(workspaceScores);
+        setSelectedStudentId(localMatches[0].id);
+        return;
+      }
+
+      // 2. Lookup via /api/v1/qr/:token (supports code, phone, fullName via findStudentByQrTokenOrCode)
+      const qrRes = await apiRequest<{
+        publicPreview?: { code: string };
+        staffBundle?: { student: Student; scores: ScoreRecord[] };
+      }>(`/api/v1/qr/${encodeURIComponent(q)}`);
+
+      if (qrRes.staffBundle?.student) {
+        setFetchedStudents([qrRes.staffBundle.student]);
+        setFetchedScores(qrRes.staffBundle.scores || []);
+        setSelectedStudentId(qrRes.staffBundle.student.id);
+        return;
+      }
+
+      const resolvedCode = qrRes.publicPreview?.code || q.toUpperCase();
+      const loginRes = await fetch('/api/v1/auth/student-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'STUDENT_CODE', studentCode: resolvedCode }),
+      });
+      if (!loginRes.ok) {
+        throw new Error('Không tìm thấy học sinh khớp với Mã HS / Họ tên / SĐT Phụ huynh đã nhập.');
+      }
+      const loginData = (await loginRes.json()) as { token?: string; student?: Student };
+      if (!loginData.token) {
+        throw new Error('Hồ sơ học sinh yêu cầu xác thực 4 số cuối SĐT Phụ huynh ở cổng Vào lớp.');
+      }
+      const wsRes = await fetch('/api/v1/workspace', {
+        headers: { Authorization: `Bearer ${loginData.token}` },
+      });
+      if (!wsRes.ok) {
+        throw new Error('Không thể tải bảng điểm học bạ.');
+      }
+      const wsData = (await wsRes.json()) as WorkspacePayload;
+      setFetchedStudents(wsData.students || (loginData.student ? [loginData.student] : []));
+      setFetchedScores(wsData.scores || []);
+      if (wsData.students?.length > 0) {
+        setSelectedStudentId(wsData.students[0].id);
       }
     } catch (err: unknown) {
       setLookupError(
-        err instanceof Error ? err.message : 'Không thể tra cứu bảng điểm lúc này.',
+        err instanceof Error
+          ? err.message
+          : 'Không tìm thấy hồ sơ học sinh khớp với Mã HS / Họ tên / SĐT Phụ huynh đã nhập.',
       );
     } finally {
       setSearching(false);
