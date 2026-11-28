@@ -19,7 +19,9 @@ import {
 } from '../lib/api';
 import { compressImageFile } from '../lib/imageOptimizer';
 import { buildReportCardDocumentHtml } from '../lib/brandedDocumentExporter';
+import { SUBJECTS_23 } from '../lib/gdpt2018ScoreEngine';
 import { BrandedPrintModal } from './BrandedPrintModal';
+import { Gdpt2018BackendScorebookPanel } from './Gdpt2018ScorebookPanel';
 import { UniversalSmartImportModal } from './UniversalSmartImportModal';
 import type { QuickDrawerTarget } from './EntityQuickDrawer';
 
@@ -96,7 +98,9 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
 
   const studentScores = useMemo(() => {
     if (!selectedStudent) return workspace.scores;
-    return workspace.scores.filter((s) => s.studentId === selectedStudent.id);
+    return workspace.scores.filter(
+      (s) => s.studentId === selectedStudent.id && !s.id.startsWith('gdpt-cfg::'),
+    );
   }, [workspace.scores, selectedStudent]);
 
   const zaloReport = useMemo(() => {
@@ -201,10 +205,10 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-950">
-            Học bạ Online Nhân Trí &amp; AI Phân tích bài kiểm tra
+            Học bạ Online Nhân Trí (GDPT 2018 · Khối 6–12) &amp; AI Phân tích bài kiểm tra
           </h1>
           <p className="text-sm text-slate-600 mt-1">
-            Học sinh tự nhập điểm hoặc chụp bài kiểm tra tải lên để AI đọc điểm, phân tích lỗi sai và xuất báo cáo Zalo phụ huynh.
+            Quản lý 23 môn học theo Thông tư 22/2021/TT-BGDĐT, nhập điểm hàng loạt theo Lớp &amp; Môn hoặc từng Học sinh, kết hợp AI đọc bài kiểm tra và xuất báo cáo Zalo phụ huynh.
           </p>
         </div>
 
@@ -263,6 +267,17 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
           </button>
         </div>
       )}
+
+      {/* GDPT 2018 (Circular 22/2021) Full Gradebook & Subject Matrix */}
+      <Gdpt2018BackendScorebookPanel
+        workspace={workspace}
+        selectedStudentId={selectedStudentId}
+        onSelectStudentId={(id) => {
+          setSelectedStudentId(id);
+          setManualForm((prev) => ({ ...prev, studentId: id }));
+        }}
+        onRefresh={onRefresh}
+      />
 
       {/* Top Row: AI Test Paper Scanner + Manual Score Entry */}
       <div className="grid lg:grid-cols-12 gap-6">
@@ -393,19 +408,21 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
         >
           <div className="flex items-center gap-2">
             <FilePlus2 className="w-4 h-4 text-blue-900" />
-            <h2 className="text-base font-bold text-slate-950">Tự nhập điểm kiểm tra mới</h2>
+            <h2 className="text-base font-bold text-slate-950">Nhập nhanh 1 cột điểm kiểm tra lẻ</h2>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Môn học</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Môn học (23 môn GDPT 2018)</label>
               <select
                 value={manualForm.subject}
                 onChange={(e) => setManualForm({ ...manualForm, subject: e.target.value })}
                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
               >
-                {['Toán', 'Ngữ Văn', 'Tiếng Anh', 'Vật Lý', 'Hóa học', 'KHTN', 'Tin học'].map((s) => (
-                  <option key={s}>{s}</option>
+                {SUBJECTS_23.filter((s) => s.evaluationType === 'SCORE').map((s) => (
+                  <option key={s.code} value={s.name}>
+                    {s.name} ({s.code})
+                  </option>
                 ))}
               </select>
             </div>
@@ -421,20 +438,20 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
                 }
                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
               >
-                <option value="15_PHUT">Kiểm tra 15 phút</option>
-                <option value="1_TIET">Kiểm tra 1 tiết</option>
-                <option value="GIUA_KY">Thi Giữa kỳ</option>
-                <option value="CUOI_KY">Thi Cuối kỳ</option>
+                <option value="15_PHUT">Đánh giá thường xuyên (TX · HS1)</option>
+                <option value="1_TIET">Chuyên đề học tập (CĐ · HS1)</option>
+                <option value="GIUA_KY">Thi Giữa kì (GK · HS2)</option>
+                <option value="CUOI_KY">Thi Cuối kì (CK · HS3)</option>
               </select>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Điểm (0 – 10)</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Điểm (0.0 – 10.0)</label>
               <input
                 type="number"
-                step="0.25"
+                step="0.1"
                 min={0}
                 max={10}
                 required
@@ -481,10 +498,10 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
           <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-base font-bold text-slate-950">
-                Bảng điểm Học bạ Online · {selectedStudent?.fullName}
+                Nhật ký Cột điểm Chi tiết · {selectedStudent?.fullName}
               </h2>
               <span className="text-xs text-slate-500 font-mono-num">
-                {studentScores.length} cột điểm
+                {studentScores.length} cột điểm đã lưu
               </span>
             </div>
             {selectedStudent && (
@@ -498,9 +515,9 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
               </button>
             )}
           </div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-96">
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-500 border-b border-slate-200">
+              <thead className="bg-slate-50 text-xs text-slate-500 border-b border-slate-200 sticky top-0">
                 <tr>
                   <th className="py-2.5 px-4 font-medium">Ngày</th>
                   <th className="py-2.5 px-4 font-medium">Môn học</th>
@@ -513,7 +530,7 @@ export const ScoresAiModule: React.FC<ScoresAiModuleProps> = ({
                 {studentScores.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-8 text-center text-xs text-slate-500">
-                      Chưa có cột điểm nào cho học sinh này. Hãy quét bài kiểm tra hoặc nhập điểm mới ở trên.
+                      Chưa có cột điểm nào cho học sinh này. Hãy nhập điểm ở bảng GDPT 2018 phía trên.
                     </td>
                   </tr>
                 ) : (
