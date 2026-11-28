@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Award,
   Calendar,
   Clock,
   LayoutGrid,
@@ -28,6 +29,7 @@ import {
   specialBlockMatchesClass,
 } from '../lib/timetableSpecialBlocks';
 import { BrandedPrintModal } from './BrandedPrintModal';
+import { Gdpt2018FrontendTranscriptLookup } from './Gdpt2018ScorebookPanel';
 
 interface ParentTimetableViewProps {
   slots: TimetableSlot[];
@@ -68,7 +70,7 @@ const SHIFT_ROWS: Array<{
 function getTodayVnDayOfWeek(): DayOfWeek | null {
   try {
     const vnStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' });
-    const dayNum = new Date(vnStr).getDay(); // 0=Sun, 1=Mon...6=Sat
+    const dayNum = new Date(vnStr).getDay();
     const map: Record<number, DayOfWeek> = {
       1: 'T2',
       2: 'T3',
@@ -165,7 +167,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
   emptyMessage = 'Chưa có lịch học được phân công cho hồ sơ này.',
   defaultView = 'MATRIX',
 }) => {
-  const [viewMode, setViewMode] = useState<'MATRIX' | 'LIST'>(defaultView);
+  const [viewMode, setViewMode] = useState<'MATRIX' | 'LIST' | 'GDPT_SCORES'>(defaultView);
   const [selectedSlot, setSelectedSlot] = useState<TimetableSlot | null>(null);
   const [printOpen, setPrintOpen] = useState(false);
 
@@ -195,13 +197,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
     });
   }, [printOpen, student, title, slots, siteConfig]);
 
-  // Only show shift rows that either have at least 1 slot OR are standard core rows if total slots > 0
-  const visibleRows = useMemo(() => {
-    const activePeriodShifts = new Set(slots.map((s) => `${s.period}:${s.shift}`));
-    if (activePeriodShifts.size === 0) return SHIFT_ROWS;
-    // Always display all 6 rows for a complete visual school timetable matrix
-    return SHIFT_ROWS;
-  }, [slots]);
+  const visibleRows = useMemo(() => SHIFT_ROWS, []);
 
   const sortedListSlots = useMemo(() => {
     const dayOrder: Record<DayOfWeek, number> = { T2: 1, T3: 2, T4: 3, T5: 4, T6: 5, T7: 6 };
@@ -221,7 +217,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
-      {/* Header + 2-Mode Toggle + Branded Print */}
+      {/* Header + 3-Mode Toggle + Branded Print */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -239,7 +235,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
           <div
             className="inline-flex bg-slate-100 p-1 rounded-lg border border-slate-200"
             role="tablist"
-            aria-label="Chế độ xem thời khóa biểu"
+            aria-label="Chế độ xem thời khóa biểu và bảng điểm"
           >
             <button
               type="button"
@@ -269,6 +265,20 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
               <List className="w-3.5 h-3.5" />
               <span>Danh sách</span>
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === 'GDPT_SCORES'}
+              onClick={() => setViewMode('GDPT_SCORES')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                viewMode === 'GDPT_SCORES'
+                  ? 'bg-emerald-700 text-white shadow-xs'
+                  : 'text-emerald-900 hover:bg-emerald-50'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>Bảng điểm GDPT 2018 (Lớp 6–12)</span>
+            </button>
           </div>
 
           <button
@@ -297,7 +307,9 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
         </div>
       )}
 
-      {slots.length === 0 && activeSpecialBlocks.length === 0 ? (
+      {viewMode === 'GDPT_SCORES' ? (
+        <Gdpt2018FrontendTranscriptLookup workspaceStudents={student ? [student] : []} />
+      ) : slots.length === 0 && activeSpecialBlocks.length === 0 ? (
         <div className="py-10 text-center text-sm text-slate-500 border border-dashed border-slate-200 rounded-xl">
           {emptyMessage}
         </div>
@@ -547,7 +559,7 @@ export const ParentTimetableView: React.FC<ParentTimetableViewProps> = ({
           )}
         </div>
       ) : (
-        /* Classic Chronological List View (Preserved as 2nd mode) */
+        /* Classic Chronological List View */
         <div className="space-y-3">
           {activeSpecialBlocks.length > 0 && (
             <div className="grid sm:grid-cols-2 gap-3">
