@@ -259,7 +259,8 @@ export function bulkUpsertStudents(
   let familiesLinked = 0;
 
   const existingCodes = new Set(db.students.map((s) => s.code.toUpperCase()));
-  const defaultRoom = db.rooms[0]?.name || 'Phòng 1';
+  const defaultRoomObj = db.rooms[0];
+  const defaultRoom = defaultRoomObj?.name || 'Phòng 1';
 
   for (const row of rows.slice(0, 150)) {
     const fullName = String(row.fullName || '').trim();
@@ -294,6 +295,11 @@ export function bulkUpsertStudents(
           ? ['Toán', 'Tiếng Anh', 'Tiếng Việt']
           : ['Toán', 'Tiếng Anh', 'Ngữ Văn'];
 
+    const matchedTeacher =
+      matchCanonicalTeacher(String(row.homeroomTeacher || ''), db.teachers) || db.teachers[0];
+    const matchedRoom =
+      matchCanonicalRoom(String(row.room || ''), db.rooms) || defaultRoomObj;
+
     const existing = db.students.find(
       (s) =>
         (requestedCode && s.code.toUpperCase() === requestedCode) ||
@@ -320,8 +326,18 @@ export function bulkUpsertStudents(
       if (parentEmails.length > 0) {
         existing.parentEmails = Array.from(new Set([...(existing.parentEmails || []), ...parentEmails]));
       }
-      if (row.homeroomTeacher) existing.homeroomTeacher = String(row.homeroomTeacher).trim();
-      if (row.room) existing.room = String(row.room).trim();
+      if (matchedTeacher) {
+        existing.homeroomTeacherId = matchedTeacher.id;
+        existing.homeroomTeacher = matchedTeacher.shortName || matchedTeacher.name;
+      } else if (row.homeroomTeacher) {
+        existing.homeroomTeacher = String(row.homeroomTeacher).trim();
+      }
+      if (matchedRoom) {
+        existing.roomId = matchedRoom.id;
+        existing.room = matchedRoom.name;
+      } else if (row.room) {
+        existing.room = String(row.room).trim();
+      }
       if (row.hasBoarding !== undefined && String(row.hasBoarding).trim() !== '') {
         existing.hasBoarding = parseBoolVn(row.hasBoarding);
       }
@@ -350,10 +366,14 @@ export function bulkUpsertStudents(
         enrolledClasses: [centerClass],
         schoolClass: String(row.schoolClass || '').trim() || `${grade}A`,
         school: String(row.school || '').trim() || 'THCS Lý Thường Kiệt',
+        homeroomTeacherId: matchedTeacher?.id,
         homeroomTeacher:
+          matchedTeacher?.shortName ||
+          matchedTeacher?.name ||
           String(row.homeroomTeacher || '').trim() ||
-          (level === 'CAP_1' ? 'Cô Tâm' : level === 'CAP_2' ? 'Cô Nghi' : 'Cô Mẫn'),
-        room: String(row.room || '').trim() || defaultRoom,
+          'Chưa phân công',
+        roomId: matchedRoom?.id,
+        room: matchedRoom?.name || String(row.room || '').trim() || defaultRoom,
         parentName: String(row.parentName || '').trim() || `PH em ${fullName.split(' ').slice(-1)[0]}`,
         parentPhone: normPhone,
         parentZalo: normPhone,
@@ -409,7 +429,7 @@ export function bulkUpsertStudents(
 }
 
 // ============================================================
-// 3. BULK IMPORT SCORES
+// 3. BULK IMPORT SCORES (SUPPORTS BOTH EXCEL/AI ROWS & GDPT 2018 BATCH)
 // ============================================================
 
 export function bulkImportScores(
@@ -426,7 +446,46 @@ export function bulkImportScores(
   const unmatchedNames: string[] = [];
   const today = todayIsoLocal();
 
-  for (const row of rows.slice(0, 150)) {
+  for (const row of rows.slice(0, 1200)) {
+    const explicitId = typeof row.id === 'string' ? row.id.trim() : '';
+    const isGdptRow = explicitId.startsWith('gdpt::') || explicitId.startsWith('gdpt-cfg::');
+
+    if (isGdptRow) {
+      if (row.delete === true) {
+        db.scores = db.scores.filter((s) => s.id !== explicitId);
+        continue;
+      }
+      const studentId = String(row.studentId || '').trim();
+      const student = db.students.find((s) => s.id === studentId);
+      if (!student) continue;
+
+      const numericScore = Math.max(0, Math.min(10, Number(row.score) || 0));
+      const record: ScoreRecord = {
+        id: explicitId,
+        studentId: student.id,
+        studentName: student.fullName,
+        centerClass: student.centerClass,
+        subject: String(row.subject || 'Toán').trim(),
+        examType: normalizeExamType(row.examType),
+        score: Math.round(numericScore * 10) / 10,
+        maxScore: 10,
+        date: String(row.date || '').trim() || today,
+        school: student.school,
+        source: actorRole === 'STUDENT' || actorRole === 'PARENT' ? 'SELF_ENTRY' : 'TEACHER',
+        verified: actorRole !== 'STUDENT' && actorRole !== 'PARENT',
+        aiSummary: String(row.aiSummary || '').trim() || undefined,
+        strengths: Array.isArray(row.strengths) ? row.strengths.map(String) : undefined,
+      };
+      const existingIdx = db.scores.findIndex((s) => s.id === explicitId);
+      if (existingIdx >= 0) {
+        db.scores[existingIdx] = record;
+      } else {
+        db.scores.unshift(record);
+      }
+      scoresAdded.push(record);
+      continue;
+    }
+
     const code = String(row.studentCode || '').trim().toUpperCase();
     const studentName = String(row.studentName || '').trim();
     const centerClass = String(row.centerClass || '').trim();
@@ -675,17 +734,21 @@ export function findStudentByQrTokenOrCode(db: DatabaseState, tokenOrCode: strin
   const key = String(tokenOrCode || '').trim();
   if (!key) return undefined;
   const upper = key.toUpperCase();
+  const normPhone = normalizePhoneVN(key);
+  const normName = normalizeVn(key);
   return db.students.find(
     (s) =>
       (s.qrToken && s.qrToken === key) ||
       s.code.trim().toUpperCase() === upper ||
-      (s.parentLinkCode && s.parentLinkCode.trim().toUpperCase() === upper),
+      (s.parentLinkCode && s.parentLinkCode.trim().toUpperCase() === upper) ||
+      (normPhone.length >= 8 && normalizePhoneVN(s.parentPhone) === normPhone) ||
+      (normName.length >= 3 && normalizeVn(s.fullName).includes(normName)),
   );
 }
 
 export function buildUnlockedQrStudentData(db: DatabaseState, student: Student) {
   const slots = db.timetable.filter((sl) => studentBelongsToClass(student, sl.centerClass));
-  const scores = db.scores.filter((sc) => sc.studentId === student.id).slice(0, 12);
+  const scores = db.scores.filter((sc) => sc.studentId === student.id);
   const tuition = db.tuition.filter((t) => t.studentId === student.id).slice(0, 6);
   const attendance = db.attendance.filter((a) => a.studentId === student.id).slice(0, 12);
   const notifications = db.notifications
