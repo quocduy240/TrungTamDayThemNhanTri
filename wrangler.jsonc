@@ -19,5 +19,20 @@
       "database_name": "nhantri-db",
       "database_id": "7e2a837a-de4b-41d2-8b36-c54dd7772159"
     }
-  ]
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "NHANTRI_KV",
+      "id": "15512e8c44d7495d8b6fa4e71637288b"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "nhantri-media"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  }
 }
