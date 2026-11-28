@@ -443,11 +443,17 @@ export function cascadeSyncTeacherUpdate(
   }
 
   let updatedStudents = 0;
+  const teacherClassKeys = new Set(
+    (teacher.assignedClasses || []).map((c) => normalizeLookupKey(c)),
+  );
   for (const st of db.students) {
     const matchesById = st.homeroomTeacherId === teacher.id;
     const matchesByOldName =
       !st.homeroomTeacherId && prevKeys.has(normalizeLookupKey(st.homeroomTeacher));
-    if (matchesById || matchesByOldName) {
+    const matchesUnassigned =
+      (!st.homeroomTeacherId || !db.teachers.some((t) => t.id === st.homeroomTeacherId)) &&
+      (teacherClassKeys.has(normalizeLookupKey(st.centerClass)) || db.teachers.length === 1);
+    if (matchesById || matchesByOldName || matchesUnassigned) {
       if (st.homeroomTeacherId !== teacher.id || st.homeroomTeacher !== displayName) {
         st.homeroomTeacherId = teacher.id;
         st.homeroomTeacher = displayName;
@@ -515,33 +521,65 @@ export function cascadeSyncStudentUpdate(
   db: DatabaseState,
   student: Student,
 ): { updatedScores: number; updatedAttendance: number; updatedTuition: number } {
-  // Resolve canonical homeroomTeacherId and roomId if missing
+  // Resolve canonical homeroomTeacherId and roomId dynamically without legacy mockdata fallbacks
+  const findFallbackTeacher = () =>
+    db.teachers.find((item) =>
+      (item.assignedClasses || []).some(
+        (c) => normalizeLookupKey(c) === normalizeLookupKey(student.centerClass),
+      ),
+    ) || db.teachers[0];
+
   if (!student.homeroomTeacherId && student.homeroomTeacher) {
     const key = normalizeLookupKey(student.homeroomTeacher);
-    const t = db.teachers.find(
-      (item) => normalizeLookupKey(item.shortName) === key || normalizeLookupKey(item.name) === key,
-    );
+    const t =
+      db.teachers.find(
+        (item) => normalizeLookupKey(item.shortName) === key || normalizeLookupKey(item.name) === key,
+      ) || findFallbackTeacher();
     if (t) {
       student.homeroomTeacherId = t.id;
       student.homeroomTeacher = t.shortName || t.name;
+    } else {
+      student.homeroomTeacher = 'Chưa phân công';
     }
   } else if (student.homeroomTeacherId) {
-    const t = db.teachers.find((item) => item.id === student.homeroomTeacherId);
-    if (t) student.homeroomTeacher = t.shortName || t.name;
+    const t =
+      db.teachers.find((item) => item.id === student.homeroomTeacherId) || findFallbackTeacher();
+    if (t) {
+      student.homeroomTeacherId = t.id;
+      student.homeroomTeacher = t.shortName || t.name;
+    } else {
+      student.homeroomTeacherId = undefined;
+      student.homeroomTeacher = 'Chưa phân công';
+    }
+  } else {
+    const t = findFallbackTeacher();
+    if (t) {
+      student.homeroomTeacherId = t.id;
+      student.homeroomTeacher = t.shortName || t.name;
+    } else {
+      student.homeroomTeacher = 'Chưa phân công';
+    }
   }
 
   if (!student.roomId && student.room) {
     const key = normalizeLookupKey(student.room);
-    const r = db.rooms.find(
-      (item) => normalizeLookupKey(item.name) === key || normalizeLookupKey(item.code) === key,
-    );
+    const r =
+      db.rooms.find(
+        (item) => normalizeLookupKey(item.name) === key || normalizeLookupKey(item.code) === key,
+      ) || db.rooms[0];
     if (r) {
       student.roomId = r.id;
       student.room = r.name;
     }
   } else if (student.roomId) {
-    const r = db.rooms.find((item) => item.id === student.roomId);
-    if (r) student.room = r.name;
+    const r = db.rooms.find((item) => item.id === student.roomId) || db.rooms[0];
+    if (r) {
+      student.roomId = r.id;
+      student.room = r.name;
+    }
+  } else if (db.rooms.length > 0) {
+    student.roomId = db.rooms[0].id;
+    student.room = db.rooms[0].name;
   }
 
   // Ensure enrolledClasses includes centerClass
@@ -646,7 +684,10 @@ export function auditDatabaseHealth(db: DatabaseState): DataHealthReport {
       });
     }
 
-    if (!st.homeroomTeacherId || !st.roomId) {
+    const missingTeacherFk =
+      db.teachers.length > 0 && (!st.homeroomTeacherId || !teacherIds.has(st.homeroomTeacherId));
+    const missingRoomFk = db.rooms.length > 0 && (!st.roomId || !roomIds.has(st.roomId));
+    if (missingTeacherFk || missingRoomFk) {
       issues.push({
         id: `issue-stu-fk-${st.id}`,
         severity: 'LOW',
@@ -948,4 +989,3 @@ export function purgeRosterWithIntegrity(
     reportAfter: auditDatabaseHealth(db),
   };
 }
-
